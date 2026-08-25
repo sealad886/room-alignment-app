@@ -1,0 +1,113 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Room Alignment local API",
+    "version": "1.0.0",
+    "description": "Normative local-only contract. All editorial times are signed integer microseconds."
+  },
+  "servers": [{"url": "/api/v1"}],
+  "paths": {
+    "/system": {"get": {"operationId": "getSystem", "responses": {"200": {"description": "Capabilities"}}}},
+    "/session": {"get": {"operationId": "getSession", "responses": {"200": {"description": "Authenticated local session"}}}},
+    "/grants": {
+      "get": {"operationId": "listGrants", "responses": {"200": {"description": "Directory grants"}}},
+      "post": {"operationId": "createGrant", "responses": {"201": {"description": "Directory grant"}}}
+    },
+    "/grants/{grantId}/revoke": {"post": {"operationId": "revokeGrant", "responses": {"200": {"description": "Revoked grant"}}}},
+    "/libraries": {
+      "get": {"operationId": "listLibraries", "responses": {"200": {"description": "Libraries"}}},
+      "post": {"operationId": "createLibrary", "responses": {"201": {"description": "Library"}}}
+    },
+    "/libraries/{libraryId}/scans": {"post": {"operationId": "startScan", "responses": {"202": {"description": "Scan"}}}},
+    "/scans/{scanId}": {"get": {"operationId": "getScan", "responses": {"200": {"description": "Scan"}}}},
+    "/scans/{scanId}/cancel": {"post": {"operationId": "cancelScan", "responses": {"200": {"description": "Scan"}}}},
+    "/libraries/{libraryId}/media": {"get": {"operationId": "listMedia", "responses": {"200": {"description": "Stable media page"}}}},
+    "/media/{mediaId}": {"get": {"operationId": "getMedia", "responses": {"200": {"description": "Media asset"}}}},
+    "/media/{mediaId}/provenance/resolutions": {
+      "get": {"operationId": "listProvenanceResolutions", "responses": {"200": {"description": "Resolution ledger"}}},
+      "post": {"operationId": "resolveProvenance", "responses": {"201": {"description": "Resolution"}}}
+    },
+    "/projects": {
+      "get": {"operationId": "listProjects", "responses": {"200": {"description": "Projects"}}},
+      "post": {"operationId": "createProject", "responses": {"201": {"description": "Project"}}}
+    },
+    "/projects/{projectId}": {"get": {"operationId": "getProject", "responses": {"200": {"description": "Project"}}}},
+    "/projects/{projectId}/commands": {
+      "post": {
+        "operationId": "applyProjectCommand",
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ProjectCommand"}}}},
+        "responses": {"200": {"description": "Command result", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CommandResult"}}}}}
+      }
+    },
+    "/projects/{projectId}/program": {"get": {"operationId": "getCompiledProgram", "responses": {"200": {"description": "Compiled program"}}}},
+    "/projects/{projectId}/program-at": {"get": {"operationId": "getProgramAt", "responses": {"200": {"description": "Canonical program selection at outputUs"}}}},
+    "/projects/{projectId}/suggestions": {"get": {"operationId": "listSuggestions", "responses": {"200": {"description": "Suggestions"}}}},
+    "/projects/{projectId}/render-plans": {"post": {"operationId": "createRenderPlan", "responses": {"201": {"description": "Immutable render plan"}}}},
+    "/render-plans/{planId}": {"get": {"operationId": "getRenderPlan", "responses": {"200": {"description": "Render plan"}}}},
+    "/render-plans/{planId}/review": {"post": {"operationId": "attestReview", "responses": {"201": {"description": "Review attestation"}}}},
+    "/render-plans/{planId}/render": {"post": {"operationId": "startRender", "responses": {"202": {"description": "Render job and artifact"}}}},
+    "/jobs/{jobId}": {"get": {"operationId": "getJob", "responses": {"200": {"description": "Durable job"}}}},
+    "/jobs/{jobId}/cancel": {"post": {"operationId": "cancelJob", "responses": {"200": {"description": "Job"}}}},
+    "/jobs/event-token": {"post": {"operationId": "createEventToken", "responses": {"201": {"description": "Short-lived SSE token"}}}},
+    "/events": {"get": {"operationId": "streamEvents", "responses": {"200": {"description": "text/event-stream; see contracts/events.md"}}}},
+    "/artifacts/{artifactId}": {"get": {"operationId": "getArtifact", "responses": {"200": {"description": "Artifact state"}}}},
+    "/artifacts/{artifactId}/manifest": {"get": {"operationId": "getManifest", "responses": {"200": {"description": "Completed manifest"}}}}
+  },
+  "components": {
+    "schemas": {
+      "ProjectCommand": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["commandId", "expectedRevision", "commandType", "payload"],
+        "properties": {
+          "commandId": {"type": "string", "minLength": 1},
+          "expectedRevision": {"type": "integer", "minimum": 1},
+          "commandType": {
+            "type": "string",
+            "enum": [
+              "UpdateProjectMetadata", "AddLogicalSource", "RenameLogicalSource", "MergeLogicalSources",
+              "SplitLogicalSource", "ArchiveLogicalSource", "AssignClip", "SetReferenceSource",
+              "SetSyncTransform", "InitializeProgram", "AddVideoBlock", "SplitVideoBlock",
+              "MoveVideoBoundary", "DeleteVideoBlock", "AssignVideoSource", "PinVideoClip", "CutToSource",
+              "AddAudioBlock", "SplitAudioBlock", "MoveAudioBoundary", "DeleteAudioBlock", "SetAudioMode",
+              "SetAnchoringMode", "ReconcileBoundary", "ArchiveProject", "AcceptAlignmentSuggestion",
+              "RejectAlignmentSuggestion"
+            ]
+          },
+          "payload": {"type": "object"}
+        }
+      },
+      "CommandResult": {
+        "type": "object",
+        "required": ["commandId", "projectId", "previousRevision", "appliedRevision", "project", "issues", "reviewState", "eventCursor"],
+        "properties": {
+          "commandId": {"type": "string"},
+          "projectId": {"type": "string"},
+          "previousRevision": {"type": "integer"},
+          "appliedRevision": {"type": "integer"},
+          "project": {"type": "object"},
+          "issues": {"type": "array", "items": {"type": "object"}},
+          "reviewState": {"type": "string"},
+          "eventCursor": {"type": "integer"}
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["code", "message", "requestId", "retryable"],
+            "properties": {
+              "code": {"type": "string"},
+              "message": {"type": "string"},
+              "requestId": {"type": "string"},
+              "retryable": {"type": "boolean"},
+              "details": {"type": "object"}
+            }
+          }
+        }
+      }
+    }
+  }
+}
