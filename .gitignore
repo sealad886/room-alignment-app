@@ -1,0 +1,10 @@
+.worktrees/
+.room-alignment/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.DS_Store
+dist/
+build/
+*.log
+

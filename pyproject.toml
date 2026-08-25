@@ -1,0 +1,18 @@
+[project]
+name = "room-alignment"
+version = "0.1.0"
+description = "Local-first multi-camera video alignment and single-view editing"
+requires-python = ">=3.11"
+
+[project.scripts]
+room-alignment = "room_alignment.server:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pyright]
+include = ["room_alignment"]
+pythonVersion = "3.11"
+typeCheckingMode = "basic"
+
