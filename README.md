@@ -52,7 +52,14 @@ python3 -m compileall -q room_alignment tests
 node --check web/app.js
 ```
 
+## License
+
+Room Alignment is licensed under the [Apache License 2.0](LICENSE).
+Copyright 2026 Andrew M. Cox.
+
+FFmpeg and FFprobe are separate, user-supplied programs and are not distributed
+as part of Room Alignment. Their own license terms apply.
+
 ## Project status
 
 Current implementation provides real scanning, alignment/edit-decision persistence, preflight, manifest generation, FFmpeg rendering, render cancellation, and connected browser UI. See [runbook](docs/runbook.md), [architecture](docs/architecture.md), and [risk register](docs/risk-register.md).
-
