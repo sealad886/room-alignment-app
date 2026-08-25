@@ -117,13 +117,24 @@ class StoreV1Tests(unittest.TestCase):
         events = reopened.events(job_id=job["id"])
         self.assertEqual(events[-1]["eventType"], "RECOVERY")
 
-    def test_grant_revocation_interrupts_dependent_scan(self):
+    def test_grant_revocation_stops_dependent_scan_with_diagnostic(self):
         scan = self.store.begin_scan(self.library["id"], "FULL")
         self.store.revoke_grant(self.library["sourceGrantId"])
-        self.assertEqual(self.store.job(scan["id"])["status"], "INTERRUPTED")
+        self.assertEqual(self.store.job(scan["id"])["status"], "CANCEL_REQUESTED")
+        self.assertEqual(self.store.job(scan["id"])["errorCode"], "GRANT_REQUIRED")
+        self.assertTrue(self.store.scan(scan["id"])["cancelRequested"])
         self.assertEqual(self.store.events(job_id=scan["id"])[-1]["details"]["reason"], "GRANT_REQUIRED")
         with self.assertRaisesRegex(DomainError, "revoked"):
             self.store.library_root(self.library["id"])
+
+    def test_project_rejects_media_from_a_different_library(self):
+        self.scan("FULL", [self.record("one", "one.mp4")])
+        other_root = Path(self.temp.name) / "other-source"
+        other_root.mkdir()
+        other_grant = self.store.create_grant(other_root, "READ_ONLY_SOURCE")
+        other_library = self.store.create_library(other_grant["id"])
+        with self.assertRaisesRegex(DomainError, "project library"):
+            self.store.create_project("Mixed", other_library["id"], ["one"])
 
     def test_unambiguous_rename_preserves_asset_identity(self):
         original_path = self.root / "old-name.mp4"

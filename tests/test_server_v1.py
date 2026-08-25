@@ -9,8 +9,10 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from room_alignment import server as server_module
+from room_alignment.domain import DomainError
 
 
 class ServerBoundaryTests(unittest.TestCase):
@@ -172,6 +174,27 @@ class ServerBoundaryTests(unittest.TestCase):
         status, _headers, schema = self.request("GET", "/api/v1/contracts/manifest.schema.json", cookie=cookie)
         self.assertEqual(200, status)
         self.assertEqual(schema["title"], "Room Alignment provenance manifest v1")
+
+
+class WorkerBackpressureTests(unittest.TestCase):
+    def test_analysis_jobs_have_a_two_job_backpressure_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            app = server_module.App(root / "state")
+            try:
+                grant = app.store.create_grant(source, "READ_ONLY_SOURCE")
+                library = app.store.create_library(grant["id"])
+                with patch("room_alignment.server.threading.Thread.start"):
+                    app.start_cluster_analysis(library["id"])
+                    app.start_cluster_analysis(library["id"])
+                    with self.assertRaisesRegex(DomainError, "two analysis"):
+                        app.start_cluster_analysis(library["id"])
+            finally:
+                app.analysis_threads.clear()
+                app.analysis_reserved.clear()
+                app.close()
 
 
 if __name__ == "__main__":

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import tempfile
+import sqlite3
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from room_alignment.store import Store
 from scripts.state_admin import backup, dry_run_migration, restore
@@ -39,6 +41,25 @@ class StateAdministrationTests(unittest.TestCase):
             backup(state, backup_file)
             with self.assertRaisesRegex(ValueError, "--replace"):
                 restore(state, backup_file, False)
+
+    def test_failed_staged_migration_keeps_original_and_removes_staging_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state.sqlite3"
+            connection = sqlite3.connect(state)
+            connection.execute("CREATE TABLE legacy(value TEXT)")
+            connection.execute("INSERT INTO legacy(value) VALUES('preserve')")
+            connection.commit()
+            connection.close()
+            with patch.object(Store, "_ensure_legacy_columns", side_effect=RuntimeError("injected failure")):
+                with self.assertRaisesRegex(RuntimeError, "injected"):
+                    Store(state)
+            preserved = sqlite3.connect(state)
+            try:
+                self.assertEqual(preserved.execute("SELECT value FROM legacy").fetchone()[0], "preserve")
+            finally:
+                preserved.close()
+            self.assertFalse(list(state.parent.glob(".state.sqlite3.migration-*")))
+            self.assertTrue(list(state.parent.glob("state.sqlite3.backup-v0-*")))
 
 
 if __name__ == "__main__":

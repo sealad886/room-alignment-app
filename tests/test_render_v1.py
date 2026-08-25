@@ -164,6 +164,43 @@ class CanonicalRenderTests(unittest.TestCase):
         self.assertEqual(self.store.job(started["job"]["id"])["status"], "CANCELED")
         self.assertFalse((self.output / "cancel.mp4").exists())
 
+    def test_output_grant_revocation_stops_queued_render_as_failed(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "revoked.mp4", "profile": "COMPATIBLE"},
+        )
+        self.store.attest_review(plan["id"], plan["warningCodes"])
+        manager = CanonicalRenderManager(self.store)
+        with patch("room_alignment.render.threading.Thread.start"):
+            started = manager.start(plan["id"])
+        self.store.revoke_grant(self.output_grant_id)
+        manager._run(started["job"]["id"], started["artifact"]["id"], plan)
+        job = self.store.job(started["job"]["id"])
+        self.assertEqual(job["status"], "FAILED")
+        self.assertEqual(job["errorCode"], "GRANT_REQUIRED")
+        self.assertEqual(self.store.artifact(started["artifact"]["id"])["status"], "FAILED")
+        self.assertFalse((self.output / "revoked.mp4").exists())
+
+    def test_render_manager_backpressures_a_second_render(self):
+        first = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "first.mp4", "profile": "COMPATIBLE"},
+        )
+        second = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "second.mp4", "profile": "COMPATIBLE"},
+        )
+        self.store.attest_review(first["id"], first["warningCodes"])
+        self.store.attest_review(second["id"], second["warningCodes"])
+        manager = CanonicalRenderManager(self.store)
+        with patch("room_alignment.render.threading.Thread.start"):
+            manager.start(first["id"])
+            with self.assertRaisesRegex(ValueError, "one render"):
+                manager.start(second["id"])
+
     def test_startup_quarantines_exact_owned_partial(self):
         plan = build_render_plan(
             self.store,

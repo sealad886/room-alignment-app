@@ -1,24 +1,27 @@
-# Delivery plan
+# Delivery plan and disposition
 
-## Completed slices
+## Completed milestones
 
-- WI-001 — Local service, static application shell, SQLite schema, health/API.
-- WI-002 — Generic discovery, FFprobe metadata, evidence merge, bounded background scan.
-- WI-003 — Library/Align/Cut/Review connected UI and project persistence.
-- WI-004 — Program Video/Audio, anchoring, reconciliation, provenance inspection.
-- WI-005 — Preflight, manifest, FFmpeg MP4/lossless rendering, cancellation, atomic output.
-- WI-006 — Unit/integration/browser/real-corpus/visual verification and documentation.
+- MS-1 — Versioned domain, command, error, event, render-plan, and manifest contracts; generated browser client; architecture decisions.
+- MS-2 — Secure loopback session, opaque grants, durable SQLite state/jobs/events, restart recovery, bounded caches, and verified migration/backup seam.
+- MS-3 — Vendor-neutral scan generations, permissive evidence, timestamp policies, logical sources, source candidates, and read-only representative-corpus validation.
+- MS-4 — Canonical project commands, affine synchronization, independent video/audio blocks, backend compilation/issues, point query, and connected Align/Cut flows.
+- MS-5 — Optional asynchronous timestamp/cluster suggestions with evidence, limitations, lifecycle, and invalidation; manual alignment remains complete without them.
+- MS-6 — Immutable full-hash plans, review attestations, compatible/lossless render profiles, source revalidation, crash-safe artifact pairs, and provenance manifests.
+- MS-7 — Legacy cutover, 150-requirement disposition ledger, full tests, browser/accessibility/visual checks, performance benchmark, real-corpus integrity validation, and adversarial remediation.
 
-Critical path: source safety → index/provenance → alignment/edit schema → preflight → render → real-corpus verification.
+Critical path completed: source safety → canonical index/provenance → revisioned alignment/editing → immutable review → render/recovery → representative evidence.
 
-## Milestones
+## Local release-candidate gate
 
-- MS-1 runnable local index: complete.
-- MS-2 connected editorial workflow: complete.
-- MS-3 real render plus provenance: complete.
-- MS-4 local release candidate evidence: complete with residual risks in risk register.
+The local source release candidate is accepted only when all of the following remain true:
 
-## Release disposition
+- `docs/requirements-ledger.md` maps every `REQ-001` through `REQ-150` without silent waiver.
+- `docs/verification-report.md` records a current full-suite, contract/static, browser, performance, render, and corpus result.
+- `docs/adversarial-audit.md` has no open critical/high correctness, security, data-integrity, contract, accessibility, migration, or recovery finding.
+- Source media integrity is unchanged and no private path/name/media is committed.
+- Frontend uses named command APIs and the generated client; backend remains the only compiler/preflight/render authority.
 
-Local source delivery only. No commit exists because environment blocked repository initialization. No push, package, signing, notarization, deployment, or distribution authorized or performed.
+## Delivery state
 
+Implementation is complete and locally verified in the isolated `codex/technology-agnostic-backend` worktree. Milestone commits are local only. No push, pull request, package, installation, signing, notarization, publication, deployment, distribution, or production observation was performed or implied.

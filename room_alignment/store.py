@@ -322,7 +322,13 @@ class Store:
             destination.commit()
             if str(destination.execute("PRAGMA integrity_check").fetchone()[0]) != "ok":
                 raise RuntimeError("Staged migration failed integrity verification")
-        finally:
+        except Exception:
+            destination.close()
+            source.close()
+            for candidate in (staging, Path(f"{staging}-wal"), Path(f"{staging}-shm")):
+                candidate.unlink(missing_ok=True)
+            raise
+        else:
             destination.close()
             source.close()
         os.replace(staging, self.path)
@@ -413,18 +419,27 @@ class Store:
             db.execute("UPDATE directory_grants SET revoked=1,revoked_at=? WHERE id=?", (now_iso(), grant_id))
             dependent_jobs = list(
                 db.execute(
-                    "SELECT id FROM jobs WHERE status IN ('QUEUED','RUNNING','CANCEL_REQUESTED') AND "
-                    "library_id IN (SELECT id FROM libraries WHERE grant_id=?)",
-                    (grant_id,),
+                    "SELECT DISTINCT jobs.id FROM jobs LEFT JOIN projects ON projects.id=jobs.project_id "
+                    "LEFT JOIN artifacts ON artifacts.job_id=jobs.id "
+                    "WHERE jobs.status IN ('QUEUED','RUNNING','CANCEL_REQUESTED') AND ("
+                    "jobs.library_id IN (SELECT id FROM libraries WHERE grant_id=?) OR "
+                    "projects.library_id IN (SELECT id FROM libraries WHERE grant_id=?) OR "
+                    "artifacts.output_grant_id=?)",
+                    (grant_id, grant_id, grant_id),
                 )
             )
             for job in dependent_jobs:
+                db.execute(
+                    "UPDATE scan_generations SET cancel_requested=1,status='CANCEL_REQUESTED',message=?,updated_at=? "
+                    "WHERE id=? AND status IN ('QUEUED','RUNNING','CANCEL_REQUESTED')",
+                    ("Directory grant revoked", now_iso(), job["id"]),
+                )
                 self._transition_job_db(
                     db,
                     job["id"],
-                    "INTERRUPTED",
+                    "CANCEL_REQUESTED",
                     None,
-                    "Directory grant revoked",
+                    "Stopping work because its directory grant was revoked",
                     {"reason": "GRANT_REQUIRED"},
                     error_code="GRANT_REQUIRED",
                 )
@@ -717,7 +732,14 @@ class Store:
                 (record.captured_at, json.dumps(record.to_dict()), row["id"]),
             )
 
-    def finish_scan(self, scan_id: str, status: str, summary: dict[str, Any], message: str | None = None) -> None:
+    def finish_scan(
+        self,
+        scan_id: str,
+        status: str,
+        summary: dict[str, Any],
+        message: str | None = None,
+        error_code: str | None = None,
+    ) -> None:
         if status not in {"SUCCEEDED", "FAILED", "CANCELED"}:
             raise DomainError("VALIDATION_FAILED", "Invalid terminal scan state")
         with self._lock, self.connect() as db:
@@ -744,7 +766,14 @@ class Store:
                     (scan["library_id"],),
                     "A newer scan generation may have changed the suggestion inputs",
                 )
-            self._transition_job_db(db, scan_id, status, 1 if status == "SUCCEEDED" else 0, message)
+            self._transition_job_db(
+                db,
+                scan_id,
+                status,
+                1 if status == "SUCCEEDED" else 0,
+                message,
+                error_code=error_code,
+            )
 
     def existing_media_by_path(self, library_id: str, relative_path: str) -> dict[str, Any] | None:
         with self.connect() as db:
@@ -855,9 +884,12 @@ class Store:
     # Projects and commands
 
     def create_project(self, name: str, library_id: str, asset_ids: list[str]) -> dict[str, Any]:
+        self.library_root(library_id)
         assets = self.media_records(asset_ids)
         if len(assets) != len(set(asset_ids)):
             raise DomainError("NOT_FOUND", "One or more selected media assets are unavailable")
+        if any(asset.get("library_id") != library_id for asset in assets.values()):
+            raise DomainError("VALIDATION_FAILED", "Every selected media asset must belong to the project library")
         project = new_project(name, library_id, [assets[item] for item in asset_ids])
         with self._lock, self.connect() as db:
             db.execute(

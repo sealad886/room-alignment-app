@@ -141,7 +141,7 @@
 | REQ-135 | Implemented | Textual labels/status/issue lanes/live regions/visible focus/non-color semantics; browser audit gate. |
 | REQ-136 | Implemented | Numeric microsecond-derived offset/rate/audio/boundary controls and configurable key increments. |
 | REQ-137 | Verified | Synthetic 26,520/1,000 benchmark meets read/command/replay/memory targets; corpus report covers first progress. |
-| REQ-138 | Verified | Probe workers/queue/render jobs/backpressure documented; one canonical scan per library. |
+| REQ-138 | Verified | Probe workers/queue plus one scan/library, two analyses, one full-hash plan, and one render; excess receives tested backpressure. |
 | REQ-139 | Implemented | Shutdown cancels scans/renders, terminates process trees, persists transitions; startup reconciles. |
 | REQ-140 | Implemented | Synthetic media matrix covers geometry/rotation/SAR/VFR/frame/color/HDR/audio/malformed/path/source-change. |
 | REQ-141 | Verified | Legacy data migrates; original unknown document retained under recovery field. |

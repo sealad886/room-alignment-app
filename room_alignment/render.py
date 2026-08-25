@@ -509,6 +509,7 @@ class CanonicalRenderManager:
     def __init__(self, store: Store):
         self.store = store
         self.jobs: dict[str, RunningJob] = {}
+        self.reserved: set[str] = set()
         self.lock = threading.RLock()
         self.reconcile_artifacts()
 
@@ -520,6 +521,7 @@ class CanonicalRenderManager:
         if not review or review["planDigest"] != plan["planDigest"]:
             raise DomainError("REVIEW_STALE", "Render plan requires a current review attestation")
         project = self.store.project(plan["projectId"])
+        self.store.library_root(project["libraryId"])
         if project["revision"] != plan["projectRevision"]:
             raise DomainError("PLAN_STALE", "Project changed after review")
         if int(project.get("provenanceRevision", 0)) != int(plan["provenanceRevision"]):
@@ -529,24 +531,49 @@ class CanonicalRenderManager:
         manifest = final.with_name(final.name + ".manifest.json")
         if final.exists() or manifest.exists():
             raise DomainError("DESTINATION_EXISTS", "Output video or manifest already exists")
-        artifact = self.store.create_artifact(plan_id, output["grantId"], output["filename"])
-        job = self.store.create_job("RENDER", project_id=plan["projectId"], message="Render queued")
-        artifact = self.store.update_artifact(artifact["id"], job_id=job["id"], status="QUEUED")
-        thread = threading.Thread(target=self._run, args=(job["id"], artifact["id"], plan), daemon=True)
-        thread.start()
+        with self.lock:
+            if self.reserved or self.jobs:
+                raise DomainError("JOB_STATE_CONFLICT", "Only one render may run at a time")
+            artifact = self.store.create_artifact(plan_id, output["grantId"], output["filename"])
+            job = self.store.create_job("RENDER", project_id=plan["projectId"], message="Render queued")
+            artifact = self.store.update_artifact(artifact["id"], job_id=job["id"], status="QUEUED")
+            self.reserved.add(job["id"])
+        thread = threading.Thread(target=self._run_owned, args=(job["id"], artifact["id"], plan), daemon=True)
+        try:
+            thread.start()
+        except Exception:
+            with self.lock:
+                self.reserved.discard(job["id"])
+            self.store.update_artifact(artifact["id"], status="FAILED", details_json={"error": "THREAD_START_FAILED"})
+            self.store.transition_job(job["id"], "FAILED", 0, "Render worker could not start")
+            raise
         return {"job": job, "artifact": artifact}
+
+    def _run_owned(self, job_id: str, artifact_id: str, plan: dict[str, Any]) -> None:
+        try:
+            self._run(job_id, artifact_id, plan)
+        finally:
+            with self.lock:
+                self.reserved.discard(job_id)
 
     def _run(self, job_id: str, artifact_id: str, plan: dict[str, Any]) -> None:
         artifact = self.store.artifact(artifact_id)
-        final = self.store.output_path(artifact["outputGrantId"], artifact["filename"])
+        if self.store.job(job_id)["status"] == "CANCEL_REQUESTED":
+            self._finish_cancellation(job_id, artifact_id, "before output access")
+            return
+        try:
+            final = self.store.output_path(artifact["outputGrantId"], artifact["filename"])
+        except DomainError as error:
+            self.store.update_artifact(artifact_id, status="FAILED", details_json={"errorCode": error.code})
+            self.store.transition_job(job_id, "FAILED", 0, str(error), error_code=error.code)
+            return
         manifest_final = final.with_name(artifact["manifestFilename"])
         token = artifact_id.rsplit("_", 1)[-1]
         partial = final.with_name(f".{final.stem}.partial.{token}{final.suffix}")
         manifest_partial = final.with_name(f".{manifest_final.name}.partial.{token}")
         try:
             if self.store.job(job_id)["status"] == "CANCEL_REQUESTED":
-                self.store.update_artifact(artifact_id, status="CANCELED")
-                self.store.transition_job(job_id, "CANCELED", 0, "Canceled before render process launch")
+                self._finish_cancellation(job_id, artifact_id, "before render process launch")
                 return
             self.store.transition_job(job_id, "RUNNING", 0.05, "Validating immutable sources")
             self.store.update_artifact(artifact_id, status="RENDERING")
@@ -573,6 +600,14 @@ class CanonicalRenderManager:
                 next_progress_update = time.monotonic()
                 continuation_floor = 64 * 1024 * 1024 + int(plan["estimatedBytes"] * 0.05)
                 while process.poll() is None:
+                    current_job = self.store.job(job_id)
+                    if current_job["status"] == "CANCEL_REQUESTED":
+                        running.cancel_requested = True
+                        try:
+                            os.killpg(process.pid, signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
+                        continue
                     if shutil.disk_usage(final.parent).free < continuation_floor:
                         space_failure = True
                         try:
@@ -598,8 +633,7 @@ class CanonicalRenderManager:
             if running.cancel_requested:
                 _unlink_exact(partial)
                 _unlink_exact(manifest_partial)
-                self.store.update_artifact(artifact_id, status="CANCELED")
-                self.store.transition_job(job_id, "CANCELED", 0, "Canceled; temporary outputs removed")
+                self._finish_cancellation(job_id, artifact_id, "temporary outputs removed")
                 return
             if space_failure:
                 raise DomainError("INSUFFICIENT_SPACE", "Safe free-space threshold was reached during render")
@@ -632,13 +666,30 @@ class CanonicalRenderManager:
         except DomainError as error:
             _unlink_exact(partial)
             _unlink_exact(manifest_partial)
-            self.store.update_artifact(artifact_id, status="FAILED", details_json={"errorCode": error.code})
+            artifact_status = "FAILED_RECOVERABLE" if final.exists() or manifest_final.exists() else "FAILED"
+            self.store.update_artifact(artifact_id, status=artifact_status, details_json={"errorCode": error.code})
             self.store.transition_job(job_id, "FAILED", 0, str(error), error_code=error.code)
         except Exception as error:
             _unlink_exact(partial)
             _unlink_exact(manifest_partial)
-            self.store.update_artifact(artifact_id, status="FAILED", details_json={"error": type(error).__name__})
+            artifact_status = "FAILED_RECOVERABLE" if final.exists() or manifest_final.exists() else "FAILED"
+            self.store.update_artifact(artifact_id, status=artifact_status, details_json={"error": type(error).__name__})
             self.store.transition_job(job_id, "FAILED", 0, str(error)[:500], error_code="INTERNAL_ERROR")
+
+    def _finish_cancellation(self, job_id: str, artifact_id: str, detail: str) -> None:
+        job = self.store.job(job_id)
+        if job.get("errorCode") == "GRANT_REQUIRED":
+            self.store.update_artifact(artifact_id, status="FAILED", details_json={"errorCode": "GRANT_REQUIRED"})
+            self.store.transition_job(
+                job_id,
+                "FAILED",
+                0,
+                f"Directory grant revoked; {detail}",
+                error_code="GRANT_REQUIRED",
+            )
+            return
+        self.store.update_artifact(artifact_id, status="CANCELED")
+        self.store.transition_job(job_id, "CANCELED", 0, f"Canceled; {detail}")
 
     def _validate_sources(self, plan: dict[str, Any]) -> None:
         project = self.store.project(plan["projectId"])
@@ -668,7 +719,7 @@ class CanonicalRenderManager:
     def shutdown(self, timeout_seconds: float = 5) -> None:
         """Request cancellation and wait briefly for owned process trees to settle."""
         with self.lock:
-            job_ids = list(self.jobs)
+            job_ids = list(self.reserved | self.jobs.keys())
         for job_id in job_ids:
             try:
                 self.cancel(job_id)
@@ -683,6 +734,34 @@ class CanonicalRenderManager:
                 except DomainError:
                     break
                 time.sleep(0.05)
+        with self.lock:
+            unsettled = list(self.jobs.items())
+        for job_id, running in unsettled:
+            if running.process.poll() is None:
+                try:
+                    os.killpg(running.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+        final_deadline = time.monotonic() + 1
+        for job_id, _running in unsettled:
+            while time.monotonic() < final_deadline:
+                if self.store.job(job_id)["status"] in {
+                    "CANCELED", "SUCCEEDED", "FAILED", "INTERRUPTED", "FAILED_RECOVERABLE"
+                }:
+                    break
+                time.sleep(0.05)
+            else:
+                job = self.store.job(job_id)
+                if job["status"] not in {"CANCELED", "SUCCEEDED", "FAILED", "INTERRUPTED", "FAILED_RECOVERABLE"}:
+                    try:
+                        self.store.transition_job(
+                            job_id,
+                            "FAILED_RECOVERABLE",
+                            job["progress"],
+                            "Render process was terminated during shutdown",
+                        )
+                    except DomainError:
+                        pass
 
     def reconcile_artifacts(self) -> None:
         for artifact in self.store.artifacts(incomplete_only=True):

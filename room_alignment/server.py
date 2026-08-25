@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import secrets
+import sys
 import threading
 import time
 import uuid
@@ -14,7 +15,7 @@ import webbrowser
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.cookies import SimpleCookie
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as _ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
@@ -31,6 +32,16 @@ CONTRACTS = ROOT / "contracts"
 MAX_BODY = 2_000_000
 SESSION_COOKIE = "ra_session"
 SESSION_TTL_SECONDS = 43_200
+
+
+class ThreadingHTTPServer(_ThreadingHTTPServer):
+    """Keep connection failures from dumping local paths into diagnostics."""
+
+    def handle_error(self, request: object, client_address: object) -> None:
+        error = sys.exception()
+        if isinstance(error, (BrokenPipeError, ConnectionResetError)):
+            return
+        print(json.dumps({"component": "http", "error": type(error).__name__ if error else "UnknownError"}))
 
 
 class SessionManager:
@@ -99,6 +110,8 @@ class App:
         self.sessions = SessionManager()
         self.scan_threads: dict[str, threading.Thread] = {}
         self.analysis_threads: dict[str, threading.Thread] = {}
+        self.analysis_reserved: set[str] = set()
+        self.hash_slot = threading.BoundedSemaphore(1)
         self.lock = threading.RLock()
         self.closing = False
 
@@ -109,7 +122,32 @@ class App:
                 self.store.cancel_scan(scan_id)
             except DomainError:
                 pass
+        for job_id in list(self.analysis_threads):
+            try:
+                job = self.store.job(job_id)
+                if job["status"] not in TERMINAL_JOB_STATES:
+                    self.store.transition_job(job_id, "CANCEL_REQUESTED", job["progress"], "Application is shutting down")
+            except DomainError:
+                pass
         self.render.shutdown()
+        deadline = time.monotonic() + 5
+        workers = {**self.scan_threads, **self.analysis_threads}
+        for thread in workers.values():
+            thread.join(timeout=max(0, deadline - time.monotonic()))
+        for job_id, thread in workers.items():
+            if not thread.is_alive():
+                continue
+            try:
+                job = self.store.job(job_id)
+                if job["status"] not in TERMINAL_JOB_STATES:
+                    self.store.transition_job(
+                        job_id,
+                        "INTERRUPTED",
+                        job["progress"],
+                        "Worker did not settle before the shutdown deadline",
+                    )
+            except DomainError:
+                pass
         try:
             fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
         finally:
@@ -134,11 +172,18 @@ class App:
                     max_files=limit,
                 ):
                     if self.closing or self.store.scan_cancel_requested(scan["id"]):
+                        job = self.store.job(scan["id"])
+                        grant_revoked = job.get("errorCode") == "GRANT_REQUIRED"
                         self.store.finish_scan(
                             scan["id"],
-                            "CANCELED",
+                            "FAILED" if grant_revoked else "CANCELED",
                             {"videos": self.store.scan(scan["id"])["videos"]},
-                            "Scan canceled; visited records retained",
+                            (
+                                "Directory grant revoked; visited records retained"
+                                if grant_revoked
+                                else "Scan canceled; visited records retained"
+                            ),
+                            "GRANT_REQUIRED" if grant_revoked else None,
                         )
                         return
                     if record.camera:
@@ -173,6 +218,7 @@ class App:
                         "FAILED",
                         {"videos": self.store.scan(scan["id"])["videos"]},
                         _safe_error(error),
+                        getattr(error, "code", "INTERNAL_ERROR"),
                     )
                 except Exception:
                     pass
@@ -188,10 +234,16 @@ class App:
 
     def start_alignment_analysis(self, project_id: str) -> dict[str, object]:
         project = self.store.project(project_id)
-        job = self.store.create_job("ALIGNMENT_ANALYSIS", project_id=project_id, message="Analysis queued")
+        self.store.library_root(project["libraryId"])
+        with self.lock:
+            if len(self.analysis_reserved) >= 2:
+                raise DomainError("JOB_STATE_CONFLICT", "At most two analysis jobs may run concurrently")
+            job = self.store.create_job("ALIGNMENT_ANALYSIS", project_id=project_id, message="Analysis queued")
+            self.analysis_reserved.add(job["id"])
 
         def run() -> None:
             try:
+                self._raise_if_job_stopping(job["id"])
                 self.store.transition_job(job["id"], "RUNNING", 0.1, "Comparing timestamp evidence")
                 assets = self.store.media_records(item["assetId"] for item in project["clips"])
                 reference = next(
@@ -213,6 +265,7 @@ class App:
                 created = []
                 if reference_time is not None:
                     for clip in project["clips"]:
+                        self._raise_if_job_stopping(job["id"])
                         if clip["id"] == reference["id"]:
                             continue
                         captured = _timestamp_us(assets.get(clip["assetId"], {}).get("captured_at"))
@@ -251,6 +304,7 @@ class App:
                             }
                         )
                         created.append(suggestion["id"])
+                self._raise_if_job_stopping(job["id"])
                 self.store.transition_job(
                     job["id"],
                     "SUCCEEDED",
@@ -265,19 +319,32 @@ class App:
             finally:
                 with self.lock:
                     self.analysis_threads.pop(job["id"], None)
+                    self.analysis_reserved.discard(job["id"])
 
         thread = threading.Thread(target=run, daemon=True, name=f"analysis-{job['id']}")
         with self.lock:
             self.analysis_threads[job["id"]] = thread
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            with self.lock:
+                self.analysis_threads.pop(job["id"], None)
+                self.analysis_reserved.discard(job["id"])
+            self.store.transition_job(job["id"], "FAILED", 0, "Analysis worker could not start")
+            raise
         return job
 
     def start_cluster_analysis(self, library_id: str) -> dict[str, object]:
-        self.store.library(library_id)
-        job = self.store.create_job("CLUSTER_ANALYSIS", library_id=library_id, message="Clustering queued")
+        self.store.library_root(library_id)
+        with self.lock:
+            if len(self.analysis_reserved) >= 2:
+                raise DomainError("JOB_STATE_CONFLICT", "At most two analysis jobs may run concurrently")
+            job = self.store.create_job("CLUSTER_ANALYSIS", library_id=library_id, message="Clustering queued")
+            self.analysis_reserved.add(job["id"])
 
         def run() -> None:
             try:
+                self._raise_if_job_stopping(job["id"])
                 self.store.transition_job(job["id"], "RUNNING", 0.05, "Grouping timestamp evidence")
                 records = self.store.clustering_media(library_id)
                 groups: list[list[dict[str, object]]] = []
@@ -299,6 +366,7 @@ class App:
 
                 created: list[str] = []
                 for group in groups:
+                    self._raise_if_job_stopping(job["id"])
                     source_ids = sorted(
                         {
                             str(record.get("sourceCandidateId"))
@@ -331,6 +399,7 @@ class App:
                         }
                     )
                     created.append(suggestion["id"])
+                self._raise_if_job_stopping(job["id"])
                 self.store.transition_job(
                     job["id"],
                     "SUCCEEDED",
@@ -345,12 +414,27 @@ class App:
             finally:
                 with self.lock:
                     self.analysis_threads.pop(job["id"], None)
+                    self.analysis_reserved.discard(job["id"])
 
         thread = threading.Thread(target=run, daemon=True, name=f"cluster-{job['id']}")
         with self.lock:
             self.analysis_threads[job["id"]] = thread
-        thread.start()
+        try:
+            thread.start()
+        except Exception:
+            with self.lock:
+                self.analysis_threads.pop(job["id"], None)
+                self.analysis_reserved.discard(job["id"])
+            self.store.transition_job(job["id"], "FAILED", 0, "Analysis worker could not start")
+            raise
         return job
+
+    def _raise_if_job_stopping(self, job_id: str) -> None:
+        job = self.store.job(job_id)
+        if job["status"] == "CANCEL_REQUESTED":
+            code = str(job.get("errorCode") or "JOB_STATE_CONFLICT")
+            message = "Directory grant was revoked" if code == "GRANT_REQUIRED" else "Job was canceled"
+            raise DomainError(code, message)
 
 
 APP: App
@@ -715,7 +799,12 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 5 and parts[2] == "projects" and parts[4] == "alignment-jobs":
             return self.respond(APP.start_alignment_analysis(parts[3]), HTTPStatus.ACCEPTED)
         if len(parts) == 5 and parts[2] == "projects" and parts[4] == "render-plans":
-            return self.respond(build_render_plan(APP.store, parts[3], body), HTTPStatus.CREATED)
+            if not APP.hash_slot.acquire(blocking=False):
+                raise DomainError("JOB_STATE_CONFLICT", "Another full-hash render plan is being created")
+            try:
+                return self.respond(build_render_plan(APP.store, parts[3], body), HTTPStatus.CREATED)
+            finally:
+                APP.hash_slot.release()
         if len(parts) == 5 and parts[2] == "render-plans" and parts[4] == "review":
             return self.respond(
                 APP.store.attest_review(parts[3], [str(item) for item in body.get("acknowledgedWarnings", [])]),

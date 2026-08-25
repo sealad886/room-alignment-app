@@ -774,7 +774,7 @@ async function pollJob(jobId, onUpdate) {
     const onReset = () => update();
     window.addEventListener("room-alignment-job", onEvent);
     window.addEventListener("room-alignment-event-reset", onReset);
-    const timer = setInterval(() => { if (!state.eventFeedOpen) update(); }, 750);
+    const timer = setInterval(update, state.eventFeedOpen ? 1500 : 750);
     update();
   });
 }
