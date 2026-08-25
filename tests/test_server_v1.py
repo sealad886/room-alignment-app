@@ -6,6 +6,7 @@ import io
 import json
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -122,6 +123,15 @@ class ServerBoundaryTests(unittest.TestCase):
         self.assertEqual("READ_ONLY_SOURCE", grant["role"])
         self.assertNotIn("root", grant)
 
+        status, _headers, payload = self.request(
+            "GET",
+            "/api/v1/libraries",
+            cookie=cookie,
+            origin="http://attacker.invalid",
+        )
+        self.assertEqual(403, status)
+        self.assertEqual("FORBIDDEN", payload["error"]["code"])
+
     def test_bootstrap_token_is_one_time_and_redacted_from_http_log(self) -> None:
         token = self.app.sessions.bootstrap_token
         capture = io.StringIO()
@@ -145,6 +155,23 @@ class ServerBoundaryTests(unittest.TestCase):
         status, _headers, payload = self.request("GET", f"/api/v1/events?token={token['token']}")
         self.assertEqual(401, status)
         self.assertEqual("UNAUTHENTICATED", payload["error"]["code"])
+
+    def test_server_enforces_session_expiry_not_only_cookie_age(self) -> None:
+        cookie, _csrf = self.bootstrap()
+        session_id = cookie.split("=", 1)[1]
+        self.app.sessions.sessions[session_id]["created"] = time.monotonic() - server_module.SESSION_TTL_SECONDS - 1
+        status, _headers, payload = self.request("GET", "/api/v1/libraries", cookie=cookie)
+        self.assertEqual(401, status)
+        self.assertEqual("UNAUTHENTICATED", payload["error"]["code"])
+
+    def test_normative_contract_files_are_served_as_json(self) -> None:
+        cookie, _csrf = self.bootstrap()
+        status, _headers, openapi = self.request("GET", "/api/v1/openapi.json", cookie=cookie)
+        self.assertEqual(200, status)
+        self.assertEqual(openapi["openapi"], "3.1.0")
+        status, _headers, schema = self.request("GET", "/api/v1/contracts/manifest.schema.json", cookie=cookie)
+        self.assertEqual(200, status)
+        self.assertEqual(schema["title"], "Room Alignment provenance manifest v1")
 
 
 if __name__ == "__main__":

@@ -1,25 +1,19 @@
 # Room Alignment
 
-Room Alignment is a local-first web application for synchronizing video clips from overlapping cameras, choosing exactly one video source for each output interval, controlling audio independently, and rendering a provenance-preserving result.
+Room Alignment is a vendor-neutral, local-first web application for turning overlapping camera clips into one continuous program. Exactly one video source is selected for every valid output interval. Audio has its own timeline and may follow video, use a logical source, pin one exact clip, carry an explicit offset/rate transform, or be deliberate generated silence.
 
-It is vendor-agnostic. Filenames, folder dates, MP4/MOV tags, JSON sidecars, importer hints, and user corrections are evidence sources—not required naming contracts. Unknown fields are retained.
+Every completed output is paired with a provenance manifest that identifies source assets and streams, half-open output/source ranges, synchronization decisions, user resolutions, transforms, media-tool versions, warnings, and SHA-256 digests. Source media is never modified.
 
-## Safety model
+## Technology and privacy boundary
 
-- Source libraries are opened read-only.
-- Original media is never renamed, moved, rewritten, or timestamp-adjusted.
-- SQLite state, editorial decisions, and manifests live outside source library.
-- Render output uses a temporary sibling and atomic promotion.
-- Missing coverage, output gaps, overlaps, and incomplete provenance block rendering.
-- Local HTTP service binds to `127.0.0.1` by default.
+- Python 3.11+ standard-library loopback service and SQLite canonical state
+- dependency-free semantic HTML/CSS/JavaScript frontend
+- FFprobe/FFmpeg media inspection and rendering through structured subprocess arguments
+- no account, cloud service, external telemetry, remote asset, or required network request
+- one-time bootstrap, server-expiring local session, CSRF, Host/Origin/fetch-metadata checks, CSP, and session-bound short-lived SSE tokens
+- opaque grants for source and output directories; ordinary APIs do not accept source paths
 
-## Requirements
-
-- macOS or another Unix-like system with Python 3.11+
-- FFmpeg and FFprobe on `PATH`
-- Modern browser
-
-No Python or JavaScript packages are required.
+FFmpeg and FFprobe must be available on `PATH`. Python and JavaScript package installation is not required.
 
 ## Run
 
@@ -27,32 +21,52 @@ No Python or JavaScript packages are required.
 python3 -m room_alignment.server
 ```
 
-Open [http://127.0.0.1:8765](http://127.0.0.1:8765). Application data defaults to `~/.room-alignment`.
+The service prints and opens a one-time launch URL. The default state directory is `~/.room-alignment`; use `--data-dir` to choose another location and `--no-open` to avoid opening a browser. The supported service boundary is loopback only.
 
-Use another port or data directory:
+## Connected workflow
+
+1. **Library** — grant read-only access, choose full/bounded/incremental scanning, inspect warnings/evidence, select exact project assets, and set naïve-timestamp/DST policy.
+2. **Align** — create/rename/merge/split/archive sources, assign clips, choose a reference, set offset or disclosed rate correction, drag/nudge tracks, inspect/correct provenance, and explicitly accept/reject suggestions.
+3. **Cut** — choose one video source per interval, pin ambiguous clips, add/split/delete/reconcile blocks, and edit an independent single-source audio timeline or explicit silence.
+4. **Review** — create an immutable full-hash render plan, resolve blockers, acknowledge warning codes, attest the exact plan, and render a compatible MP4 or archival FFV1/PCM Matroska artifact pair.
+
+## Contract
+
+The normative HTTP API is `/api/v1/openapi.json`. JSON Schemas are served under `/api/v1/contracts/`; the browser client is mechanically generated from OpenAPI. Editorial time is signed integer microseconds and all intervals are `[startUs, endUs)`.
 
 ```bash
-python3 -m room_alignment.server --port 8877 --data-dir /path/to/app-state
+python3 scripts/generate_api_client.py --check
 ```
 
-## Workflow
+See [API](docs/api.md), [architecture](docs/architecture.md), [data model](docs/data-model.md), [security/privacy](docs/security.md), and [runbook](docs/runbook.md).
 
-1. **Library** — index any local folder of supported video files. Choose bounded initial scan or entire library.
-2. **Align** — select reference source and set reversible synchronization offsets.
-3. **Cut** — select Program Video per interval, link/unlink Program Audio, and reconcile explicit gaps/overlaps.
-4. **Review** — inspect preflight, fidelity plan, and manifest; mark reviewed; render MP4 or lossless intermediate.
-
-Supported discovery extensions: MP4, MOV, MKV, M4V, AVI, WebM, MTS, M2TS, and TS. Unsupported or malformed files become warnings rather than aborting whole scan.
-
-## Test
+## Verify
 
 ```bash
 python3 -m unittest discover -v
-python3 -m compileall -q room_alignment tests
+python3 -m compileall -q room_alignment scripts tests
+node --check web/api-client.js
 node --check web/app.js
+python3 scripts/benchmark_local.py
 ```
 
-## Project status
+Read-only corpus validation accepts paths only as runtime arguments so private paths and names are never committed:
 
-Current implementation provides real scanning, alignment/edit-decision persistence, preflight, manifest generation, FFmpeg rendering, render cancellation, and connected browser UI. See [runbook](docs/runbook.md), [architecture](docs/architecture.md), and [risk register](docs/risk-register.md).
+```bash
+python3 scripts/validate_reference_corpus.py /path/to/corpus --state-dir /separate/state/directory
+```
 
+Canonical-state administration:
+
+```bash
+python3 scripts/state_admin.py verify /path/to/room-alignment.sqlite3
+python3 scripts/state_admin.py backup /path/to/room-alignment.sqlite3 /separate/backup.sqlite3
+python3 scripts/state_admin.py dry-run-migrate /separate/backup.sqlite3
+python3 scripts/state_admin.py restore /path/to/room-alignment.sqlite3 /separate/backup.sqlite3 --replace
+```
+
+Restore refuses to run while the application owns the state directory and creates a verified rollback copy before replacement. Source media is never included in application-state backup.
+
+## Delivery state
+
+This repository is a local source release candidate only when the requirement ledger and verification report say so. Packaging, installation, signing, notarization, publication, deployment, and distribution are separate authority states.

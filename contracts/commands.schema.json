@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://room-alignment.local/contracts/commands.schema.json",
+  "title": "ProjectCommand",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["commandId", "expectedRevision", "commandType", "payload"],
+  "properties": {
+    "commandId": {"type": "string", "minLength": 1, "maxLength": 200},
+    "expectedRevision": {"type": "integer", "minimum": 1},
+    "commandType": {
+      "enum": [
+        "UpdateProjectMetadata", "AddLogicalSource", "RenameLogicalSource", "MergeLogicalSources",
+        "SplitLogicalSource", "ArchiveLogicalSource", "AssignClip", "SetReferenceSource",
+        "SetSyncTransform", "InitializeProgram", "AddVideoBlock", "SplitVideoBlock",
+        "MoveVideoBoundary", "DeleteVideoBlock", "AssignVideoSource", "PinVideoClip", "CutToSource",
+        "AddAudioBlock", "SplitAudioBlock", "MoveAudioBoundary", "DeleteAudioBlock", "SetAudioMode",
+        "SetAnchoringMode", "ReconcileBoundary", "ArchiveProject", "AcceptAlignmentSuggestion",
+        "RejectAlignmentSuggestion"
+      ]
+    },
+    "payload": {"type": "object"}
+  },
+  "allOf": [
+    {
+      "oneOf": [
+        {"$ref": "#/$defs/UpdateProjectMetadata"},
+        {"$ref": "#/$defs/AddLogicalSource"},
+        {"$ref": "#/$defs/RenameLogicalSource"},
+        {"$ref": "#/$defs/MergeLogicalSources"},
+        {"$ref": "#/$defs/SplitLogicalSource"},
+        {"$ref": "#/$defs/ArchiveLogicalSource"},
+        {"$ref": "#/$defs/AssignClip"},
+        {"$ref": "#/$defs/SetReferenceSource"},
+        {"$ref": "#/$defs/SetSyncTransform"},
+        {"$ref": "#/$defs/InitializeProgram"},
+        {"$ref": "#/$defs/AddVideoBlock"},
+        {"$ref": "#/$defs/SplitVideoBlock"},
+        {"$ref": "#/$defs/MoveVideoBoundary"},
+        {"$ref": "#/$defs/DeleteVideoBlock"},
+        {"$ref": "#/$defs/AssignVideoSource"},
+        {"$ref": "#/$defs/PinVideoClip"},
+        {"$ref": "#/$defs/CutToSource"},
+        {"$ref": "#/$defs/AddAudioBlock"},
+        {"$ref": "#/$defs/SplitAudioBlock"},
+        {"$ref": "#/$defs/MoveAudioBoundary"},
+        {"$ref": "#/$defs/DeleteAudioBlock"},
+        {"$ref": "#/$defs/SetAudioMode"},
+        {"$ref": "#/$defs/SetAnchoringMode"},
+        {"$ref": "#/$defs/ReconcileBoundary"},
+        {"$ref": "#/$defs/ArchiveProject"},
+        {"$ref": "#/$defs/AcceptAlignmentSuggestion"},
+        {"$ref": "#/$defs/RejectAlignmentSuggestion"}
+      ]
+    }
+  ],
+  "$defs": {
+    "Id": {"type": "string", "minLength": 1},
+    "Us": {"type": "integer", "minimum": 0},
+    "Empty": {"type": "object", "maxProperties": 0},
+    "Discriminator": {
+      "type": "object",
+      "required": ["commandType", "payload"]
+    },
+    "UpdateProjectMetadata": {
+      "properties": {"commandType": {"const": "UpdateProjectMetadata"}, "payload": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 200}}}}
+    },
+    "AddLogicalSource": {
+      "properties": {"commandType": {"const": "AddLogicalSource"}, "payload": {"type": "object", "additionalProperties": false, "required": ["label"], "properties": {"id": {"$ref": "#/$defs/Id"}, "label": {"type": "string", "minLength": 1, "maxLength": 200}}}}
+    },
+    "RenameLogicalSource": {
+      "properties": {"commandType": {"const": "RenameLogicalSource"}, "payload": {"type": "object", "additionalProperties": false, "required": ["sourceId", "label"], "properties": {"sourceId": {"$ref": "#/$defs/Id"}, "label": {"type": "string", "minLength": 1, "maxLength": 200}}}}
+    },
+    "MergeLogicalSources": {
+      "properties": {"commandType": {"const": "MergeLogicalSources"}, "payload": {"type": "object", "additionalProperties": false, "required": ["targetSourceId", "sourceIds"], "properties": {"targetSourceId": {"$ref": "#/$defs/Id"}, "sourceIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}}}}}
+    },
+    "SplitLogicalSource": {
+      "properties": {"commandType": {"const": "SplitLogicalSource"}, "payload": {"type": "object", "additionalProperties": false, "required": ["sourceId", "clipIds", "label"], "properties": {"sourceId": {"$ref": "#/$defs/Id"}, "newSourceId": {"$ref": "#/$defs/Id"}, "clipIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}}, "label": {"type": "string", "minLength": 1}}}}
+    },
+    "ArchiveLogicalSource": {
+      "properties": {"commandType": {"const": "ArchiveLogicalSource"}, "payload": {"type": "object", "additionalProperties": false, "required": ["sourceId", "archived"], "properties": {"sourceId": {"$ref": "#/$defs/Id"}, "archived": {"type": "boolean"}}}}
+    },
+    "AssignClip": {
+      "properties": {"commandType": {"const": "AssignClip"}, "payload": {"type": "object", "additionalProperties": false, "required": ["clipId", "logicalSourceId"], "properties": {"clipId": {"$ref": "#/$defs/Id"}, "logicalSourceId": {"$ref": "#/$defs/Id"}}}}
+    },
+    "SetReferenceSource": {
+      "properties": {"commandType": {"const": "SetReferenceSource"}, "payload": {"type": "object", "additionalProperties": false, "required": ["sourceId"], "properties": {"sourceId": {"$ref": "#/$defs/Id"}}}}
+    },
+    "SetSyncTransform": {
+      "properties": {"commandType": {"const": "SetSyncTransform"}, "payload": {"type": "object", "additionalProperties": false, "required": ["clipId", "sync"], "properties": {"clipId": {"$ref": "#/$defs/Id"}, "sync": {"$ref": "./domain.schema.json#/$defs/SyncTransform"}, "confirmDrift": {"type": "boolean"}}}}
+    },
+    "InitializeProgram": {"properties": {"commandType": {"const": "InitializeProgram"}, "payload": {"$ref": "#/$defs/Empty"}}},
+    "AddVideoBlock": {
+      "properties": {"commandType": {"const": "AddVideoBlock"}, "payload": {"type": "object", "additionalProperties": false, "required": ["startUs", "endUs", "logicalSourceId"], "properties": {"id": {"$ref": "#/$defs/Id"}, "startUs": {"$ref": "#/$defs/Us"}, "endUs": {"$ref": "#/$defs/Us"}, "logicalSourceId": {"$ref": "#/$defs/Id"}, "pinnedClipId": {"type": ["string", "null"]}}}}
+    },
+    "SplitVideoBlock": {
+      "properties": {"commandType": {"const": "SplitVideoBlock"}, "payload": {"type": "object", "additionalProperties": false, "required": ["blockId", "atUs"], "properties": {"blockId": {"$ref": "#/$defs/Id"}, "atUs": {"$ref": "#/$defs/Us"}, "newBlockId": {"$ref": "#/$defs/Id"}}}}
+    },
+    "MoveVideoBoundary": {
+      "properties": {"commandType": {"const": "MoveVideoBoundary"}, "payload": {"$ref": "#/$defs/BoundaryPayload"}}
+    },
+    "DeleteVideoBlock": {"properties": {"commandType": {"const": "DeleteVideoBlock"}, "payload": {"$ref": "#/$defs/BlockIdPayload"}}},
+    "AssignVideoSource": {
+      "properties": {"commandType": {"const": "AssignVideoSource"}, "payload": {"type": "object", "additionalProperties": false, "required": ["blockId", "logicalSourceId"], "properties": {"blockId": {"$ref": "#/$defs/Id"}, "logicalSourceId": {"$ref": "#/$defs/Id"}}}}
+    },
+    "PinVideoClip": {
+      "properties": {"commandType": {"const": "PinVideoClip"}, "payload": {"type": "object", "additionalProperties": false, "required": ["blockId", "clipId"], "properties": {"blockId": {"$ref": "#/$defs/Id"}, "clipId": {"type": ["string", "null"]}}}}
+    },
+    "CutToSource": {
+      "properties": {"commandType": {"const": "CutToSource"}, "payload": {"type": "object", "additionalProperties": false, "required": ["blockId", "atUs", "logicalSourceId"], "properties": {"blockId": {"$ref": "#/$defs/Id"}, "atUs": {"$ref": "#/$defs/Us"}, "logicalSourceId": {"$ref": "#/$defs/Id"}, "pinnedClipId": {"type": ["string", "null"]}, "newBlockId": {"$ref": "#/$defs/Id"}}}}
+    },
+    "AddAudioBlock": {
+      "properties": {"commandType": {"const": "AddAudioBlock"}, "payload": {"$ref": "#/$defs/AudioPayload"}}
+    },
+    "SplitAudioBlock": {
+      "properties": {"commandType": {"const": "SplitAudioBlock"}, "payload": {"type": "object", "additionalProperties": false, "required": ["blockId", "atUs"], "properties": {"blockId": {"$ref": "#/$defs/Id"}, "atUs": {"$ref": "#/$defs/Us"}}}}
+    },
+    "MoveAudioBoundary": {"properties": {"commandType": {"const": "MoveAudioBoundary"}, "payload": {"$ref": "#/$defs/BoundaryPayload"}}},
+    "DeleteAudioBlock": {"properties": {"commandType": {"const": "DeleteAudioBlock"}, "payload": {"$ref": "#/$defs/BlockIdPayload"}}},
+    "SetAudioMode": {
+      "properties": {"commandType": {"const": "SetAudioMode"}, "payload": {"type": "object", "additionalProperties": false, "required": ["blockId", "mode"], "properties": {"blockId": {"$ref": "#/$defs/Id"}, "mode": {"enum": ["FOLLOW_VIDEO", "FIXED_SOURCE", "FIXED_CLIP", "SILENCE"]}, "logicalSourceId": {"type": ["string", "null"]}, "clipId": {"type": ["string", "null"]}, "offsetUs": {"type": "integer"}, "ratePpm": {"type": "integer", "minimum": -2000, "maximum": 2000}, "confirmDrift": {"type": "boolean"}}}}
+    },
+    "SetAnchoringMode": {
+      "properties": {"commandType": {"const": "SetAnchoringMode"}, "payload": {"type": "object", "additionalProperties": false, "required": ["anchorMode"], "properties": {"anchorMode": {"enum": ["PROGRAM_TIME", "SOURCE_TIME"]}}}}
+    },
+    "ReconcileBoundary": {
+      "properties": {"commandType": {"const": "ReconcileBoundary"}, "payload": {"type": "object", "required": ["operation"], "properties": {"operation": {"enum": ["CLOSE_GAP", "TRIM_OVERLAP", "NORMALIZE_RANGE"]}, "leftBlockId": {"$ref": "#/$defs/Id"}, "rightBlockId": {"$ref": "#/$defs/Id"}, "atUs": {"$ref": "#/$defs/Us"}, "startUs": {"$ref": "#/$defs/Us"}, "endUs": {"$ref": "#/$defs/Us"}}}}
+    },
+    "ArchiveProject": {"properties": {"commandType": {"const": "ArchiveProject"}, "payload": {"$ref": "#/$defs/Empty"}}},
+    "AcceptAlignmentSuggestion": {
+      "properties": {"commandType": {"const": "AcceptAlignmentSuggestion"}, "payload": {"type": "object", "additionalProperties": false, "required": ["suggestionId", "clipId", "sync"], "properties": {"suggestionId": {"$ref": "#/$defs/Id"}, "clipId": {"$ref": "#/$defs/Id"}, "sync": {"$ref": "./domain.schema.json#/$defs/SyncTransform"}, "confirmDrift": {"type": "boolean"}}}}
+    },
+    "RejectAlignmentSuggestion": {
+      "properties": {"commandType": {"const": "RejectAlignmentSuggestion"}, "payload": {"type": "object", "additionalProperties": false, "required": ["suggestionId"], "properties": {"suggestionId": {"$ref": "#/$defs/Id"}}}}
+    },
+    "BoundaryPayload": {
+      "type": "object", "additionalProperties": false, "required": ["leftBlockId", "rightBlockId", "atUs"],
+      "properties": {"leftBlockId": {"$ref": "#/$defs/Id"}, "rightBlockId": {"$ref": "#/$defs/Id"}, "atUs": {"$ref": "#/$defs/Us"}}
+    },
+    "BlockIdPayload": {
+      "type": "object", "additionalProperties": false, "required": ["blockId"], "properties": {"blockId": {"$ref": "#/$defs/Id"}}
+    },
+    "AudioPayload": {
+      "type": "object",
+      "required": ["startUs", "endUs", "mode"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Id"}, "startUs": {"$ref": "#/$defs/Us"}, "endUs": {"$ref": "#/$defs/Us"},
+        "mode": {"enum": ["FOLLOW_VIDEO", "FIXED_SOURCE", "FIXED_CLIP", "SILENCE"]},
+        "logicalSourceId": {"type": ["string", "null"]}, "clipId": {"type": ["string", "null"]},
+        "offsetUs": {"type": "integer"}, "ratePpm": {"type": "integer", "minimum": -2000, "maximum": 2000}
+      }
+    }
+  }
+}

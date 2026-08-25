@@ -90,6 +90,9 @@ class StoreV1Tests(unittest.TestCase):
         repeated = self.store.apply_project_command(project["id"], envelope)
         self.assertEqual(first, repeated)
         self.assertEqual(first["appliedRevision"], 2)
+        self.assertIn("affectedIntervals", first)
+        self.assertEqual(self.store.project_revision(project["id"], 1)["name"], "Event")
+        self.assertEqual(self.store.project_revision(project["id"], 2)["name"], "Renamed")
         with self.assertRaisesRegex(DomainError, "already used"):
             self.store.apply_project_command(
                 project["id"],
@@ -152,6 +155,49 @@ class StoreV1Tests(unittest.TestCase):
         self.assertEqual(self.store.media_record("asset-original")["relative_path"], "new-name.mp4")
         with self.assertRaises(DomainError):
             self.store.media_record("path-derived-new-id")
+
+    def test_library_time_policy_renormalizes_without_losing_raw_evidence(self):
+        media = self.record("clock", "clock.mp4")
+        media.captured_at = "2026-10-25T01:30:00"
+        self.scan("FULL", [media])
+        first = self.store.media_record("clock")
+        self.assertEqual(first["custom"]["timestampPolicy"]["ambiguity"], "AMBIGUOUS_FOLD")
+        self.assertEqual(first["custom"]["timestampPolicy"]["rawValue"], "2026-10-25T01:30:00")
+        self.store.update_library_time_policy(self.library["id"], "Europe/Dublin", 1, "REJECT")
+        second = self.store.media_record("clock")
+        self.assertNotEqual(first["captured_at"], second["captured_at"])
+        self.assertEqual(second["custom"]["timestampPolicy"]["rawValue"], "2026-10-25T01:30:00")
+
+    def test_legacy_project_migration_preserves_unknowns_and_requires_explicit_silence(self):
+        first = self.record("first", "first.mp4")
+        second = self.record("second", "second.mp4")
+        first.source_candidate_id = second.source_candidate_id = "candidate-same"
+        self.scan("FULL", [first, second])
+        legacy = {
+            "id": "legacy-project",
+            "name": "Legacy",
+            "libraryId": self.library["id"],
+            "revision": 7,
+            "alignment": {"first": {"offsetMs": 25}, "second": {"offsetMs": 50}},
+            "videoSegments": [
+                {"id": "v1", "mediaId": "first", "start": "0.0000005", "end": "1.2345675"}
+            ],
+            "audioSegments": [
+                {"id": "implicit-null", "mediaId": None, "start": 0, "end": 1, "linked": False},
+                {"id": "explicit-silence", "mediaId": None, "start": 0, "end": 1, "silence": True},
+            ],
+            "unknownRecoveryField": {"retain": True},
+            "review": {"ready": True},
+        }
+        self.store.save_project(legacy)
+        migrated = self.store.project("legacy-project")
+        self.assertEqual(len(migrated["logicalSources"]), 2)
+        self.assertEqual(migrated["videoBlocks"][0]["startUs"], 0)
+        self.assertEqual(migrated["videoBlocks"][0]["endUs"], 1_234_568)
+        self.assertEqual([item["id"] for item in migrated["audioBlocks"]], ["explicit-silence"])
+        self.assertTrue(migrated["legacy"]["unknownRecoveryField"]["retain"])
+        self.assertEqual(migrated["migration"]["rounding"], "half-even")
+        self.assertIsNone(migrated["review"])
 
 
 if __name__ == "__main__":

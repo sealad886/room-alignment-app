@@ -1,6 +1,6 @@
 [project]
 name = "room-alignment"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local-first multi-camera video alignment and single-view editing"
 requires-python = ">=3.11"
 
@@ -15,4 +15,3 @@ target-version = "py311"
 include = ["room_alignment"]
 pythonVersion = "3.11"
 typeCheckingMode = "basic"
-

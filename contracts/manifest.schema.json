@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://room-alignment.local/contracts/manifest.schema.json",
+  "title": "Room Alignment provenance manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema", "artifact", "project", "renderPlan", "sourceSetDigest", "provenanceResolutions",
+    "sources", "outputTimebase", "videoSlices", "audioSlices", "transforms", "warnings",
+    "toolVersions", "fidelity", "manifestCanonicalContentSha256"
+  ],
+  "properties": {
+    "schema": {"const": "room-alignment-provenance-manifest/v1"},
+    "artifact": {
+      "type": "object",
+      "required": ["id", "videoSha256", "manifestSha256", "manifestFileDigestRecordedInArtifactState"],
+      "properties": {
+        "id": {"type": ["string", "null"]},
+        "videoSha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "manifestSha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "manifestFileDigestRecordedInArtifactState": {"const": true}
+      }
+    },
+    "project": {
+      "type": "object",
+      "required": ["id", "revision", "provenanceRevision"],
+      "properties": {"id": {"type": "string"}, "revision": {"type": "integer"}, "provenanceRevision": {"type": "integer"}}
+    },
+    "renderPlan": {
+      "type": "object",
+      "required": ["id", "digest"],
+      "properties": {"id": {"type": "string"}, "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}
+    },
+    "sourceSetDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "provenanceResolutions": {"type": "array", "items": {"type": "object"}},
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["assetId", "libraryRelativePath", "size", "sha256"],
+        "properties": {
+          "assetId": {"type": "string"}, "libraryRelativePath": {"type": "string"},
+          "size": {"type": "integer", "minimum": 0}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+        }
+      }
+    },
+    "outputTimebase": {
+      "type": "object", "additionalProperties": false, "required": ["unit", "intervals"],
+      "properties": {"unit": {"const": "microseconds"}, "intervals": {"const": "half-open"}}
+    },
+    "videoSlices": {"type": "array", "items": {"$ref": "./domain.schema.json#/$defs/CompiledSourceSlice"}},
+    "audioSlices": {"type": "array", "items": {"$ref": "./domain.schema.json#/$defs/CompiledAudioSlice"}},
+    "transforms": {
+      "type": "object",
+      "required": ["profile", "container", "videoCodec", "audioCodec", "normalization", "sourceMediaUnchanged", "streamCopy", "decodedAndReencoded"],
+      "properties": {
+        "profile": {"enum": ["COMPATIBLE", "ARCHIVAL_LOSSLESS"]}, "container": {"type": "string"},
+        "videoCodec": {"type": "string"}, "audioCodec": {"type": "string"}, "normalization": {"type": "object"},
+        "sourceMediaUnchanged": {"const": true}, "streamCopy": {"type": "boolean"}, "decodedAndReencoded": {"type": "boolean"}
+      }
+    },
+    "warnings": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "toolVersions": {"type": "object", "required": ["application", "ffmpeg", "ffprobe"], "additionalProperties": {"type": "string"}},
+    "fidelity": {
+      "type": "object", "additionalProperties": false,
+      "required": ["claim", "sourceFilesModified", "generatedSilenceDisclosed"],
+      "properties": {
+        "claim": {"enum": ["compatible-reencode", "lossless-encode-after-processing"]},
+        "sourceFilesModified": {"const": false}, "generatedSilenceDisclosed": {"type": "boolean"}
+      }
+    },
+    "manifestCanonicalContentSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+  }
+}

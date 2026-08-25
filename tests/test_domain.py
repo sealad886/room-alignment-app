@@ -47,6 +47,7 @@ class ProgramCompilerTests(unittest.TestCase):
         assets = [asset("a", "Door", 5_000_000), asset("b", "Door", 5_000_000)]
         project = new_project("Event", "lib", assets, "project")
         source_id = project["logicalSources"][0]["id"]
+        project["clips"][1]["logicalSourceId"] = source_id
         project["clips"][1]["sync"]["anchorOutputUs"] = 5_000_000
         project["videoBlocks"] = [
             {
@@ -77,6 +78,7 @@ class ProgramCompilerTests(unittest.TestCase):
         assets = [asset("a", "Door", 10_000_000), asset("b", "Door", 10_000_000)]
         project = new_project("Event", "lib", assets, "project")
         source_id = project["logicalSources"][0]["id"]
+        project["clips"][1]["logicalSourceId"] = source_id
         project["videoBlocks"] = [
             {
                 "id": "video",
@@ -104,6 +106,13 @@ class ProgramCompilerTests(unittest.TestCase):
         project["videoBlocks"][0]["pinnedClipId"] = project["clips"][0]["id"]
         resolved = compile_program(project, by_id)
         self.assertTrue(resolved["valid"], resolved["issues"])
+
+    def test_source_candidates_never_silently_become_one_logical_source(self):
+        assets = [asset("a", "Same label", 5_000_000), asset("b", "Same label", 5_000_000)]
+        assets[0]["sourceCandidateId"] = assets[1]["sourceCandidateId"] = "candidate-same"
+        project = new_project("Event", "lib", assets, "project")
+        self.assertEqual(len(project["logicalSources"]), 2)
+        self.assertNotEqual(project["clips"][0]["logicalSourceId"], project["clips"][1]["logicalSourceId"])
 
     def test_follow_video_without_audio_blocks_instead_of_inventing_silence(self):
         media = asset("a", "Door", 5_000_000, audio=False)

@@ -7,18 +7,21 @@
   },
   "servers": [{"url": "/api/v1"}],
   "paths": {
-    "/system": {"get": {"operationId": "getSystem", "responses": {"200": {"description": "Capabilities"}}}},
-    "/session": {"get": {"operationId": "getSession", "responses": {"200": {"description": "Authenticated local session"}}}},
+    "/system": {"get": {"operationId": "getSystem", "responses": {"200": {"description": "Capabilities", "content": {"application/json": {"schema": {"$ref": "./contracts/api.schema.json#/$defs/System"}}}}}}},
+    "/session": {"get": {"operationId": "getSession", "responses": {"200": {"description": "Authenticated local session", "content": {"application/json": {"schema": {"$ref": "./contracts/api.schema.json#/$defs/Session"}}}}}}},
+    "/openapi.json": {"get": {"operationId": "getOpenApiContract", "responses": {"200": {"description": "Normative OpenAPI contract"}}}},
+    "/contracts/{contractName}": {"get": {"operationId": "getJsonSchemaContract", "responses": {"200": {"description": "Normative JSON Schema contract"}}}},
     "/grants": {
       "get": {"operationId": "listGrants", "responses": {"200": {"description": "Directory grants"}}},
-      "post": {"operationId": "createGrant", "responses": {"201": {"description": "Directory grant"}}}
+      "post": {"operationId": "createGrant", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "./contracts/api.schema.json#/$defs/GrantCreate"}}}}, "responses": {"201": {"description": "Directory grant", "content": {"application/json": {"schema": {"$ref": "./contracts/domain.schema.json#/$defs/DirectoryGrant"}}}}}}
     },
     "/grants/{grantId}/revoke": {"post": {"operationId": "revokeGrant", "responses": {"200": {"description": "Revoked grant"}}}},
     "/libraries": {
       "get": {"operationId": "listLibraries", "responses": {"200": {"description": "Libraries"}}},
-      "post": {"operationId": "createLibrary", "responses": {"201": {"description": "Library"}}}
+      "post": {"operationId": "createLibrary", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "./contracts/api.schema.json#/$defs/LibraryCreate"}}}}, "responses": {"201": {"description": "Library", "content": {"application/json": {"schema": {"$ref": "./contracts/api.schema.json#/$defs/Library"}}}}}}
     },
-    "/libraries/{libraryId}/scans": {"post": {"operationId": "startScan", "responses": {"202": {"description": "Scan"}}}},
+    "/libraries/{libraryId}/scans": {"post": {"operationId": "startScan", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "./contracts/api.schema.json#/$defs/ScanStart"}}}}, "responses": {"202": {"description": "Scan", "content": {"application/json": {"schema": {"$ref": "./contracts/api.schema.json#/$defs/Scan"}}}}}}},
+    "/libraries/{libraryId}/time-policy": {"post": {"operationId": "updateLibraryTimePolicy", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "./contracts/api.schema.json#/$defs/LibraryTimePolicy"}}}}, "responses": {"200": {"description": "Library with re-normalized timestamp policy"}}}},
     "/libraries/{libraryId}/cluster-jobs": {"post": {"operationId": "startClusterAnalysis", "responses": {"202": {"description": "Non-mutating cluster analysis job"}}}},
     "/libraries/{libraryId}/cluster-suggestions": {"get": {"operationId": "listClusterSuggestions", "responses": {"200": {"description": "Evidence-bearing project membership suggestions"}}}},
     "/scans/{scanId}": {"get": {"operationId": "getScan", "responses": {"200": {"description": "Scan"}}}},
@@ -27,13 +30,14 @@
     "/media/{mediaId}": {"get": {"operationId": "getMedia", "responses": {"200": {"description": "Media asset"}}}},
     "/media/{mediaId}/provenance/resolutions": {
       "get": {"operationId": "listProvenanceResolutions", "responses": {"200": {"description": "Resolution ledger"}}},
-      "post": {"operationId": "resolveProvenance", "responses": {"201": {"description": "Resolution"}}}
+      "post": {"operationId": "resolveProvenance", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "./contracts/api.schema.json#/$defs/ProvenanceResolutionCreate"}}}}, "responses": {"201": {"description": "Resolution"}}}
     },
     "/projects": {
       "get": {"operationId": "listProjects", "responses": {"200": {"description": "Projects"}}},
-      "post": {"operationId": "createProject", "responses": {"201": {"description": "Project"}}}
+      "post": {"operationId": "createProject", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "./contracts/api.schema.json#/$defs/ProjectCreate"}}}}, "responses": {"201": {"description": "Project", "content": {"application/json": {"schema": {"$ref": "./contracts/domain.schema.json#/$defs/Project"}}}}}}
     },
     "/projects/{projectId}": {"get": {"operationId": "getProject", "responses": {"200": {"description": "Project"}}}},
+    "/projects/{projectId}/revisions/{revision}": {"get": {"operationId": "getProjectRevision", "responses": {"200": {"description": "Retained immutable project revision", "content": {"application/json": {"schema": {"$ref": "./contracts/domain.schema.json#/$defs/Project"}}}}}}},
     "/projects/{projectId}/commands": {
       "post": {
         "operationId": "applyProjectCommand",
@@ -45,72 +49,23 @@
     "/projects/{projectId}/program-at": {"get": {"operationId": "getProgramAt", "responses": {"200": {"description": "Canonical program selection at outputUs"}}}},
     "/projects/{projectId}/suggestions": {"get": {"operationId": "listSuggestions", "responses": {"200": {"description": "Suggestions"}}}},
     "/projects/{projectId}/alignment-jobs": {"post": {"operationId": "startAlignmentAnalysis", "responses": {"202": {"description": "Non-mutating alignment analysis job"}}}},
-    "/projects/{projectId}/render-plans": {"post": {"operationId": "createRenderPlan", "responses": {"201": {"description": "Immutable render plan"}}}},
+    "/projects/{projectId}/render-plans": {"post": {"operationId": "createRenderPlan", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "./contracts/api.schema.json#/$defs/RenderPlanCreate"}}}}, "responses": {"201": {"description": "Immutable render plan"}}}},
     "/render-plans/{planId}": {"get": {"operationId": "getRenderPlan", "responses": {"200": {"description": "Render plan"}}}},
-    "/render-plans/{planId}/review": {"post": {"operationId": "attestReview", "responses": {"201": {"description": "Review attestation"}}}},
+    "/render-plans/{planId}/review": {"post": {"operationId": "attestReview", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "./contracts/api.schema.json#/$defs/ReviewCreate"}}}}, "responses": {"201": {"description": "Review attestation"}}}},
     "/render-plans/{planId}/render": {"post": {"operationId": "startRender", "responses": {"202": {"description": "Render job and artifact"}}}},
     "/jobs/{jobId}": {"get": {"operationId": "getJob", "responses": {"200": {"description": "Durable job"}}}},
     "/jobs/{jobId}/cancel": {"post": {"operationId": "cancelJob", "responses": {"200": {"description": "Job"}}}},
-    "/jobs/event-token": {"post": {"operationId": "createEventToken", "responses": {"201": {"description": "Short-lived SSE token"}}}},
+    "/jobs/event-token": {"post": {"operationId": "createEventToken", "responses": {"201": {"description": "Short-lived SSE token", "content": {"application/json": {"schema": {"$ref": "./contracts/api.schema.json#/$defs/EventToken"}}}}}}},
     "/events": {"get": {"operationId": "streamEvents", "responses": {"200": {"description": "text/event-stream; see contracts/events.md"}}}},
     "/artifacts/{artifactId}": {"get": {"operationId": "getArtifact", "responses": {"200": {"description": "Artifact state"}}}},
+    "/artifacts/{artifactId}/video": {"get": {"operationId": "getArtifactVideo", "responses": {"200": {"description": "Completed video artifact byte stream"}}}},
     "/artifacts/{artifactId}/manifest": {"get": {"operationId": "getManifest", "responses": {"200": {"description": "Completed manifest"}}}}
   },
   "components": {
     "schemas": {
-      "ProjectCommand": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": ["commandId", "expectedRevision", "commandType", "payload"],
-        "properties": {
-          "commandId": {"type": "string", "minLength": 1},
-          "expectedRevision": {"type": "integer", "minimum": 1},
-          "commandType": {
-            "type": "string",
-            "enum": [
-              "UpdateProjectMetadata", "AddLogicalSource", "RenameLogicalSource", "MergeLogicalSources",
-              "SplitLogicalSource", "ArchiveLogicalSource", "AssignClip", "SetReferenceSource",
-              "SetSyncTransform", "InitializeProgram", "AddVideoBlock", "SplitVideoBlock",
-              "MoveVideoBoundary", "DeleteVideoBlock", "AssignVideoSource", "PinVideoClip", "CutToSource",
-              "AddAudioBlock", "SplitAudioBlock", "MoveAudioBoundary", "DeleteAudioBlock", "SetAudioMode",
-              "SetAnchoringMode", "ReconcileBoundary", "ArchiveProject", "AcceptAlignmentSuggestion",
-              "RejectAlignmentSuggestion"
-            ]
-          },
-          "payload": {"type": "object"}
-        }
-      },
-      "CommandResult": {
-        "type": "object",
-        "required": ["commandId", "projectId", "previousRevision", "appliedRevision", "project", "issues", "reviewState", "eventCursor"],
-        "properties": {
-          "commandId": {"type": "string"},
-          "projectId": {"type": "string"},
-          "previousRevision": {"type": "integer"},
-          "appliedRevision": {"type": "integer"},
-          "project": {"type": "object"},
-          "issues": {"type": "array", "items": {"type": "object"}},
-          "reviewState": {"type": "string"},
-          "eventCursor": {"type": "integer"}
-        }
-      },
-      "ErrorEnvelope": {
-        "type": "object",
-        "required": ["error"],
-        "properties": {
-          "error": {
-            "type": "object",
-            "required": ["code", "message", "requestId", "retryable"],
-            "properties": {
-              "code": {"type": "string"},
-              "message": {"type": "string"},
-              "requestId": {"type": "string"},
-              "retryable": {"type": "boolean"},
-              "details": {"type": "object"}
-            }
-          }
-        }
-      }
+      "ProjectCommand": {"$ref": "./contracts/commands.schema.json"},
+      "CommandResult": {"$ref": "./contracts/api.schema.json#/$defs/CommandResult"},
+      "ErrorEnvelope": {"$ref": "./contracts/api.schema.json#/$defs/ErrorEnvelope"}
     }
   }
 }

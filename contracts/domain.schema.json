@@ -1,0 +1,307 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://room-alignment.local/contracts/domain.schema.json",
+  "title": "Room Alignment canonical domain",
+  "$defs": {
+    "OpaqueId": {"type": "string", "minLength": 1, "maxLength": 200},
+    "Us": {"type": "integer", "minimum": 0},
+    "Interval": {
+      "type": "object",
+      "required": ["startUs", "endUs"],
+      "properties": {"startUs": {"$ref": "#/$defs/Us"}, "endUs": {"$ref": "#/$defs/Us"}}
+    },
+    "SyncTransform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["anchorSourceUs", "anchorOutputUs", "ratePpm"],
+      "properties": {
+        "anchorSourceUs": {"type": "integer"},
+        "anchorOutputUs": {"type": "integer"},
+        "ratePpm": {"type": "integer", "minimum": -2000, "maximum": 2000}
+      }
+    },
+    "DirectoryGrant": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "role", "label", "revoked", "createdAt"],
+      "properties": {
+        "id": {"$ref": "#/$defs/OpaqueId"},
+        "role": {"enum": ["READ_ONLY_SOURCE", "WRITE_OUTPUT"]},
+        "label": {"type": "string"},
+        "revoked": {"type": "boolean"},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "revokedAt": {"type": ["string", "null"], "format": "date-time"}
+      }
+    },
+    "ProvenanceEvidence": {
+      "type": "object",
+      "required": ["kind", "field", "value", "confidence", "origin", "observed_at", "extractor", "extractor_version"],
+      "properties": {
+        "kind": {"type": "string", "minLength": 1},
+        "field": {"type": "string", "minLength": 1},
+        "value": {},
+        "raw_value": {},
+        "normalized_value": {},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "origin": {"type": "string"},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "extractor": {"type": "string"},
+        "extractor_version": {"type": "string"},
+        "uncertainty": {"type": ["string", "null"]}
+      }
+    },
+    "MediaStream": {
+      "type": "object",
+      "required": ["id", "codecType"],
+      "properties": {
+        "id": {"$ref": "#/$defs/OpaqueId"},
+        "index": {"type": "integer", "minimum": 0},
+        "codecType": {"enum": ["video", "audio", "subtitle", "data", "attachment"]},
+        "codecName": {"type": ["string", "null"]},
+        "timeBase": {"type": ["string", "null"]},
+        "startPts": {"type": ["integer", "string", "null"]},
+        "durationTs": {"type": ["integer", "string", "null"]},
+        "averageFrameRate": {"type": ["string", "null"]},
+        "realFrameRate": {"type": ["string", "null"]},
+        "sampleAspectRatio": {"type": ["string", "null"]},
+        "rotation": {"type": ["integer", "string", "null"]},
+        "colorSpace": {"type": ["string", "null"]},
+        "colorTransfer": {"type": ["string", "null"]},
+        "colorPrimaries": {"type": ["string", "null"]},
+        "sampleRate": {"type": ["string", "integer", "null"]},
+        "channels": {"type": ["integer", "null"]},
+        "channelLayout": {"type": ["string", "null"]}
+      },
+      "additionalProperties": true
+    },
+    "MediaAsset": {
+      "type": "object",
+      "required": ["id", "library_id", "relative_path", "size", "modified_ns", "evidence", "streams", "fingerprint", "missing"],
+      "properties": {
+        "id": {"$ref": "#/$defs/OpaqueId"},
+        "library_id": {"$ref": "#/$defs/OpaqueId"},
+        "relative_path": {"type": "string", "minLength": 1},
+        "size": {"type": "integer", "minimum": 0},
+        "modified_ns": {"type": "integer", "minimum": 0},
+        "durationUs": {"type": ["integer", "null"], "minimum": 0},
+        "captured_at": {"type": ["string", "null"]},
+        "camera": {"type": ["string", "null"]},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/ProvenanceEvidence"}},
+        "custom": {"type": "object"},
+        "streams": {"type": "array", "items": {"$ref": "#/$defs/MediaStream"}},
+        "fingerprint": {"type": "object"},
+        "sourceCandidateId": {"type": ["string", "null"]},
+        "warning": {"type": ["string", "null"]},
+        "missing": {"type": "boolean"},
+        "generation": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": true
+    },
+    "LogicalSource": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["id", "label", "reference", "archived"],
+      "properties": {
+        "id": {"$ref": "#/$defs/OpaqueId"},
+        "label": {"type": "string", "minLength": 1, "maxLength": 200},
+        "reference": {"type": "boolean"},
+        "archived": {"type": "boolean"}
+      }
+    },
+    "ProjectClip": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "assetId", "logicalSourceId", "sync"],
+      "properties": {
+        "id": {"$ref": "#/$defs/OpaqueId"},
+        "assetId": {"$ref": "#/$defs/OpaqueId"},
+        "logicalSourceId": {"$ref": "#/$defs/OpaqueId"},
+        "sync": {"$ref": "#/$defs/SyncTransform"}
+      }
+    },
+    "VideoBlock": {
+      "allOf": [
+        {"$ref": "#/$defs/Interval"},
+        {
+          "type": "object",
+          "required": ["id", "logicalSourceId", "pinnedClipId"],
+          "properties": {
+            "id": {"$ref": "#/$defs/OpaqueId"},
+            "logicalSourceId": {"$ref": "#/$defs/OpaqueId"},
+            "pinnedClipId": {"type": ["string", "null"]}
+          }
+        }
+      ]
+    },
+    "AudioBlock": {
+      "allOf": [
+        {"$ref": "#/$defs/Interval"},
+        {
+          "type": "object",
+          "required": ["id", "mode", "logicalSourceId", "clipId", "offsetUs", "ratePpm"],
+          "properties": {
+            "id": {"$ref": "#/$defs/OpaqueId"},
+            "mode": {"enum": ["FOLLOW_VIDEO", "FIXED_SOURCE", "FIXED_CLIP", "SILENCE"]},
+            "logicalSourceId": {"type": ["string", "null"]},
+            "clipId": {"type": ["string", "null"]},
+            "offsetUs": {"type": "integer"},
+            "ratePpm": {"type": "integer", "minimum": -2000, "maximum": 2000}
+          }
+        }
+      ]
+    },
+    "ProgramIssue": {
+      "allOf": [
+        {"$ref": "#/$defs/Interval"},
+        {
+          "type": "object",
+          "required": ["id", "code", "severity", "message", "refs"],
+          "properties": {
+            "id": {"$ref": "#/$defs/OpaqueId"},
+            "code": {"type": "string"},
+            "severity": {"enum": ["BLOCKING", "WARNING"]},
+            "message": {"type": "string"},
+            "refs": {"type": "object"}
+          }
+        }
+      ]
+    },
+    "CompiledSourceSlice": {
+      "allOf": [
+        {"$ref": "#/$defs/Interval"},
+        {
+          "type": "object",
+          "required": ["id", "blockId", "logicalSourceId", "clipId", "assetId", "streamId", "sourceStartUs", "sourceEndUs", "sync"],
+          "properties": {
+            "id": {"$ref": "#/$defs/OpaqueId"},
+            "blockId": {"$ref": "#/$defs/OpaqueId"},
+            "logicalSourceId": {"$ref": "#/$defs/OpaqueId"},
+            "clipId": {"$ref": "#/$defs/OpaqueId"},
+            "assetId": {"$ref": "#/$defs/OpaqueId"},
+            "streamId": {"type": ["string", "null"]},
+            "sourceStartUs": {"$ref": "#/$defs/Us"},
+            "sourceEndUs": {"$ref": "#/$defs/Us"},
+            "sync": {"$ref": "#/$defs/SyncTransform"}
+          }
+        }
+      ]
+    },
+    "CompiledAudioSlice": {
+      "oneOf": [
+        {
+          "allOf": [
+            {"$ref": "#/$defs/Interval"},
+            {
+              "type": "object",
+              "required": ["id", "blockId", "mode", "synthetic", "transforms"],
+              "properties": {
+                "mode": {"const": "SILENCE"},
+                "synthetic": {"const": true},
+                "transforms": {"type": "array", "items": {"type": "string"}}
+              }
+            }
+          ]
+        },
+        {
+          "allOf": [
+            {"$ref": "#/$defs/CompiledSourceSlice"},
+            {
+              "type": "object",
+              "required": ["mode", "offsetUs", "ratePpm"],
+              "properties": {
+                "mode": {"enum": ["FOLLOW_VIDEO", "FIXED_SOURCE", "FIXED_CLIP"]},
+                "offsetUs": {"type": "integer"},
+                "ratePpm": {"type": "integer"}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "CompiledProgram": {
+      "type": "object",
+      "required": ["projectId", "revision", "durationUs", "videoSlices", "audioSlices", "issues", "valid"],
+      "properties": {
+        "projectId": {"$ref": "#/$defs/OpaqueId"},
+        "revision": {"type": "integer", "minimum": 1},
+        "durationUs": {"$ref": "#/$defs/Us"},
+        "videoSlices": {"type": "array", "items": {"$ref": "#/$defs/CompiledSourceSlice"}},
+        "audioSlices": {"type": "array", "items": {"$ref": "#/$defs/CompiledAudioSlice"}},
+        "issues": {"type": "array", "items": {"$ref": "#/$defs/ProgramIssue"}},
+        "valid": {"type": "boolean"}
+      }
+    },
+    "Project": {
+      "type": "object",
+      "required": ["id", "name", "libraryId", "revision", "provenanceRevision", "archived", "anchorMode", "logicalSources", "clips", "videoBlocks", "audioBlocks", "renderSettings", "review", "createdAt", "updatedAt"],
+      "properties": {
+        "id": {"$ref": "#/$defs/OpaqueId"},
+        "name": {"type": "string", "minLength": 1, "maxLength": 200},
+        "libraryId": {"$ref": "#/$defs/OpaqueId"},
+        "revision": {"type": "integer", "minimum": 1},
+        "provenanceRevision": {"type": "integer", "minimum": 0},
+        "archived": {"type": "boolean"},
+        "anchorMode": {"enum": ["PROGRAM_TIME", "SOURCE_TIME"]},
+        "logicalSources": {"type": "array", "items": {"$ref": "#/$defs/LogicalSource"}},
+        "clips": {"type": "array", "items": {"$ref": "#/$defs/ProjectClip"}},
+        "videoBlocks": {"type": "array", "items": {"$ref": "#/$defs/VideoBlock"}},
+        "audioBlocks": {"type": "array", "items": {"$ref": "#/$defs/AudioBlock"}},
+        "renderSettings": {"type": "object"},
+        "review": {"type": ["object", "null"]},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "updatedAt": {"type": "string", "format": "date-time"}
+      },
+      "additionalProperties": true
+    },
+    "Job": {
+      "type": "object",
+      "required": ["id", "kind", "status", "progress", "message", "createdAt", "updatedAt"],
+      "properties": {
+        "id": {"$ref": "#/$defs/OpaqueId"},
+        "kind": {"type": "string"},
+        "projectId": {"type": ["string", "null"]},
+        "libraryId": {"type": ["string", "null"]},
+        "status": {"enum": ["QUEUED", "RUNNING", "CANCEL_REQUESTED", "CANCELED", "SUCCEEDED", "FAILED", "INTERRUPTED", "FAILED_RECOVERABLE"]},
+        "progress": {"type": "number", "minimum": 0, "maximum": 1},
+        "message": {"type": ["string", "null"]},
+        "checkpoint": {"type": "object"},
+        "result": {"type": ["object", "null"]},
+        "errorCode": {"type": ["string", "null"]},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "updatedAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "JobEvent": {
+      "type": "object",
+      "required": ["sequence", "jobId", "eventType", "status", "progress", "message", "details", "createdAt"],
+      "properties": {
+        "sequence": {"type": "integer", "minimum": 1},
+        "jobId": {"$ref": "#/$defs/OpaqueId"},
+        "eventType": {"type": "string"},
+        "status": {"type": "string"},
+        "progress": {"type": ["number", "null"]},
+        "message": {"type": ["string", "null"]},
+        "details": {"type": "object"},
+        "createdAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "Artifact": {
+      "type": "object",
+      "required": ["id", "renderPlanId", "outputGrantId", "filename", "manifestFilename", "status", "createdAt", "updatedAt"],
+      "properties": {
+        "id": {"$ref": "#/$defs/OpaqueId"},
+        "renderPlanId": {"$ref": "#/$defs/OpaqueId"},
+        "jobId": {"type": ["string", "null"]},
+        "outputGrantId": {"$ref": "#/$defs/OpaqueId"},
+        "filename": {"type": "string"},
+        "manifestFilename": {"type": "string"},
+        "status": {"enum": ["PLANNED", "QUEUED", "RENDERING", "COMPLETE", "CANCELED", "FAILED", "FAILED_RECOVERABLE"]},
+        "videoDigest": {"type": ["string", "null"]},
+        "manifestDigest": {"type": ["string", "null"]},
+        "details": {"type": "object"},
+        "createdAt": {"type": "string"},
+        "updatedAt": {"type": "string"}
+      }
+    }
+  }
+}

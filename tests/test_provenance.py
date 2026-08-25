@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from room_alignment.provenance import infer_from_path, merge_evidence, read_sidecar
+from room_alignment.provenance import infer_from_path, merge_evidence, normalize_timestamp, read_sidecar
 
 
 class ProvenanceTests(unittest.TestCase):
@@ -43,6 +43,19 @@ class ProvenanceTests(unittest.TestCase):
             self.assertEqual(values["camera"], "Porch")
             self.assertEqual(values["custom"]["vendor_blob"], {"x": 1})
             self.assertEqual(evidence[0].kind, "sidecar")
+
+    def test_timestamp_policy_discloses_dst_fold_and_nonexistent_time(self):
+        first_fold = normalize_timestamp("2026-10-25T01:30:00", "Europe/Dublin", 0, "REJECT")
+        second_fold = normalize_timestamp("2026-10-25T01:30:00", "Europe/Dublin", 1, "REJECT")
+        self.assertEqual(first_fold["ambiguity"], "AMBIGUOUS_FOLD")
+        self.assertNotEqual(first_fold["resolvedUtc"], second_fold["resolvedUtc"])
+
+        rejected = normalize_timestamp("2026-03-29T01:30:00", "Europe/Dublin", 0, "REJECT")
+        shifted = normalize_timestamp("2026-03-29T01:30:00", "Europe/Dublin", 0, "SHIFT_FORWARD")
+        self.assertEqual(rejected["ambiguity"], "NONEXISTENT_LOCAL_TIME")
+        self.assertIsNone(rejected["resolvedUtc"])
+        self.assertEqual(shifted["ambiguity"], "NONEXISTENT_SHIFTED_FORWARD")
+        self.assertIsNotNone(shifted["resolvedUtc"])
 
 
 if __name__ == "__main__":

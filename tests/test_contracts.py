@@ -18,6 +18,7 @@ class ContractTests(unittest.TestCase):
         for path in (
             "/grants",
             "/libraries/{libraryId}/scans",
+            "/libraries/{libraryId}/time-policy",
             "/libraries/{libraryId}/cluster-jobs",
             "/libraries/{libraryId}/cluster-suggestions",
             "/projects/{projectId}/commands",
@@ -29,10 +30,26 @@ class ContractTests(unittest.TestCase):
             "/artifacts/{artifactId}/manifest",
         ):
             self.assertIn(path, paths)
-        commands = contract["components"]["schemas"]["ProjectCommand"]["properties"]["commandType"]["enum"]
-        self.assertIn("SetSyncTransform", commands)
-        self.assertIn("SetAudioMode", commands)
-        self.assertIn("ReconcileBoundary", commands)
+        self.assertEqual(
+            contract["components"]["schemas"]["ProjectCommand"]["$ref"],
+            "./contracts/commands.schema.json",
+        )
+        commands = json.loads((ROOT / "contracts" / "commands.schema.json").read_text(encoding="utf-8"))
+        command_types = {
+            commands["$defs"][variant["$ref"].split("/")[-1]]["properties"]["commandType"]["const"]
+            for variant in commands["allOf"][0]["oneOf"]
+        }
+        self.assertIn("SetSyncTransform", command_types)
+        self.assertIn("SetAudioMode", command_types)
+        self.assertIn("ReconcileBoundary", command_types)
+
+    def test_all_normative_json_contracts_parse_and_are_served(self):
+        contract = json.loads((ROOT / "contracts" / "openapi.json").read_text(encoding="utf-8"))
+        for name in ("api.schema.json", "domain.schema.json", "commands.schema.json", "manifest.schema.json"):
+            schema = json.loads((ROOT / "contracts" / name).read_text(encoding="utf-8"))
+            self.assertEqual(schema["$schema"], "https://json-schema.org/draft/2020-12/schema")
+        self.assertIn("/contracts/{contractName}", contract["paths"])
+        self.assertIn("/artifacts/{artifactId}/video", contract["paths"])
 
     def test_generated_browser_client_is_current(self):
         result = subprocess.run(

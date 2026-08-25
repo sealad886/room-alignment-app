@@ -111,23 +111,20 @@ def new_project(
         raise DomainError("VALIDATION_FAILED", "Project requires at least one media asset")
     created = now_iso()
     sources: list[dict[str, Any]] = []
-    source_by_candidate: dict[str, str] = {}
     clips: list[dict[str, Any]] = []
     for asset in chosen:
         candidate = str(asset.get("sourceCandidateId") or asset.get("camera") or asset["id"])
-        source_id = source_by_candidate.get(candidate)
-        if source_id is None:
-            source_id = opaque_id("src")
-            source_by_candidate[candidate] = source_id
-            sources.append(
-                {
-                    "id": source_id,
-                    "label": asset.get("camera") or f"Source {len(sources) + 1}",
-                    "reference": not sources,
-                    "archived": False,
-                    "candidateKey": candidate,
-                }
-            )
+        source_id = opaque_id("src")
+        sources.append(
+            {
+                "id": source_id,
+                "label": asset.get("camera") or f"Source {len(sources) + 1}",
+                "reference": not sources,
+                "archived": False,
+                "candidateKey": candidate,
+                "identityState": "USER_REVIEW_REQUIRED",
+            }
+        )
         clips.append(
             {
                 "id": opaque_id("clip"),
@@ -673,6 +670,9 @@ def _compile_source_block(
                 "logicalSourceId": selected["logicalSourceId"],
                 "clipId": selected["clipId"],
                 "assetId": selected["assetId"],
+                "streamId": _primary_stream_id(
+                    assets.get(selected["assetId"], {}), "audio" if require_audio else "video"
+                ),
                 "sourceStartUs": transform.output_to_source(start_us),
                 "sourceEndUs": transform.output_to_source(end_us),
                 "sync": transform.to_dict(),
@@ -733,6 +733,7 @@ def _compile_audio_block(
                     "endUs": end_us,
                     "sourceStartUs": video["sourceStartUs"] + (start_us - video["startUs"]),
                     "sourceEndUs": video["sourceEndUs"] - (video["endUs"] - end_us),
+                    "streamId": _primary_stream_id(asset, "audio"),
                     "mode": mode,
                     "offsetUs": int(block.get("offsetUs", 0)),
                     "ratePpm": int(block.get("ratePpm", 0)),
@@ -760,6 +761,17 @@ def _asset_has_audio(asset: dict[str, Any]) -> bool:
     if asset.get("audio_codec"):
         return True
     return any(stream.get("codecType") == "audio" for stream in asset.get("streams", []))
+
+
+def _primary_stream_id(asset: dict[str, Any], codec_type: str) -> str | None:
+    return next(
+        (
+            str(stream["id"])
+            for stream in asset.get("streams", [])
+            if stream.get("codecType") == codec_type and stream.get("id")
+        ),
+        None,
+    )
 
 
 def _interval_issues(

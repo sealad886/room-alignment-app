@@ -27,8 +27,10 @@ from .store import Store, TERMINAL_JOB_STATES
 ROOT = Path(__file__).resolve().parent.parent
 WEB = ROOT / "web"
 CONTRACT = ROOT / "contracts" / "openapi.json"
+CONTRACTS = ROOT / "contracts"
 MAX_BODY = 2_000_000
 SESSION_COOKIE = "ra_session"
+SESSION_TTL_SECONDS = 43_200
 
 
 class SessionManager:
@@ -54,7 +56,14 @@ class SessionManager:
         if not session_id:
             return None
         with self.lock:
-            return self.sessions.get(session_id)
+            value = self.sessions.get(session_id)
+            if value and time.monotonic() - float(value["created"]) >= SESSION_TTL_SECONDS:
+                self.sessions.pop(session_id, None)
+                for token, event in list(self.event_tokens.items()):
+                    if event.get("sessionId") == session_id:
+                        self.event_tokens.pop(token, None)
+                return None
+            return value
 
     def event_token(self, session_id: str) -> dict[str, object]:
         with self.lock:
@@ -100,6 +109,7 @@ class App:
                 self.store.cancel_scan(scan_id)
             except DomainError:
                 pass
+        self.render.shutdown()
         try:
             fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
         finally:
@@ -409,25 +419,26 @@ class Handler(BaseHTTPRequestHandler):
             raise DomainError("FORBIDDEN", "Local Host header required")
         if not self.path.startswith("/api/v1/"):
             return None
+        fetch_site = self.headers.get("Sec-Fetch-Site")
+        if fetch_site not in {None, "same-origin", "none"}:
+            raise DomainError("FORBIDDEN", "Cross-site API access denied")
+        origin = self.headers.get("Origin")
+        if origin and not _trusted_origin(origin, self.server.server_port):
+            raise DomainError("FORBIDDEN", "Same-origin API access required")
         session_id, session = self.session()
         if mutation:
-            fetch_site = self.headers.get("Sec-Fetch-Site")
-            if fetch_site not in {None, "same-origin", "none"}:
-                raise DomainError("FORBIDDEN", "Cross-site mutation denied")
-            origin = self.headers.get("Origin")
-            if origin and not _trusted_origin(origin, self.server.server_port):
-                raise DomainError("FORBIDDEN", "Same-origin mutation required")
             csrf = self.headers.get("X-CSRF-Token", "")
             if not csrf or not secrets.compare_digest(csrf, str(session["csrf"])):
                 raise DomainError("FORBIDDEN", "Valid CSRF token required")
         return session_id, session
 
     def respond(self, payload: object, status: int = 200, content_type: str = "application/json; charset=utf-8") -> None:
-        body = (
-            json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-            if content_type.startswith("application/json")
-            else payload if isinstance(payload, bytes) else str(payload).encode("utf-8")
-        )
+        if isinstance(payload, bytes):
+            body = payload
+        elif content_type.startswith(("application/json", "application/schema+json")):
+            body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        else:
+            body = str(payload).encode("utf-8")
         self.send_response(status)
         self._security_headers()
         self.send_header("Content-Type", content_type)
@@ -482,7 +493,7 @@ class Handler(BaseHTTPRequestHandler):
         )
 
     def _security_headers(self) -> None:
-        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
+        self.send_header("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'")
         self.send_header("Referrer-Policy", "no-referrer")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
@@ -505,7 +516,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not bootstrapped:
                     raise DomainError("UNAUTHENTICATED", "Bootstrap link is invalid or already used")
                 session_id, _csrf = bootstrapped
-                cookie = f"{SESSION_COOKIE}={session_id}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200"
+                cookie = f"{SESSION_COOKIE}={session_id}; HttpOnly; SameSite=Strict; Path=/; Max-Age={SESSION_TTL_SECONDS}"
                 return self.redirect("/", cookie)
             if path == "/api/v1/events":
                 session_id, _session = self.session()
@@ -552,6 +563,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/projects":
             return self.respond(APP.store.projects())
         parts = [part for part in path.split("/") if part]
+        if len(parts) == 4 and parts[:3] == ["api", "v1", "contracts"]:
+            name = parts[3]
+            if name not in {"api.schema.json", "domain.schema.json", "commands.schema.json", "manifest.schema.json"}:
+                raise DomainError("NOT_FOUND", "Contract not found")
+            return self.respond((CONTRACTS / name).read_bytes(), content_type="application/schema+json; charset=utf-8")
         if len(parts) == 3 and parts[:2] == ["api", "v1"] and parts[2] == "events":
             return self.respond([])
         if len(parts) == 4 and parts[2] == "scans":
@@ -577,6 +593,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(APP.store.provenance_resolutions(parts[3], query.get("field", [None])[0]))
         if len(parts) == 4 and parts[2] == "projects":
             return self.respond(APP.store.project(parts[3]))
+        if len(parts) == 6 and parts[2] == "projects" and parts[4] == "revisions":
+            return self.respond(APP.store.project_revision(parts[3], int(parts[5])))
         if len(parts) == 5 and parts[2] == "projects" and parts[4] == "program":
             return self.respond(APP.store.compiled_project(parts[3]))
         if len(parts) == 5 and parts[2] == "projects" and parts[4] == "program-at":
@@ -596,7 +614,27 @@ class Handler(BaseHTTPRequestHandler):
                 raise DomainError("JOB_STATE_CONFLICT", "Artifact manifest is not complete")
             path = APP.store.output_path(artifact["outputGrantId"], artifact["manifestFilename"])
             return self.respond(path.read_bytes(), content_type="application/json; charset=utf-8")
+        if len(parts) == 5 and parts[2] == "artifacts" and parts[4] == "video":
+            artifact = APP.store.artifact(parts[3])
+            if artifact["status"] != "COMPLETE":
+                raise DomainError("JOB_STATE_CONFLICT", "Artifact video is not complete")
+            path = APP.store.output_path(artifact["outputGrantId"], artifact["filename"])
+            return self.stream_file(path)
         raise DomainError("NOT_FOUND", "API resource not found")
+
+    def stream_file(self, path: Path) -> None:
+        size = path.stat().st_size
+        self.send_response(HTTPStatus.OK)
+        self._security_headers()
+        self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+        self.send_header("Content-Length", str(size))
+        self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Request-ID", self.request_id())
+        self.end_headers()
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                self.wfile.write(chunk)
 
     def do_POST(self) -> None:
         self._set_request_id()
@@ -647,6 +685,15 @@ class Handler(BaseHTTPRequestHandler):
             if limit is not None:
                 mode = "BOUNDED"
             return self.respond(APP.start_scan(parts[3], mode, limit), HTTPStatus.ACCEPTED)
+        if len(parts) == 5 and parts[2] == "libraries" and parts[4] == "time-policy":
+            return self.respond(
+                APP.store.update_library_time_policy(
+                    parts[3],
+                    str(body["timeZone"]),
+                    int(body.get("dstFold", 0)),
+                    str(body.get("nonexistentPolicy", "REJECT")),
+                )
+            )
         if len(parts) == 5 and parts[2] == "libraries" and parts[4] == "cluster-jobs":
             return self.respond(APP.start_cluster_analysis(parts[3]), HTTPStatus.ACCEPTED)
         if len(parts) == 5 and parts[2] == "scans" and parts[4] == "cancel":
@@ -700,6 +747,12 @@ class Handler(BaseHTTPRequestHandler):
         deadline = time.monotonic() + 20
         heartbeat = time.monotonic()
         cursor = after
+        minimum, latest = APP.store.event_bounds()
+        if cursor and minimum and cursor < minimum - 1:
+            reset = json.dumps({"minimumSequence": minimum, "latestSequence": latest}, separators=(",", ":"))
+            self.wfile.write(f"id: {latest}\nevent: reset\ndata: {reset}\n\n".encode("utf-8"))
+            self.wfile.flush()
+            cursor = latest
         while time.monotonic() < deadline:
             events = APP.store.events(cursor, 1_000)
             for event in events:

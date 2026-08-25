@@ -90,8 +90,24 @@ def iter_videos(root: Path) -> Iterable[Path]:
         names[:] = [name for name in names if not name.startswith(".")]
         for filename in files:
             path = Path(directory, filename)
-            if path.suffix.lower() in VIDEO_EXTENSIONS:
+            if path.suffix.lower() in VIDEO_EXTENSIONS or _has_media_container_signature(path):
                 yield path
+
+
+def _has_media_container_signature(path: Path) -> bool:
+    """Admit extensionless/unknown-name media without probing arbitrary documents."""
+    try:
+        with path.open("rb") as handle:
+            head = handle.read(400)
+    except OSError:
+        return False
+    if len(head) >= 12 and head[4:8] == b"ftyp":
+        return True
+    if head.startswith((b"\x1aE\xdf\xa3", b"FLV", b"OggS", b"\x00\x00\x01\xba", b"\x06\x0e\x2b\x34")):
+        return True
+    if len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] in {b"AVI ", b"AVIX"}:
+        return True
+    return len(head) > 376 and head[0] == head[188] == head[376] == 0x47
 
 
 def _rate(value: str | None) -> float | None:
@@ -154,8 +170,7 @@ def probe(
     if len(stdout) > 2_000_000 or len(stderr) > 200_000:
         return {}, [], "ffprobe output exceeded safe bounds"
     if process.returncode != 0:
-        detail = stderr.strip().splitlines()[-1] if stderr.strip() else "unknown ffprobe error"
-        return {}, [], detail[:300]
+        return {}, [], f"ffprobe could not decode this asset (exit {process.returncode})"
     try:
         payload = json.loads(stdout)
     except json.JSONDecodeError:
@@ -172,7 +187,12 @@ def probe(
     captured = tags.get("creation_time") or tags.get("com.apple.quicktime.creationdate") or tags.get("date")
     if captured:
         values["captured_at"] = captured
-        evidence.append(ProvenanceEvidence("container", "captured_at", captured, 0.85, "format.tags"))
+        evidence.append(
+            ProvenanceEvidence(
+                "container", "captured_at", captured, 0.85, "format.tags", raw_value=captured,
+                normalized_value=captured, uncertainty=None if str(captured).endswith(("Z", "+00:00")) else "timezone may be absent",
+            )
+        )
     if tags:
         values["custom"] = {f"format_tag.{key}": value for key, value in tags.items()}
     streams: list[dict[str, Any]] = []

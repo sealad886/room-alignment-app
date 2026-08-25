@@ -9,6 +9,16 @@ from room_alignment.scanner import iter_scan_records, quick_fingerprint
 
 
 class ScannerSafetyTests(unittest.TestCase):
+    def test_unknown_extension_with_media_signature_is_admitted_for_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            opaque = root / "opaque-payload.data"
+            opaque.write_bytes(b"\0\0\0\x18ftypisom" + b"\0" * 64)
+            with patch("room_alignment.scanner.probe", return_value=({}, [], "unsupported test fixture")):
+                records = list(iter_scan_records(root, "library", probe_workers=1))
+            self.assertEqual([item.relative_path for item in records], [opaque.name])
+            self.assertEqual(records[0].warning, "unsupported test fixture")
+
     def test_symlink_escape_is_warning_bearing_and_never_probed(self):
         with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
             root = Path(directory)

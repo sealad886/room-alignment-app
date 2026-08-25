@@ -7,6 +7,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from room_alignment.models import MediaRecord
 from room_alignment.render import CanonicalRenderManager, build_render_plan
@@ -101,6 +102,10 @@ class CanonicalRenderTests(unittest.TestCase):
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         self.assertEqual(manifest["renderPlan"]["digest"], plan["planDigest"])
         self.assertEqual(manifest["videoSlices"][0]["assetId"], "asset")
+        self.assertTrue(manifest["videoSlices"][0]["streamId"])
+        self.assertTrue(manifest["audioSlices"][0]["streamId"])
+        self.assertIn("ffmpeg", manifest["toolVersions"])
+        self.assertEqual(len(manifest["manifestCanonicalContentSha256"]), 64)
         self.assertTrue(manifest["fidelity"]["sourceFilesModified"] is False)
 
     def test_project_change_invalidates_reviewed_plan(self):
@@ -131,6 +136,50 @@ class CanonicalRenderTests(unittest.TestCase):
         )
         self.assertEqual(plan["status"], "BLOCKED")
         self.assertIn("DESTINATION_EXISTS", {item["code"] for item in plan["issues"]})
+
+    def test_provenance_correction_invalidates_plan_and_review(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "provenance.mp4", "profile": "COMPATIBLE"},
+        )
+        self.store.resolve_provenance("asset", "captured_at", {"utc": "2026-08-25T12:00:00Z"}, "Corrected", "test")
+        changed = self.store.project(self.project["id"])
+        self.assertEqual(changed["provenanceRevision"], 1)
+        with self.assertRaisesRegex(ValueError, "Provenance"):
+            self.store.attest_review(plan["id"], plan["warningCodes"])
+
+    def test_cancel_before_process_launch_is_terminal_and_creates_no_output(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "cancel.mp4", "profile": "COMPATIBLE"},
+        )
+        self.store.attest_review(plan["id"], plan["warningCodes"])
+        manager = CanonicalRenderManager(self.store)
+        with patch("room_alignment.render.threading.Thread.start"):
+            started = manager.start(plan["id"])
+        manager.cancel(started["job"]["id"])
+        manager._run(started["job"]["id"], started["artifact"]["id"], plan)
+        self.assertEqual(self.store.job(started["job"]["id"])["status"], "CANCELED")
+        self.assertFalse((self.output / "cancel.mp4").exists())
+
+    def test_startup_quarantines_exact_owned_partial(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "recover.mp4", "profile": "COMPATIBLE"},
+        )
+        artifact = self.store.create_artifact(plan["id"], self.output_grant_id, "recover.mp4")
+        token = artifact["id"].rsplit("_", 1)[-1]
+        partial = self.output / f".recover.partial.{token}.mp4"
+        partial.write_bytes(b"partial")
+        CanonicalRenderManager(self.store)
+        recovered = self.store.artifact(artifact["id"])
+        self.assertEqual(recovered["status"], "FAILED_RECOVERABLE")
+        self.assertFalse(partial.exists())
+        quarantine = Path(self.store.path).parent / "recovery"
+        self.assertEqual(len(list(quarantine.iterdir())), 1)
 
 
 if __name__ == "__main__":

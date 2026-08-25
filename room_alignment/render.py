@@ -5,9 +5,12 @@ import os
 import signal
 import shutil
 import subprocess
+import tempfile
 import threading
+import time
 import uuid
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -296,6 +299,18 @@ def build_render_plan(
                 "fingerprint": media.get("fingerprint", {}),
             }
         )
+    for source_slice in compiled["videoSlices"] + compiled["audioSlices"]:
+        if source_slice.get("synthetic"):
+            continue
+        if not source_slice.get("streamId"):
+            issues.append(
+                {
+                    "id": f"issue_stream_{source_slice['id']}",
+                    "code": "PROVENANCE_UNRESOLVED",
+                    "severity": "BLOCKING",
+                    "message": "Selected source stream identity is unresolved",
+                }
+            )
     first_video = assets.get(compiled["videoSlices"][0]["assetId"]) if compiled["videoSlices"] else {}
     normalization = {
         "width": int(settings.get("width") or first_video.get("width") or 1920),
@@ -347,6 +362,7 @@ def build_render_plan(
         "compiledProgram": compiled,
         "sources": sources,
         "sourceSetDigest": digest_json(sources),
+        "provenanceResolutions": store.provenance_snapshot(selected_ids),
         "profile": profile,
         "container": "mp4" if profile == "COMPATIBLE" else "matroska",
         "videoCodec": "h264" if profile == "COMPATIBLE" else "ffv1",
@@ -355,6 +371,11 @@ def build_render_plan(
         "output": {"grantId": output_grant_id, "filename": filename},
         "estimatedBytes": estimate,
         "warningCodes": sorted(set(warning_codes)),
+        "toolVersions": {
+            "application": "room-alignment/0.2.0",
+            "ffmpeg": _tool_version("ffmpeg"),
+            "ffprobe": _tool_version("ffprobe"),
+        },
         "issues": issues,
         "status": "BLOCKED" if any(item.get("severity") == "BLOCKING" for item in issues) else "READY",
         "createdAt": now_iso(),
@@ -372,6 +393,7 @@ def build_v1_manifest(plan: dict[str, Any], artifact: dict[str, Any] | None = No
             "id": artifact.get("id") if artifact else None,
             "videoSha256": artifact.get("videoDigest") if artifact else None,
             "manifestSha256": artifact.get("manifestDigest") if artifact else None,
+            "manifestFileDigestRecordedInArtifactState": True,
         },
         "project": {
             "id": plan["projectId"],
@@ -380,6 +402,7 @@ def build_v1_manifest(plan: dict[str, Any], artifact: dict[str, Any] | None = No
         },
         "renderPlan": {"id": plan["id"], "digest": plan["planDigest"]},
         "sourceSetDigest": plan["sourceSetDigest"],
+        "provenanceResolutions": plan.get("provenanceResolutions", []),
         "sources": [
             {
                 "assetId": item["assetId"],
@@ -403,12 +426,14 @@ def build_v1_manifest(plan: dict[str, Any], artifact: dict[str, Any] | None = No
             "decodedAndReencoded": True,
         },
         "warnings": plan["warningCodes"],
+        "toolVersions": plan.get("toolVersions", {}),
         "fidelity": {
             "claim": "lossless-encode-after-processing" if plan["profile"] == "ARCHIVAL_LOSSLESS" else "compatible-reencode",
             "sourceFilesModified": False,
             "generatedSilenceDisclosed": any(item.get("synthetic") for item in program["audioSlices"]),
         },
     }
+    manifest["manifestCanonicalContentSha256"] = digest_json(manifest)
     return manifest
 
 
@@ -420,7 +445,7 @@ def build_v1_ffmpeg_command(store: Store, plan: dict[str, Any], output: Path) ->
     assets = store.media_records(item["assetId"] for item in project["clips"])
     video = plan["compiledProgram"]["videoSlices"]
     audio = plan["compiledProgram"]["audioSlices"]
-    command = ["ffmpeg", "-hide_banner", "-nostdin", "-y"]
+    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
     filters: list[str] = []
     for item in video:
         media = assets[item["assetId"]]
@@ -497,6 +522,8 @@ class CanonicalRenderManager:
         project = self.store.project(plan["projectId"])
         if project["revision"] != plan["projectRevision"]:
             raise DomainError("PLAN_STALE", "Project changed after review")
+        if int(project.get("provenanceRevision", 0)) != int(plan["provenanceRevision"]):
+            raise DomainError("PLAN_STALE", "Provenance resolution changed after review")
         output = plan["output"]
         final = self.store.output_path(output["grantId"], output["filename"])
         manifest = final.with_name(final.name + ".manifest.json")
@@ -517,31 +544,67 @@ class CanonicalRenderManager:
         partial = final.with_name(f".{final.stem}.partial.{token}{final.suffix}")
         manifest_partial = final.with_name(f".{manifest_final.name}.partial.{token}")
         try:
+            if self.store.job(job_id)["status"] == "CANCEL_REQUESTED":
+                self.store.update_artifact(artifact_id, status="CANCELED")
+                self.store.transition_job(job_id, "CANCELED", 0, "Canceled before render process launch")
+                return
             self.store.transition_job(job_id, "RUNNING", 0.05, "Validating immutable sources")
             self.store.update_artifact(artifact_id, status="RENDERING")
             self._validate_sources(plan)
             command = build_v1_ffmpeg_command(self.store, plan, partial)
-            process = subprocess.Popen(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                text=True,
-                start_new_session=True,
-            )
-            with self.lock:
-                self.jobs[job_id] = RunningJob(process)
-            _, stderr = process.communicate()
-            with self.lock:
-                running = self.jobs.pop(job_id, RunningJob(process))
+            with tempfile.SpooledTemporaryFile(mode="w+t", max_size=1_000_000) as diagnostics:
+                process = subprocess.Popen(
+                    command,
+                    stdout=subprocess.DEVNULL,
+                    stderr=diagnostics,
+                    text=True,
+                    start_new_session=True,
+                )
+                running = RunningJob(process)
+                with self.lock:
+                    self.jobs[job_id] = running
+                    if self.store.job(job_id)["status"] == "CANCEL_REQUESTED":
+                        running.cancel_requested = True
+                        try:
+                            os.killpg(process.pid, signal.SIGTERM)
+                        except ProcessLookupError:
+                            pass
+                space_failure = False
+                next_progress_update = time.monotonic()
+                continuation_floor = 64 * 1024 * 1024 + int(plan["estimatedBytes"] * 0.05)
+                while process.poll() is None:
+                    if shutil.disk_usage(final.parent).free < continuation_floor:
+                        space_failure = True
+                        try:
+                            os.killpg(process.pid, signal.SIGTERM)
+                            process.wait(timeout=2)
+                        except subprocess.TimeoutExpired:
+                            try:
+                                os.killpg(process.pid, signal.SIGKILL)
+                            except ProcessLookupError:
+                                pass
+                        break
+                    if time.monotonic() >= next_progress_update:
+                        partial_size = partial.stat().st_size if partial.exists() else 0
+                        progress = min(0.8, 0.05 + 0.75 * partial_size / max(1, int(plan["estimatedBytes"])))
+                        self.store.transition_job(job_id, "RUNNING", progress, "Rendering immutable plan")
+                        next_progress_update = time.monotonic() + 1
+                    time.sleep(0.2)
+                process.wait()
+                diagnostics.seek(0)
+                stderr = diagnostics.read(200_000)
+                with self.lock:
+                    running = self.jobs.pop(job_id, running)
             if running.cancel_requested:
                 _unlink_exact(partial)
                 _unlink_exact(manifest_partial)
                 self.store.update_artifact(artifact_id, status="CANCELED")
                 self.store.transition_job(job_id, "CANCELED", 0, "Canceled; temporary outputs removed")
                 return
+            if space_failure:
+                raise DomainError("INSUFFICIENT_SPACE", "Safe free-space threshold was reached during render")
             if process.returncode != 0:
-                detail = stderr.strip().splitlines()[-1] if stderr and stderr.strip() else "ffmpeg failed"
-                raise RuntimeError(detail[:500])
+                raise RuntimeError(f"Media engine exited with status {process.returncode}")
             self.store.transition_job(job_id, "RUNNING", 0.85, "Verifying sources and output")
             self._validate_sources(plan)
             video_digest = full_digest(partial)
@@ -602,6 +665,25 @@ class CanonicalRenderManager:
                     pass
         return self.store.job(job_id)
 
+    def shutdown(self, timeout_seconds: float = 5) -> None:
+        """Request cancellation and wait briefly for owned process trees to settle."""
+        with self.lock:
+            job_ids = list(self.jobs)
+        for job_id in job_ids:
+            try:
+                self.cancel(job_id)
+            except DomainError:
+                pass
+        deadline = time.monotonic() + timeout_seconds
+        for job_id in job_ids:
+            while time.monotonic() < deadline:
+                try:
+                    if self.store.job(job_id)["status"] in {"CANCELED", "SUCCEEDED", "FAILED", "INTERRUPTED", "FAILED_RECOVERABLE"}:
+                        break
+                except DomainError:
+                    break
+                time.sleep(0.05)
+
     def reconcile_artifacts(self) -> None:
         for artifact in self.store.artifacts(incomplete_only=True):
             try:
@@ -610,11 +692,35 @@ class CanonicalRenderManager:
                 self.store.update_artifact(artifact["id"], status="FAILED_RECOVERABLE", details_json={"reason": "grant unavailable"})
                 continue
             manifest = final.with_name(artifact["manifestFilename"])
+            token = artifact["id"].rsplit("_", 1)[-1]
+            partials = [
+                final.with_name(f".{final.stem}.partial.{token}{final.suffix}"),
+                final.with_name(f".{manifest.name}.partial.{token}"),
+            ]
+            quarantined: list[str] = []
+            for partial in partials:
+                if not partial.exists():
+                    continue
+                recovery = self.store.path.parent / "recovery"
+                recovery.mkdir(parents=True, exist_ok=True)
+                destination = recovery / f"{artifact['id']}-{partial.name.lstrip('.')}"
+                os.replace(partial, destination)
+                quarantined.append(destination.name)
             if final.exists() or manifest.exists():
                 self.store.update_artifact(
                     artifact["id"],
                     status="FAILED_RECOVERABLE",
-                    details_json={"videoPresent": final.exists(), "manifestPresent": manifest.exists()},
+                    details_json={
+                        "videoPresent": final.exists(),
+                        "manifestPresent": manifest.exists(),
+                        "quarantinedTemporaryFiles": quarantined,
+                    },
+                )
+            elif quarantined:
+                self.store.update_artifact(
+                    artifact["id"],
+                    status="FAILED_RECOVERABLE",
+                    details_json={"quarantinedTemporaryFiles": quarantined},
                 )
 
 
@@ -622,6 +728,22 @@ def _estimate_output_bytes(duration_us: int, profile: str) -> int:
     seconds = max(1, duration_us / 1_000_000)
     bits_per_second = 40_000_000 if profile == "ARCHIVAL_LOSSLESS" else 10_000_000
     return int(seconds * bits_per_second / 8)
+
+
+@lru_cache(maxsize=4)
+def _tool_version(tool: str) -> str:
+    try:
+        result = subprocess.run(
+            [tool, "-version"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+        return (result.stdout.splitlines()[0] if result.stdout else f"{tool}/unknown")[:300]
+    except (OSError, subprocess.TimeoutExpired):
+        return f"{tool}/unavailable"
 
 
 def _seconds(value_us: int) -> str:

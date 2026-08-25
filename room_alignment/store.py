@@ -3,11 +3,13 @@ from __future__ import annotations
 import base64
 import copy
 import json
+import os
 import sqlite3
 import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterable
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .domain import (
     DomainError,
@@ -20,9 +22,15 @@ from .domain import (
     seconds_to_us,
 )
 from .models import MediaRecord, ScanSummary
+from .models import ProvenanceEvidence
+from .provenance import normalize_timestamp
+from .scanner import media_record_from_dict
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+MAX_JOB_EVENTS = 100_000
+MAX_CACHE_ENTRIES = 10_000
+MAX_CACHE_BYTES = 2 * 1024 * 1024 * 1024
 TERMINAL_JOB_STATES = {"CANCELED", "SUCCEEDED", "FAILED", "INTERRUPTED", "FAILED_RECOVERABLE"}
 JOB_STATES = {
     "QUEUED",
@@ -33,6 +41,13 @@ JOB_STATES = {
     "FAILED",
     "INTERRUPTED",
     "FAILED_RECOVERABLE",
+}
+PROGRAM_AFFECTING_COMMANDS = {
+    "MergeLogicalSources", "SplitLogicalSource", "ArchiveLogicalSource", "AssignClip", "SetReferenceSource",
+    "SetSyncTransform", "InitializeProgram", "AddVideoBlock", "SplitVideoBlock", "MoveVideoBoundary",
+    "DeleteVideoBlock", "AssignVideoSource", "PinVideoClip", "CutToSource", "AddAudioBlock",
+    "SplitAudioBlock", "MoveAudioBoundary", "DeleteAudioBlock", "SetAudioMode", "SetAnchoringMode",
+    "ReconcileBoundary", "AcceptAlignmentSuggestion",
 }
 
 
@@ -126,6 +141,13 @@ CREATE TABLE IF NOT EXISTS projects (
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   document_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS project_revisions (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL,
+  document_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(project_id, revision)
 );
 CREATE TABLE IF NOT EXISTS command_records (
   command_id TEXT PRIMARY KEY,
@@ -253,12 +275,18 @@ class Store:
         with self.connect() as db:
             db.executescript(SCHEMA)
             self._ensure_legacy_columns(db)
+            db.execute(
+                "INSERT OR IGNORE INTO project_revisions(project_id,revision,document_json,created_at) "
+                "SELECT id,revision,document_json,updated_at FROM projects"
+            )
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             db.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version,applied_at,details_json) VALUES(?,?,?)",
                 (SCHEMA_VERSION, now_iso(), json.dumps({"name": "canonical-v1"})),
             )
         self.interrupt_orphaned_jobs()
+        self.compact_events()
+        self.prune_cache()
 
     def _backup_before_migration(self) -> None:
         if not self.path.exists() or self.path.stat().st_size == 0:
@@ -268,16 +296,36 @@ class Store:
             version = int(source.execute("PRAGMA user_version").fetchone()[0])
             if version >= SCHEMA_VERSION:
                 return
-            backup = self.path.with_name(
-                f"{self.path.name}.backup-v{version}-{datetime.now(UTC).strftime('%Y%m%dT%H%M%SZ')}"
-            )
+            timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+            backup = self.path.with_name(f"{self.path.name}.backup-v{version}-{timestamp}")
             destination = sqlite3.connect(backup)
             try:
                 source.backup(destination)
+                if str(destination.execute("PRAGMA integrity_check").fetchone()[0]) != "ok":
+                    raise RuntimeError("Pre-migration backup failed integrity verification")
             finally:
                 destination.close()
         finally:
             source.close()
+        staging = self.path.with_name(f".{self.path.name}.migration-{timestamp}")
+        source = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
+        destination = sqlite3.connect(staging)
+        try:
+            source.backup(destination)
+            destination.executescript(SCHEMA)
+            self._ensure_legacy_columns(destination)
+            destination.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+            destination.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version,applied_at,details_json) VALUES(?,?,?)",
+                (SCHEMA_VERSION, now_iso(), json.dumps({"name": "canonical-v1", "atomicStaging": True})),
+            )
+            destination.commit()
+            if str(destination.execute("PRAGMA integrity_check").fetchone()[0]) != "ok":
+                raise RuntimeError("Staged migration failed integrity verification")
+        finally:
+            destination.close()
+            source.close()
+        os.replace(staging, self.path)
 
     def _ensure_legacy_columns(self, db: sqlite3.Connection) -> None:
         additions = {
@@ -400,16 +448,52 @@ class Store:
         dst_fold: int = 0,
         nonexistent_policy: str = "REJECT",
     ) -> dict[str, Any]:
+        try:
+            ZoneInfo(time_zone)
+        except ZoneInfoNotFoundError as error:
+            raise DomainError("VALIDATION_FAILED", "Library timeZone must be a valid IANA zone") from error
+        if nonexistent_policy not in {"REJECT", "SHIFT_FORWARD"}:
+            raise DomainError("VALIDATION_FAILED", "Unknown nonexistent local-time policy")
         grant = self.grant(grant_id, "READ_ONLY_SOURCE")
         library_id = f"lib_{digest_json(str(grant['root']))[:24]}"
         with self._lock, self.connect() as db:
+            previous = db.execute(
+                "SELECT time_zone,dst_fold,nonexistent_policy FROM libraries WHERE id=?", (library_id,)
+            ).fetchone()
             db.execute(
                 "INSERT INTO libraries(id,grant_id,root,time_zone,dst_fold,nonexistent_policy,summary_json) "
                 "VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET grant_id=excluded.grant_id,time_zone=excluded.time_zone,"
                 "dst_fold=excluded.dst_fold,nonexistent_policy=excluded.nonexistent_policy",
                 (library_id, grant_id, grant["root"], time_zone, int(bool(dst_fold)), nonexistent_policy, "{}"),
             )
+            changed = previous and (
+                previous["time_zone"] != time_zone
+                or int(previous["dst_fold"]) != int(bool(dst_fold))
+                or previous["nonexistent_policy"] != nonexistent_policy
+            )
+            if changed:
+                self._renormalize_library_timestamps_db(
+                    db, library_id, time_zone, int(bool(dst_fold)), nonexistent_policy
+                )
+                self._invalidate_suggestions_db(
+                    db,
+                    "library_id=? AND status IN ('PENDING','ACCEPTED')",
+                    (library_id,),
+                    "Library timestamp policy changed",
+                )
         return self.library(library_id)
+
+    def update_library_time_policy(
+        self,
+        library_id: str,
+        time_zone: str,
+        dst_fold: int = 0,
+        nonexistent_policy: str = "REJECT",
+    ) -> dict[str, Any]:
+        library = self.library(library_id)
+        return self.create_library(
+            library["sourceGrantId"], time_zone, dst_fold, nonexistent_policy
+        )
 
     def library(self, library_id: str) -> dict[str, Any]:
         with self.connect() as db:
@@ -543,7 +627,12 @@ class Store:
             scan = db.execute("SELECT library_id,generation FROM scan_generations WHERE id=?", (scan_id,)).fetchone()
             if not scan:
                 raise DomainError("NOT_FOUND", "Scan not found")
+            policy = db.execute(
+                "SELECT time_zone,dst_fold,nonexistent_policy FROM libraries WHERE id=?",
+                (scan["library_id"],),
+            ).fetchone()
             for record in records:
+                _normalize_media_record_timestamp(record, dict(policy))
                 fingerprint = record.fingerprint or {}
                 identity_material = {
                     "device": fingerprint.get("device"),
@@ -598,6 +687,35 @@ class Store:
                         "ON CONFLICT(asset_id) DO UPDATE SET library_id=excluded.library_id,identity_key=excluded.identity_key",
                         (record.id, scan["library_id"], identity_key),
                     )
+
+    def _renormalize_library_timestamps_db(
+        self,
+        db: sqlite3.Connection,
+        library_id: str,
+        time_zone: str,
+        dst_fold: int,
+        nonexistent_policy: str,
+    ) -> None:
+        rows = list(db.execute("SELECT id,record_json FROM media WHERE library_id=?", (library_id,)))
+        for row in rows:
+            record = media_record_from_dict(json.loads(row["record_json"]), library_id)
+            custom_policy = record.custom.get("timestampPolicy", {}) if isinstance(record.custom, dict) else {}
+            raw = custom_policy.get("rawValue") or _raw_timestamp_from_evidence(record)
+            if raw is None:
+                continue
+            record.captured_at = str(raw)
+            _normalize_media_record_timestamp(
+                record,
+                {
+                    "time_zone": time_zone,
+                    "dst_fold": dst_fold,
+                    "nonexistent_policy": nonexistent_policy,
+                },
+            )
+            db.execute(
+                "UPDATE media SET captured_at=?,record_json=? WHERE id=?",
+                (record.captured_at, json.dumps(record.to_dict()), row["id"]),
+            )
 
     def finish_scan(self, scan_id: str, status: str, summary: dict[str, Any], message: str | None = None) -> None:
         if status not in {"SUCCEEDED", "FAILED", "CANCELED"}:
@@ -756,6 +874,10 @@ class Store:
                     json.dumps(project),
                 ),
             )
+            db.execute(
+                "INSERT INTO project_revisions(project_id,revision,document_json,created_at) VALUES(?,?,?,?)",
+                (project["id"], project["revision"], json.dumps(project), project["createdAt"]),
+            )
         return self.project(project["id"])
 
     def save_project(self, project: dict[str, Any]) -> None:
@@ -776,6 +898,10 @@ class Store:
                     json.dumps(canonical),
                 ),
             )
+            db.execute(
+                "INSERT OR REPLACE INTO project_revisions(project_id,revision,document_json,created_at) VALUES(?,?,?,?)",
+                (canonical["id"], canonical["revision"], json.dumps(canonical), canonical.get("updatedAt", now_iso())),
+            )
 
     def project(self, project_id: str) -> dict[str, Any]:
         with self.connect() as db:
@@ -791,6 +917,16 @@ class Store:
                 self._migrate_legacy_project(json.loads(row[0]))
                 for row in db.execute(f"SELECT document_json FROM projects {where} ORDER BY updated_at DESC")
             ]
+
+    def project_revision(self, project_id: str, revision: int) -> dict[str, Any]:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT document_json FROM project_revisions WHERE project_id=? AND revision=?",
+                (project_id, int(revision)),
+            ).fetchone()
+            if not row:
+                raise DomainError("NOT_FOUND", "Retained project revision not found")
+            return self._migrate_legacy_project(json.loads(row[0]))
 
     def apply_project_command(self, project_id: str, envelope: dict[str, Any], preview: bool = False) -> dict[str, Any]:
         command_id = str(envelope.get("commandId", ""))
@@ -826,6 +962,7 @@ class Store:
                     {"currentRevision": current_revision, "project": project},
                 )
             assets = self._media_records_db(db, [item["assetId"] for item in project.get("clips", [])])
+            previous_compiled = compile_program(project, assets) if command_type in PROGRAM_AFFECTING_COMMANDS else None
             changed = apply_command(project, command_type, payload, assets)
             changed["revision"] = current_revision + 1
             changed["updatedAt"] = now_iso()
@@ -840,6 +977,7 @@ class Store:
                 "reviewState": "STALE" if project.get("review") else "NOT_REVIEWED",
                 "eventCursor": self.latest_event_sequence(db),
                 "preview": preview,
+                "affectedIntervals": _affected_program_intervals(previous_compiled, compiled) if previous_compiled else [],
             }
             if preview:
                 db.rollback()
@@ -854,6 +992,10 @@ class Store:
                     json.dumps(changed),
                     project_id,
                 ),
+            )
+            db.execute(
+                "INSERT INTO project_revisions(project_id,revision,document_json,created_at) VALUES(?,?,?,?)",
+                (project_id, changed["revision"], json.dumps(changed), changed["updatedAt"]),
             )
             db.execute(
                 "INSERT INTO command_records(command_id,project_id,payload_digest,result_json,created_at) VALUES(?,?,?,?,?)",
@@ -893,6 +1035,13 @@ class Store:
         )
         canonical["revision"] = int(project.get("revision", 1))
         canonical["legacy"] = copy.deepcopy(project)
+        canonical["migration"] = {
+            "version": 1,
+            "sourceTimeUnit": "floating-seconds",
+            "targetTimeUnit": "integer-microseconds",
+            "rounding": "half-even",
+            "reviewInvalidated": True,
+        }
         canonical["anchorMode"] = (
             "SOURCE_TIME" if project.get("cutAnchoring") == "source-clips" else "PROGRAM_TIME"
         )
@@ -918,11 +1067,10 @@ class Store:
             canonical["audioBlocks"] = []
             for item in project["audioSegments"]:
                 media_id = item.get("mediaId")
-                mode = (
-                    "FOLLOW_VIDEO"
-                    if item.get("linked", True) and media_id
-                    else ("FIXED_CLIP" if media_id else "SILENCE")
-                )
+                explicit_silence = bool(item.get("silence")) or item.get("provenance", {}).get("source") == "silence"
+                if not media_id and not explicit_silence:
+                    continue
+                mode = "FOLLOW_VIDEO" if item.get("linked", True) and media_id else ("FIXED_CLIP" if media_id else "SILENCE")
                 canonical["audioBlocks"].append(
                     {
                         "id": item.get("id") or opaque_id("ablock"),
@@ -964,6 +1112,7 @@ class Store:
             ).fetchone()
             revision = int(previous["revision"] if previous else 0) + 1
             resolution_id = opaque_id("resolution")
+            timestamp = now_iso()
             db.execute(
                 "INSERT INTO provenance_resolutions(id,media_id,field,revision,previous_json,resolution_json,rationale,actor,created_at) "
                 "VALUES(?,?,?,?,?,?,?,?,?)",
@@ -976,10 +1125,39 @@ class Store:
                     json.dumps(resolution),
                     rationale,
                     actor,
-                    now_iso(),
+                    timestamp,
                 ),
             )
-            return self.provenance_resolutions(media_id, field)[-1]
+            projects = list(db.execute("SELECT id,document_json FROM projects"))
+            for project_row in projects:
+                project = self._migrate_legacy_project(json.loads(project_row["document_json"]))
+                if not any(clip.get("assetId") == media_id for clip in project.get("clips", [])):
+                    continue
+                project["provenanceRevision"] = int(project.get("provenanceRevision", 0)) + 1
+                project["review"] = None
+                project["updatedAt"] = now_iso()
+                db.execute(
+                    "UPDATE projects SET document_json=?,updated_at=? WHERE id=?",
+                    (json.dumps(project), project["updatedAt"], project["id"]),
+                )
+                self._invalidate_suggestions_db(
+                    db,
+                    "project_id=? AND status IN ('PENDING','ACCEPTED')",
+                    (project["id"],),
+                    "A provenance resolution changed after suggestion creation",
+                )
+            result = {
+                "id": resolution_id,
+                "mediaId": media_id,
+                "field": field,
+                "revision": revision,
+                "previous": json.loads(previous["resolution_json"]) if previous else None,
+                "resolution": resolution,
+                "rationale": rationale,
+                "actor": actor,
+                "createdAt": timestamp,
+            }
+        return result
 
     def provenance_resolutions(self, media_id: str, field: str | None = None) -> list[dict[str, Any]]:
         with self.connect() as db:
@@ -1003,6 +1181,28 @@ class Store:
                 }
                 for row in rows
             ]
+
+    def provenance_snapshot(self, media_ids: Iterable[str]) -> list[dict[str, Any]]:
+        ids = list(dict.fromkeys(media_ids))
+        if not ids:
+            return []
+        placeholders = ",".join("?" for _ in ids)
+        latest: dict[tuple[str, str], dict[str, Any]] = {}
+        with self.connect() as db:
+            for row in db.execute(
+                f"SELECT * FROM provenance_resolutions WHERE media_id IN ({placeholders}) "
+                "ORDER BY media_id,field,revision",
+                ids,
+            ):
+                latest[(row["media_id"], row["field"])] = {
+                    "id": row["id"],
+                    "mediaId": row["media_id"],
+                    "field": row["field"],
+                    "revision": int(row["revision"]),
+                    "resolution": json.loads(row["resolution_json"]),
+                    "createdAt": row["created_at"],
+                }
+        return [latest[key] for key in sorted(latest)]
 
     def save_suggestion(self, suggestion: dict[str, Any]) -> dict[str, Any]:
         timestamp = now_iso()
@@ -1191,10 +1391,57 @@ class Store:
         message: str | None,
         details: dict[str, Any],
     ) -> None:
-        db.execute(
+        cursor = db.execute(
             "INSERT INTO job_events(job_id,event_type,status,progress,message,details_json,created_at) VALUES(?,?,?,?,?,?,?)",
             (job_id, event_type, status, progress, message, json.dumps(details), now_iso()),
         )
+        if int(cursor.lastrowid or 0) % 1_000 == 0:
+            self._compact_events_db(db)
+
+    def compact_events(self, max_events: int = MAX_JOB_EVENTS) -> int:
+        with self._lock, self.connect() as db:
+            return self._compact_events_db(db, max_events)
+
+    def _compact_events_db(self, db: sqlite3.Connection, max_events: int = MAX_JOB_EVENTS) -> int:
+        max_events = max(1_000, min(int(max_events), MAX_JOB_EVENTS))
+        cutoff = db.execute(
+            "SELECT sequence FROM job_events ORDER BY sequence DESC LIMIT 1 OFFSET ?",
+            (max_events - 1,),
+        ).fetchone()
+        if not cutoff:
+            return 0
+        cursor = db.execute("DELETE FROM job_events WHERE sequence<?", (int(cutoff[0]),))
+        return max(0, int(cursor.rowcount))
+
+    def prune_cache(
+        self,
+        max_entries: int = MAX_CACHE_ENTRIES,
+        max_bytes: int = MAX_CACHE_BYTES,
+    ) -> dict[str, int]:
+        """Evict only registered, unpinned derived files beneath state/cache."""
+        cache_root = (self.path.parent / "cache").resolve()
+        removed_entries = 0
+        removed_bytes = 0
+        with self._lock, self.connect() as db:
+            rows = list(db.execute("SELECT * FROM cache_entries ORDER BY pinned DESC,last_accessed DESC"))
+            kept_entries = 0
+            kept_bytes = 0
+            for row in rows:
+                size = max(0, int(row["size_bytes"]))
+                keep = bool(row["pinned"]) or (
+                    kept_entries < max_entries and kept_bytes + size <= max_bytes
+                )
+                if keep:
+                    kept_entries += 1
+                    kept_bytes += size
+                    continue
+                target = Path(row["path"]).resolve()
+                if target.is_relative_to(cache_root) and target.is_file():
+                    target.unlink(missing_ok=True)
+                db.execute("DELETE FROM cache_entries WHERE key=?", (row["key"],))
+                removed_entries += 1
+                removed_bytes += size
+        return {"removedEntries": removed_entries, "removedBytes": removed_bytes}
 
     def job(self, job_id: str, db: sqlite3.Connection | None = None) -> dict[str, Any]:
         owns = db is None
@@ -1256,6 +1503,11 @@ class Store:
         finally:
             if owns:
                 db.close()
+
+    def event_bounds(self) -> tuple[int, int]:
+        with self.connect() as db:
+            row = db.execute("SELECT COALESCE(MIN(sequence),0),COALESCE(MAX(sequence),0) FROM job_events").fetchone()
+            return int(row[0]), int(row[1])
 
     def interrupt_orphaned_jobs(self) -> None:
         if not self.path.exists():
@@ -1319,6 +1571,8 @@ class Store:
         project = self.project(plan["projectId"])
         if project["revision"] != plan["projectRevision"]:
             raise DomainError("PLAN_STALE", "Project changed after render plan was created")
+        if int(project.get("provenanceRevision", 0)) != int(plan["provenanceRevision"]):
+            raise DomainError("PLAN_STALE", "Provenance resolution changed after render plan was created")
         if set(plan.get("warningCodes", [])) - set(warnings):
             raise DomainError("VALIDATION_FAILED", "Every render-plan warning must be acknowledged")
         attestation = {
@@ -1437,6 +1691,110 @@ class Store:
         if not target.is_relative_to(root):
             raise DomainError("FORBIDDEN", "Output path escapes directory grant")
         return target
+
+
+def _affected_program_intervals(before: dict[str, Any], after: dict[str, Any]) -> list[dict[str, Any]]:
+    boundaries = {0, int(before.get("durationUs", 0)), int(after.get("durationUs", 0))}
+    for compiled in (before, after):
+        for key in ("videoSlices", "audioSlices", "issues"):
+            for item in compiled.get(key, []):
+                boundaries.add(int(item.get("startUs", 0)))
+                boundaries.add(int(item.get("endUs", compiled.get("durationUs", 0))))
+    ordered = sorted(boundary for boundary in boundaries if boundary >= 0)
+    result: list[dict[str, Any]] = []
+    for start, end in zip(ordered, ordered[1:]):
+        if start >= end:
+            continue
+        midpoint = start + (end - start) // 2
+        old = _compiled_signature_at(before, midpoint)
+        new = _compiled_signature_at(after, midpoint)
+        if old == new:
+            continue
+        reasons = sorted(key for key in old if old[key] != new[key])
+        if result and result[-1]["endUs"] == start and result[-1]["reasons"] == reasons:
+            result[-1]["endUs"] = end
+        else:
+            result.append({"startUs": start, "endUs": end, "reasons": reasons})
+    return result
+
+
+def _compiled_signature_at(compiled: dict[str, Any], output_us: int) -> dict[str, Any]:
+    def selected(name: str) -> dict[str, Any] | None:
+        value = next(
+            (
+                item
+                for item in compiled.get(name, [])
+                if int(item.get("startUs", 0)) <= output_us < int(item.get("endUs", 0))
+            ),
+            None,
+        )
+        if value is None:
+            return None
+        return {
+            key: value.get(key)
+            for key in ("assetId", "streamId", "logicalSourceId", "sourceStartUs", "sourceEndUs", "synthetic")
+        }
+
+    return {
+        "video": selected("videoSlices"),
+        "audio": selected("audioSlices"),
+        "issues": sorted(
+            item.get("code")
+            for item in compiled.get("issues", [])
+            if int(item.get("startUs", 0)) <= output_us
+            < int(item.get("endUs", compiled.get("durationUs", 0) + 1))
+        ),
+    }
+
+
+def _normalize_media_record_timestamp(record: MediaRecord, policy: dict[str, Any]) -> None:
+    if not isinstance(record.custom, dict):
+        record.custom = {}
+    previous_policy = record.custom.get("timestampPolicy", {})
+    raw = previous_policy.get("rawValue") or record.captured_at or _raw_timestamp_from_evidence(record)
+    if raw is None:
+        return
+    outcome = normalize_timestamp(
+        raw,
+        str(policy["time_zone"]),
+        int(policy["dst_fold"]),
+        str(policy["nonexistent_policy"]),
+    )
+    record.custom["timestampPolicy"] = outcome
+    record.captured_at = outcome.get("resolvedUtc")
+    evidence_value = {
+        "rawValue": outcome["rawValue"],
+        "resolvedUtc": outcome.get("resolvedUtc"),
+        "timeZone": outcome["timeZone"],
+        "ambiguity": outcome["ambiguity"],
+        "dstFold": outcome["dstFold"],
+        "nonexistentPolicy": outcome["nonexistentPolicy"],
+    }
+    if not any(
+        item.kind == "importer"
+        and item.field == "captured_at.normalization"
+        and item.value == evidence_value
+        for item in record.evidence
+    ):
+        record.evidence.append(
+            ProvenanceEvidence(
+                "importer",
+                "captured_at.normalization",
+                evidence_value,
+                0.9 if outcome.get("resolvedUtc") else 0.2,
+                "library-time-policy",
+                raw_value=outcome["rawValue"],
+                normalized_value=outcome.get("resolvedUtc"),
+                uncertainty=outcome["ambiguity"],
+            )
+        )
+
+
+def _raw_timestamp_from_evidence(record: MediaRecord) -> object | None:
+    for item in reversed(record.evidence):
+        if item.field == "captured_at" and item.origin != "library-time-policy":
+            return item.raw_value if item.raw_value is not None else item.value
+    return None
 
 
 def _contains(parent: Path, child: Path) -> bool:

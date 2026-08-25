@@ -15,6 +15,7 @@ const state = {
   groups: [],
   group: [],
   groupName: null,
+  selectedMedia: new Set(),
   project: null,
   compiled: null,
   sources: [],
@@ -29,6 +30,10 @@ const state = {
   scanJob: null,
   renderJob: null,
   eventCursor: 0,
+  eventFeed: null,
+  eventFeedOpen: false,
+  eventReconnectTimer: null,
+  suggestions: [],
 };
 
 function safe(value) {
@@ -121,11 +126,14 @@ function showView(view) {
 }
 
 async function loadLibraries() {
-  const [libraries, projects] = await Promise.all([client.libraries(), client.projects()]);
+  const [libraries, projects] = await Promise.all([client.listLibraries(), client.listProjects()]);
   state.projects = projects;
   renderRecentProjects();
   if (!libraries.length) return;
   state.library = libraries[0];
+  $("#library-time-zone").value = state.library.timeZone || "UTC";
+  $("#library-dst-fold").value = String(state.library.dstFold || 0);
+  $("#library-nonexistent").value = state.library.nonexistentPolicy || "REJECT";
   await loadMediaPage(true);
 }
 
@@ -140,7 +148,7 @@ async function loadMediaPage(reset = false) {
   const query = new URLSearchParams({limit: "500"});
   if (state.mediaCursor) query.set("cursor", state.mediaCursor);
   if (state.mediaGeneration !== null) query.set("generation", String(state.mediaGeneration));
-  const page = await client.media(state.library.id, query.toString());
+  const page = await client.listMedia({libraryId: state.library.id, query: Object.fromEntries(query)});
   state.mediaGeneration = page.snapshotGeneration;
   state.mediaCursor = page.nextCursor;
   for (const media of page.items) {
@@ -193,8 +201,10 @@ function selectGroup(index) {
   const selected = state.groups[index];
   if (!selected) return;
   [state.groupName, state.group] = selected;
+  state.selectedMedia = new Set(state.group.map(item => item.id));
   $("#media-table").innerHTML = state.group.slice(0, 500).map(item => `
     <tr data-media="${safe(item.id)}">
+      <td><input class="media-select" type="checkbox" value="${safe(item.id)}" checked aria-label="Include ${safe(mediaLabel(item))} clip"></td>
       <td class="mono">${safe(item.captured_at?.replace("T", " ") || "Unknown")}</td>
       <td>${safe(mediaLabel(item))}<br><small>${safe(item.relative_path)}</small></td>
       <td class="mono">${item.durationUs == null ? "Unknown" : formatUs(item.durationUs)}</td>
@@ -202,24 +212,36 @@ function selectGroup(index) {
       <td><span class="evidence-count">${item.evidence?.length || 0} observations</span>${item.warning ? `<br><small>△ ${safe(item.warning)}</small>` : ""}</td>
     </tr>`).join("");
   $$("#media-table tr").forEach(row => { row.ondblclick = createProjectFromGroup; });
+  $("#select-group").checked = true;
+  $("#select-group").indeterminate = false;
+  $$(".media-select").forEach(input => {
+    input.onchange = () => {
+      if (input.checked) state.selectedMedia.add(input.value); else state.selectedMedia.delete(input.value);
+      const count = state.group.filter(item => state.selectedMedia.has(item.id)).length;
+      $("#select-group").checked = count === state.group.length;
+      $("#select-group").indeterminate = count > 0 && count < state.group.length;
+      $("#open-event").disabled = count === 0;
+    };
+  });
   $("#event-title").textContent = `${state.groupName} · source alignment`;
 }
 
 async function ensureProjectMedia(project) {
   const missing = project.clips.map(clip => clip.assetId).filter(assetId => !state.mediaById.has(assetId));
-  const records = await Promise.all(missing.map(assetId => client.mediaAsset(assetId)));
+  const records = await Promise.all(missing.map(mediaId => client.getMedia({mediaId})));
   for (const record of records) state.mediaById.set(record.id, record);
 }
 
 async function createProjectFromGroup() {
-  if (!state.group.length) return toast("Selected group has no indexed video");
+  const selected = state.group.filter(item => state.selectedMedia.has(item.id));
+  if (!selected.length) return toast("Select at least one exact media asset");
   try {
-    const project = await client.createProject({
+    const project = await client.createProject({}, {
       name: `${state.groupName} alignment`,
       libraryId: state.library.id,
-      assetIds: state.group.map(item => item.id),
+      assetIds: selected.map(item => item.id),
     });
-    state.projects = await client.projects();
+    state.projects = await client.listProjects();
     renderRecentProjects();
     await openProject(project);
     toast("Draft program created; unresolved coverage remains visible");
@@ -230,17 +252,18 @@ async function createProjectFromGroup() {
 
 async function openProject(projectSummary) {
   try {
-    const project = await client.project(projectSummary.id);
-    const libraries = await client.libraries();
+    const project = await client.getProject({projectId: projectSummary.id});
+    const libraries = await client.listLibraries();
     state.library = libraries.find(item => item.id === project.libraryId) || state.library;
     await ensureProjectMedia(project);
     state.project = project;
-    state.compiled = await client.program(project.id);
+    state.compiled = await client.getCompiledProgram({projectId: project.id});
     state.durationUs = Math.max(1, state.compiled.durationUs);
     state.selectedSource = 0;
     state.selectedSegment = 0;
     state.renderPlan = null;
     state.artifact = null;
+    state.suggestions = await client.listSuggestions({projectId: project.id});
     deriveSources();
     $$(".workflow").forEach(button => { button.disabled = false; });
     $$('input[name="anchor"]').forEach(radio => {
@@ -298,7 +321,50 @@ function renderSources() {
       renderProgram();
     };
   });
+  $$('#alignment-tracks [data-drag-source]').forEach(track => {
+    track.onkeydown = event => {
+      if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      event.preventDefault();
+      const index = state.sources.findIndex(source => source.id === track.dataset.dragSource);
+      if (index < 0) return;
+      state.selectedSource = index;
+      renderSourceInspector();
+      const direction = event.key === "ArrowLeft" ? -1 : 1;
+      $("#sync-offset").value = Number($("#sync-offset").value) + direction * (event.shiftKey ? 100 : 10);
+      $("#sync-offset").dispatchEvent(new Event("change"));
+    };
+    track.onpointerdown = event => {
+      const index = state.sources.findIndex(source => source.id === track.dataset.dragSource);
+      if (index < 0) return;
+      state.selectedSource = index;
+      renderSourceInspector();
+      const startX = event.clientX;
+      const startMs = Number($("#sync-offset").value);
+      const width = Math.max(1, track.querySelector(".track-clips").clientWidth);
+      track.setPointerCapture(event.pointerId);
+      track.onpointermove = moveEvent => {
+        const deltaUs = ((moveEvent.clientX - startX) / width) * state.durationUs;
+        $("#sync-offset").value = Math.round(startMs + deltaUs / 1000);
+      };
+      track.onpointerup = upEvent => {
+        track.releasePointerCapture(upEvent.pointerId);
+        track.onpointermove = null;
+        track.onpointerup = null;
+        $("#sync-offset").dispatchEvent(new Event("change"));
+      };
+    };
+  });
+  const selected = state.sources[state.selectedSource];
+  if (selected) {
+    $("#source-label").value = selected.label;
+    const clipOptions = selected.clips.map((clip, index) => `<option value="${safe(clip.id)}">Clip ${index + 1} · ${safe(state.mediaById.get(clip.assetId)?.relative_path || clip.id)}</option>`).join("");
+    $("#manage-clip").innerHTML = clipOptions || '<option value="">No clips assigned</option>';
+    $("#assign-source").innerHTML = state.sources.filter(source => source.id !== selected.id).map(source => `<option value="${safe(source.id)}">${safe(source.label)}</option>`).join("") || '<option value="">No other source</option>';
+    $("#merge-source").innerHTML = $("#assign-source").innerHTML;
+    $("#archive-source").disabled = Boolean(selected.clips.length || state.project.videoBlocks.some(block => block.logicalSourceId === selected.id) || state.project.audioBlocks.some(block => block.logicalSourceId === selected.id));
+  }
   renderSourceInspector();
+  renderSuggestions();
 }
 
 function trackMarkup(source) {
@@ -311,7 +377,7 @@ function trackMarkup(source) {
     const width = Math.max(1, Math.min(100 - left, (durationUs / state.durationUs) * 100));
     return `<i class="clip" title="${safe(media?.relative_path)}" style="left:${left}%;width:${width}%;--source-color:${source.color}"></i>`;
   }).join("");
-  return `<div class="track-row"><div class="track-label"><strong>${safe(source.label)}</strong><small>${source.clips.length} source clips</small></div><div class="track-clips">${clips}</div></div>`;
+  return `<div class="track-row" data-drag-source="${safe(source.id)}" tabindex="0" aria-label="${safe(source.label)} alignment track; use arrow keys for 10 millisecond nudges"><div class="track-label"><strong>${safe(source.label)}</strong><small>${source.clips.length} source clips</small></div><div class="track-clips">${clips}</div></div>`;
 }
 
 function renderSourceInspector() {
@@ -319,11 +385,50 @@ function renderSourceInspector() {
   if (!source) return;
   $("#selected-source-name").textContent = source.label;
   $("#sync-offset").value = Math.round(source.offsetUs / 1000);
+  $("#sync-rate").value = source.ratePpm;
   const media = source.media[0];
   $("#confidence-label").textContent = media?.captured_at
     ? `${source.clips.length} clips · timestamp evidence available`
     : `${source.clips.length} clips · manual timing required`;
-  $("#provenance-panel").innerHTML = source.media.map(provenanceMarkup).join("");
+  $("#provenance-panel").innerHTML = source.media.map(provenanceMarkup).join("") + (source.media[0] ? `<form id="provenance-correction"><p class="eyebrow">Revisioned correction</p><label class="field"><span>Field</span><input id="resolution-field" required maxlength="100" placeholder="capturedAt"></label><label class="field"><span>Resolved value</span><input id="resolution-value" required maxlength="500"></label><label class="field"><span>Rationale (optional)</span><input id="resolution-rationale" maxlength="500"></label><button class="btn wide" type="submit">Record correction</button></form>` : "");
+  if ($("#provenance-correction")) $("#provenance-correction").onsubmit = event => recordProvenanceCorrection(event, source.media[0]);
+}
+
+function renderSuggestions() {
+  const container = $("#suggestion-list");
+  const rows = state.suggestions.filter(item => item.kind === "ALIGNMENT").slice(0, 8);
+  container.innerHTML = rows.length ? rows.map(item => `<div class="confidence"><strong>${safe(item.status)} · ${Math.round(Number(item.confidence || 0) * 100)}%</strong><p>${safe(item.evidence?.join("; ") || "No supporting evidence")}</p><small>${safe(item.algorithm)} v${safe(item.algorithmVersion)} · ${safe(item.limitations?.join("; ") || "No limitations recorded")}</small>${item.status === "PENDING" ? `<div class="link-row"><button class="btn" data-accept-suggestion="${safe(item.id)}">Accept</button><button class="btn" data-reject-suggestion="${safe(item.id)}">Reject</button></div>` : ""}</div>`).join("") : '<p class="muted">No alignment suggestions. Manual decisions remain authoritative.</p>';
+  $$('[data-accept-suggestion]').forEach(button => { button.onclick = () => resolveSuggestion(button.dataset.acceptSuggestion, true); });
+  $$('[data-reject-suggestion]').forEach(button => { button.onclick = () => resolveSuggestion(button.dataset.rejectSuggestion, false); });
+}
+
+async function resolveSuggestion(suggestionId, accept) {
+  const suggestion = state.suggestions.find(item => item.id === suggestionId);
+  if (!suggestion) return;
+  const payload = accept ? {suggestionId, clipId: suggestion.clipId, sync: suggestion.sync, confirmDrift: Boolean(suggestion.sync?.ratePpm)} : {suggestionId};
+  if (await command(accept ? "AcceptAlignmentSuggestion" : "RejectAlignmentSuggestion", payload)) {
+    state.suggestions = await client.listSuggestions({projectId: state.project.id});
+    renderSuggestions();
+  }
+}
+
+async function recordProvenanceCorrection(event, media) {
+  event.preventDefault();
+  try {
+    await client.resolveProvenance({mediaId: media.id}, {
+      field: $("#resolution-field").value,
+      resolution: {value: $("#resolution-value").value},
+      rationale: $("#resolution-rationale").value || null,
+    });
+    const refreshed = await client.getMedia({mediaId: media.id});
+    state.mediaById.set(media.id, refreshed);
+    state.project = await client.getProject({projectId: state.project.id});
+    state.compiled = await client.getCompiledProgram({projectId: state.project.id});
+    state.renderPlan = null;
+    deriveSources();
+    renderSources();
+    toast("Correction recorded without erasing raw evidence; review invalidated");
+  } catch (error) { handleError(error); }
 }
 
 function provenanceMarkup(media) {
@@ -385,6 +490,9 @@ function renderProgram() {
   $("#program-monitor").style.setProperty("--source-dark", `${source?.color || "#e48778"}33`);
   $("#edit-segment-name").textContent = block ? `Video slice ${state.selectedSegment + 1}` : "No video decision";
   $("#video-source").value = block?.logicalSourceId || "";
+  const pinnedSource = sourceForBlock(block);
+  $("#video-clip-pin").innerHTML = `<option value="">Automatic unambiguous clip</option>${(pinnedSource?.clips || []).map((clip, index) => `<option value="${safe(clip.id)}">Clip ${index + 1}</option>`).join("")}`;
+  $("#video-clip-pin").value = block?.pinnedClipId || "";
   $("#review-source").textContent = source?.label || "Output gap";
   $("#review-duration").textContent = formatUs(state.durationUs);
   $("#cut-camera").disabled = !block || !state.sources[state.selectedSource] || block.logicalSourceId === state.sources[state.selectedSource].id;
@@ -424,15 +532,18 @@ function renderIssues() {
 
 async function command(commandType, payload, {preview = false} = {}) {
   try {
-    const result = await client.command(state.project.id, {
+    const result = await client.applyProjectCommand({
+      projectId: state.project.id,
+      query: preview ? {preview: "true"} : {},
+    }, {
       commandId: crypto.randomUUID(),
       expectedRevision: state.project.revision,
       commandType,
       payload,
-    }, preview);
+    });
     if (preview) return result;
     state.project = result.project;
-    state.compiled = await client.program(state.project.id);
+    state.compiled = await client.getCompiledProgram({projectId: state.project.id});
     state.renderPlan = null;
     deriveSources();
     renderSources();
@@ -527,7 +638,7 @@ async function setPlayhead(value) {
   clearTimeout(setPlayhead.pointTimer);
   setPlayhead.pointTimer = setTimeout(async () => {
     try {
-      const point = await client.programAt(state.project.id, currentOutputUs());
+      const point = await client.getProgramAt({projectId: state.project.id, query: {outputUs: currentOutputUs()}});
       const source = sourceById(point.video?.logicalSourceId);
       $("#program-source").textContent = source?.label || (point.video ? "Selected asset" : "Output gap");
       $("#program-segment-id").textContent = point.video?.blockId || "—";
@@ -565,8 +676,8 @@ async function prepareReview() {
     const profile = $("#lossless-check").checked ? "ARCHIVAL_LOSSLESS" : "COMPATIBLE";
     const suffix = profile === "ARCHIVAL_LOSSLESS" ? ".mkv" : ".mp4";
     if (!filename.toLowerCase().endsWith(suffix)) throw new Error(`${profile} output filename must end with ${suffix}`);
-    const grant = await client.createGrant({path: directory, role: "WRITE_OUTPUT"});
-    state.renderPlan = await client.renderPlan(state.project.id, {outputGrantId: grant.id, filename, profile});
+    const grant = await client.createGrant({}, {path: directory, role: "WRITE_OUTPUT"});
+    state.renderPlan = await client.createRenderPlan({projectId: state.project.id}, {outputGrantId: grant.id, filename, profile});
     renderReviewPlan();
   } catch (error) {
     $("#preflight-heading").textContent = "Output plan needs attention";
@@ -603,8 +714,8 @@ async function renderVideo() {
   if (!state.renderPlan) return;
   try {
     $("#render-video").disabled = true;
-    await client.attest(state.renderPlan.id, state.renderPlan.warningCodes);
-    const result = await client.render(state.renderPlan.id, {});
+    await client.attestReview({planId: state.renderPlan.id}, {acknowledgedWarnings: state.renderPlan.warningCodes});
+    const result = await client.startRender({planId: state.renderPlan.id}, {});
     state.renderJob = result.job;
     state.artifact = result.artifact;
     const panel = $("#render-progress");
@@ -612,10 +723,11 @@ async function renderVideo() {
     await pollJob(result.job.id, job => {
       panel.textContent = `${job.status} · ${job.message || ""} · ${Math.round((job.progress || 0) * 100)}%`;
     });
-    const finalJob = await client.job(result.job.id);
+    const finalJob = await client.getJob({jobId: result.job.id});
     if (finalJob.status === "SUCCEEDED") {
-      state.artifact = await client.artifact(result.artifact.id);
-      $("#manifest-preview").textContent = JSON.stringify(await client.manifest(result.artifact.id), null, 2);
+      state.artifact = await client.getArtifact({artifactId: result.artifact.id});
+      $("#manifest-preview").textContent = JSON.stringify(await client.getManifest({artifactId: result.artifact.id}), null, 2);
+      $("#download-video").hidden = false;
       toast("Video and provenance manifest completed as one artifact pair");
     } else {
       toast(`Render ${finalJob.status.toLowerCase()}: ${finalJob.message || "no detail"}`);
@@ -627,18 +739,80 @@ async function renderVideo() {
 }
 
 async function pollJob(jobId, onUpdate) {
-  while (true) {
-    const job = await client.job(jobId);
-    onUpdate(job);
-    if (["SUCCEEDED", "FAILED", "CANCELED", "INTERRUPTED", "FAILED_RECOVERABLE"].includes(job.status)) return job;
-    await new Promise(resolve => setTimeout(resolve, 500));
+  const terminal = new Set(["SUCCEEDED", "FAILED", "CANCELED", "INTERRUPTED", "FAILED_RECOVERABLE"]);
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    let polling = false;
+    const update = async () => {
+      if (finished || polling) return;
+      polling = true;
+      try {
+        const job = await client.getJob({jobId});
+        onUpdate(job);
+        if (terminal.has(job.status)) {
+          finished = true;
+          window.removeEventListener("room-alignment-job", onEvent);
+          window.removeEventListener("room-alignment-event-reset", onReset);
+          clearInterval(timer);
+          resolve(job);
+        }
+      } catch (error) {
+        if (!state.eventFeedOpen) {
+          finished = true;
+          window.removeEventListener("room-alignment-job", onEvent);
+          window.removeEventListener("room-alignment-event-reset", onReset);
+          clearInterval(timer);
+          reject(error);
+        }
+      } finally {
+        polling = false;
+      }
+    };
+    const onEvent = event => {
+      if (event.detail.jobId === jobId) update();
+    };
+    const onReset = () => update();
+    window.addEventListener("room-alignment-job", onEvent);
+    window.addEventListener("room-alignment-event-reset", onReset);
+    const timer = setInterval(() => { if (!state.eventFeedOpen) update(); }, 750);
+    update();
+  });
+}
+
+async function connectEventFeed() {
+  clearTimeout(state.eventReconnectTimer);
+  if (state.eventFeed) state.eventFeed.close();
+  try {
+    const authorization = await client.createEventToken();
+    const query = new URLSearchParams({token: authorization.token, after: String(state.eventCursor)});
+    const feed = new EventSource(`/api/v1/events?${query}`);
+    state.eventFeed = feed;
+    feed.onopen = () => { state.eventFeedOpen = true; };
+    feed.addEventListener("job", event => {
+      const value = JSON.parse(event.data);
+      state.eventCursor = Math.max(state.eventCursor, Number(value.sequence || event.lastEventId || 0));
+      window.dispatchEvent(new CustomEvent("room-alignment-job", {detail: value}));
+    });
+    feed.addEventListener("reset", event => {
+      const value = JSON.parse(event.data);
+      state.eventCursor = Number(value.latestSequence || event.lastEventId || 0);
+      window.dispatchEvent(new CustomEvent("room-alignment-event-reset", {detail: value}));
+    });
+    feed.onerror = () => {
+      state.eventFeedOpen = false;
+      feed.close();
+      state.eventReconnectTimer = setTimeout(connectEventFeed, 500);
+    };
+  } catch (_error) {
+    state.eventFeedOpen = false;
+    state.eventReconnectTimer = setTimeout(connectEventFeed, 1000);
   }
 }
 
 async function scanLibrary(path, limit) {
-  const grant = await client.createGrant({path, role: "READ_ONLY_SOURCE"});
-  state.library = await client.createLibrary({sourceGrantId: grant.id, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC"});
-  state.scanJob = await client.startScan(state.library.id, limit ? {mode: "BOUNDED", limit} : {mode: "FULL"});
+  const grant = await client.createGrant({}, {path, role: "READ_ONLY_SOURCE"});
+  state.library = await client.createLibrary({}, {sourceGrantId: grant.id, timeZone: $("#library-time-zone").value || "UTC", dstFold: Number($("#library-dst-fold").value), nonexistentPolicy: $("#library-nonexistent").value});
+  state.scanJob = await client.startScan({libraryId: state.library.id}, limit ? {mode: "BOUNDED", limit} : {mode: "FULL"});
   const panel = $("#scan-progress");
   panel.classList.remove("hidden");
   const scan = await pollJob(state.scanJob.id, job => {
@@ -663,18 +837,43 @@ function setupEvents() {
     }
   };
   $("#load-more-media").onclick = () => loadMediaPage(false).catch(handleError);
+  $("#apply-time-policy").onclick = async () => {
+    if (!state.library) return toast("Index or open a library first");
+    try {
+      state.library = await client.updateLibraryTimePolicy({libraryId: state.library.id}, {timeZone: $("#library-time-zone").value, dstFold: Number($("#library-dst-fold").value), nonexistentPolicy: $("#library-nonexistent").value});
+      await loadMediaPage(true);
+      toast("Timestamp policy applied; raw evidence retained and suggestions invalidated");
+    } catch (error) { handleError(error); }
+  };
+  $("#select-group").onchange = event => {
+    state.selectedMedia = event.target.checked ? new Set(state.group.map(item => item.id)) : new Set();
+    $$(".media-select").forEach(input => { input.checked = event.target.checked; });
+    event.target.indeterminate = false;
+    $("#open-event").disabled = !event.target.checked;
+  };
   $("#open-event").onclick = createProjectFromGroup;
   $("#sync-offset").onchange = async event => {
+    await applySelectedSync(Math.round(Number(event.target.value) * 1000), Number($("#sync-rate").value));
+  };
+  $("#sync-rate").onchange = async event => {
+    const ratePpm = Math.round(Number(event.target.value));
+    if (ratePpm && !window.confirm("Rate correction changes timing fidelity and will be disclosed in the manifest. Apply it?")) {
+      renderSourceInspector();
+      return;
+    }
+    await applySelectedSync(Math.round(Number($("#sync-offset").value) * 1000), ratePpm);
+  };
+  async function applySelectedSync(anchorOutputUs, ratePpm) {
     const source = state.sources[state.selectedSource];
     const clip = source?.clips[0];
     if (!clip) return;
-    const sync = {...clip.sync, anchorOutputUs: Math.round(Number(event.target.value) * 1000)};
+    const sync = {...clip.sync, anchorOutputUs, ratePpm};
     const preview = await command("SetSyncTransform", {clipId: clip.id, sync, confirmDrift: Boolean(sync.ratePpm)}, {preview: true});
     if (!preview) return;
     const introduced = preview.issues.filter(issue => !state.compiled.issues.some(previous => previous.id === issue.id));
     if (introduced.length && !window.confirm(`This alignment introduces ${introduced.length} new canonical issue(s). Apply it?`)) return;
     await command("SetSyncTransform", {clipId: clip.id, sync, confirmDrift: Boolean(sync.ratePpm)});
-  };
+  }
   $$('[data-nudge]').forEach(button => {
     button.onclick = () => {
       $("#sync-offset").value = Number($("#sync-offset").value) + Number(button.dataset.nudge);
@@ -684,6 +883,38 @@ function setupEvents() {
   $("#set-reference").onclick = async () => {
     const source = state.sources[state.selectedSource];
     if (source && await command("SetReferenceSource", {sourceId: source.id})) toast(`${source.label} is the reference source`);
+  };
+  $("#add-source").onclick = async () => {
+    const label = window.prompt("Label for the new logical source", "New source");
+    if (label) await command("AddLogicalSource", {label});
+  };
+  $("#rename-source").onclick = async () => {
+    const source = state.sources[state.selectedSource];
+    if (source) await command("RenameLogicalSource", {sourceId: source.id, label: $("#source-label").value});
+  };
+  $("#assign-clip").onclick = async () => {
+    if ($("#manage-clip").value && $("#assign-source").value) await command("AssignClip", {clipId: $("#manage-clip").value, logicalSourceId: $("#assign-source").value});
+  };
+  $("#split-source").onclick = async () => {
+    const source = state.sources[state.selectedSource];
+    if (source && $("#manage-clip").value && $("#split-source-label").value) await command("SplitLogicalSource", {sourceId: source.id, clipIds: [$("#manage-clip").value], label: $("#split-source-label").value});
+  };
+  $("#merge-source-action").onclick = async () => {
+    const source = state.sources[state.selectedSource];
+    const targetSourceId = $("#merge-source").value;
+    if (source && targetSourceId && window.confirm(`Merge ${source.label} into the selected destination? This remains a revisioned project decision.`)) await command("MergeLogicalSources", {targetSourceId, sourceIds: [source.id]});
+  };
+  $("#archive-source").onclick = async () => {
+    const source = state.sources[state.selectedSource];
+    if (source) await command("ArchiveLogicalSource", {sourceId: source.id, archived: true});
+  };
+  $("#analyze-alignment").onclick = async () => {
+    try {
+      const job = await client.startAlignmentAnalysis({projectId: state.project.id}, {});
+      await pollJob(job.id, value => { $("#footer-status").textContent = `${value.status} · ${value.message}`; });
+      state.suggestions = await client.listSuggestions({projectId: state.project.id});
+      renderSuggestions();
+    } catch (error) { handleError(error); }
   };
   $$('input[name="anchor"]').forEach(radio => {
     radio.onchange = async () => {
@@ -701,6 +932,41 @@ function setupEvents() {
   $("#video-source").onchange = event => {
     const block = currentVideoBlock();
     if (block) command("AssignVideoSource", {blockId: block.id, logicalSourceId: event.target.value});
+  };
+  $("#video-clip-pin").onchange = event => {
+    const block = currentVideoBlock();
+    if (block) command("PinVideoClip", {blockId: block.id, clipId: event.target.value || null});
+  };
+  $("#split-video").onclick = () => {
+    const block = currentVideoBlock();
+    const atUs = currentOutputUs();
+    if (!block || atUs <= block.startUs || atUs >= block.endUs) return toast("Move the playhead inside the selected video block");
+    command("SplitVideoBlock", {blockId: block.id, atUs});
+  };
+  $("#delete-video").onclick = () => {
+    const block = currentVideoBlock();
+    if (block && window.confirm("Delete this video decision and expose the resulting coverage issue?")) command("DeleteVideoBlock", {blockId: block.id});
+  };
+  $("#fill-video-gap").onclick = () => {
+    const issue = state.compiled.issues.find(item => item.code === "VIDEO_GAP");
+    const source = state.sources[state.selectedSource];
+    if (!issue || !source) return toast("No canonical video gap is available to fill");
+    command("AddVideoBlock", {startUs: issue.startUs, endUs: issue.endUs, logicalSourceId: source.id});
+  };
+  $("#split-audio").onclick = () => {
+    const block = currentAudioBlock();
+    const atUs = currentOutputUs();
+    if (!block || atUs <= block.startUs || atUs >= block.endUs) return toast("Move the playhead inside the current audio block");
+    command("SplitAudioBlock", {blockId: block.id, atUs});
+  };
+  $("#delete-audio").onclick = () => {
+    const block = currentAudioBlock();
+    if (block && window.confirm("Delete this audio decision and expose the resulting issue?")) command("DeleteAudioBlock", {blockId: block.id});
+  };
+  $("#fill-audio-gap").onclick = () => {
+    const issue = state.compiled.issues.find(item => item.code === "AUDIO_GAP");
+    if (!issue) return toast("No canonical audio gap is available to fill");
+    command("AddAudioBlock", {startUs: issue.startUs, endUs: issue.endUs, mode: "SILENCE"});
   };
   $("#link-av").onclick = () => setAudioDecision("follow");
   $("#unlink-av").onclick = () => {
@@ -735,7 +1001,7 @@ function setupEvents() {
   };
   $("#lossless-check").onchange = () => { if (state.view === "review") prepareReview(); };
   $("#download-manifest").onclick = async () => {
-    const value = state.artifact?.status === "COMPLETE" ? await client.manifest(state.artifact.id) : state.renderPlan;
+    const value = state.artifact?.status === "COMPLETE" ? await client.getManifest({artifactId: state.artifact.id}) : state.renderPlan;
     if (!value) return toast("Create an immutable render plan first");
     const blob = new Blob([JSON.stringify(value, null, 2)], {type: "application/json"});
     const link = document.createElement("a");
@@ -743,6 +1009,10 @@ function setupEvents() {
     link.download = `${state.project.name.replace(/\W+/g, "-").toLowerCase()}-${state.artifact ? "manifest" : "render-plan"}.json`;
     link.click();
     URL.revokeObjectURL(link.href);
+  };
+  $("#download-video").onclick = () => {
+    if (!state.artifact || state.artifact.status !== "COMPLETE") return toast("Complete the artifact pair first");
+    window.location.assign(`/api/v1/artifacts/${encodeURIComponent(state.artifact.id)}/video`);
   };
   document.addEventListener("keydown", event => {
     if (["INPUT", "SELECT", "TEXTAREA"].includes(event.target.tagName)) return;
@@ -776,8 +1046,10 @@ function handleError(error) {
 
 async function start() {
   try {
-    await client.session();
+    await client.getSession();
+    $("#library-time-zone").value = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
     setupEvents();
+    connectEventFeed();
     await loadLibraries();
     $("#footer-status").textContent = "Secure local session ready";
   } catch (error) {
