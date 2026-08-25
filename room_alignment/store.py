@@ -99,6 +99,12 @@ CREATE TABLE IF NOT EXISTS media (
 CREATE INDEX IF NOT EXISTS media_library_path ON media(library_id, relative_path, id);
 CREATE INDEX IF NOT EXISTS media_library_time ON media(library_id, captured_at);
 CREATE INDEX IF NOT EXISTS media_library_camera ON media(library_id, camera);
+CREATE TABLE IF NOT EXISTS media_identity_keys (
+  asset_id TEXT PRIMARY KEY REFERENCES media(id) ON DELETE CASCADE,
+  library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+  identity_key TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS media_identity_lookup ON media_identity_keys(library_id,identity_key);
 CREATE TABLE IF NOT EXISTS provenance_resolutions (
   id TEXT PRIMARY KEY,
   media_id TEXT NOT NULL REFERENCES media(id) ON DELETE CASCADE,
@@ -357,12 +363,23 @@ class Store:
             if not row:
                 raise DomainError("NOT_FOUND", "Directory grant not found")
             db.execute("UPDATE directory_grants SET revoked=1,revoked_at=? WHERE id=?", (now_iso(), grant_id))
-            db.execute(
-                "UPDATE jobs SET status='INTERRUPTED',error_code='GRANT_REQUIRED',message='Directory grant revoked',updated_at=? "
-                "WHERE status IN ('QUEUED','RUNNING','CANCEL_REQUESTED') AND "
-                "library_id IN (SELECT id FROM libraries WHERE grant_id=?)",
-                (now_iso(), grant_id),
+            dependent_jobs = list(
+                db.execute(
+                    "SELECT id FROM jobs WHERE status IN ('QUEUED','RUNNING','CANCEL_REQUESTED') AND "
+                    "library_id IN (SELECT id FROM libraries WHERE grant_id=?)",
+                    (grant_id,),
+                )
             )
+            for job in dependent_jobs:
+                self._transition_job_db(
+                    db,
+                    job["id"],
+                    "INTERRUPTED",
+                    None,
+                    "Directory grant revoked",
+                    {"reason": "GRANT_REQUIRED"},
+                    error_code="GRANT_REQUIRED",
+                )
             return self._public_grant(db.execute("SELECT * FROM directory_grants WHERE id=?", (grant_id,)).fetchone())
 
     @staticmethod
@@ -527,6 +544,32 @@ class Store:
             if not scan:
                 raise DomainError("NOT_FOUND", "Scan not found")
             for record in records:
+                fingerprint = record.fingerprint or {}
+                identity_material = {
+                    "device": fingerprint.get("device"),
+                    "inode": fingerprint.get("inode"),
+                    "size": fingerprint.get("size"),
+                    "sampleSha256": fingerprint.get("sampleSha256"),
+                }
+                identity_key = digest_json(identity_material) if all(
+                    identity_material.get(key) is not None for key in ("device", "inode", "size", "sampleSha256")
+                ) else None
+                if identity_key and not db.execute("SELECT 1 FROM media WHERE id=?", (record.id,)).fetchone():
+                    library_root = Path(
+                        db.execute("SELECT root FROM libraries WHERE id=?", (scan["library_id"],)).fetchone()[0]
+                    )
+                    rename_candidates = list(
+                        db.execute(
+                            "SELECT keys.asset_id,media.relative_path FROM media_identity_keys keys "
+                            "JOIN media ON media.id=keys.asset_id WHERE keys.library_id=? AND keys.identity_key=?",
+                            (scan["library_id"], identity_key),
+                        )
+                    )
+                    rename_matches = [
+                        item for item in rename_candidates if not (library_root / item["relative_path"]).exists()
+                    ]
+                    if len(rename_matches) == 1:
+                        record.id = rename_matches[0]["asset_id"]
                 payload = record.to_dict()
                 payload["generation"] = int(scan["generation"])
                 payload["missing"] = False
@@ -549,6 +592,12 @@ class Store:
                         json.dumps(payload),
                     ),
                 )
+                if identity_key:
+                    db.execute(
+                        "INSERT INTO media_identity_keys(asset_id,library_id,identity_key) VALUES(?,?,?) "
+                        "ON CONFLICT(asset_id) DO UPDATE SET library_id=excluded.library_id,identity_key=excluded.identity_key",
+                        (record.id, scan["library_id"], identity_key),
+                    )
 
     def finish_scan(self, scan_id: str, status: str, summary: dict[str, Any], message: str | None = None) -> None:
         if status not in {"SUCCEEDED", "FAILED", "CANCELED"}:
@@ -570,6 +619,12 @@ class Store:
                 db.execute(
                     "UPDATE libraries SET current_generation=?,last_scan=?,summary_json=? WHERE id=?",
                     (scan["generation"], now_iso(), json.dumps(summary), scan["library_id"]),
+                )
+                self._invalidate_suggestions_db(
+                    db,
+                    "library_id=? AND status IN ('PENDING','ACCEPTED')",
+                    (scan["library_id"],),
+                    "A newer scan generation may have changed the suggestion inputs",
                 )
             self._transition_job_db(db, scan_id, status, 1 if status == "SUCCEEDED" else 0, message)
 
@@ -804,6 +859,16 @@ class Store:
                 "INSERT INTO command_records(command_id,project_id,payload_digest,result_json,created_at) VALUES(?,?,?,?,?)",
                 (command_id, project_id, payload_digest, json.dumps(result), now_iso()),
             )
+            self._invalidate_suggestions_db(
+                db,
+                "project_id=? AND project_revision<? AND status='PENDING'",
+                (project_id, changed["revision"]),
+                "Project revision changed after suggestion creation",
+            )
+            if command_type in {"AcceptAlignmentSuggestion", "RejectAlignmentSuggestion"}:
+                suggestion_id = str(payload.get("suggestionId", ""))
+                next_status = "ACCEPTED" if command_type == "AcceptAlignmentSuggestion" else "REJECTED"
+                self._set_suggestion_status_db(db, suggestion_id, next_status)
             return result
 
     def compiled_project(self, project_id: str) -> dict[str, Any]:
@@ -979,6 +1044,59 @@ class Store:
                     "SELECT suggestion_json FROM suggestions WHERE project_id=? ORDER BY created_at DESC", (project_id,)
                 )
             ]
+
+    def library_suggestions(self, library_id: str) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            return [
+                json.loads(row[0])
+                for row in db.execute(
+                    "SELECT suggestion_json FROM suggestions WHERE library_id=? AND kind='CLUSTER' "
+                    "ORDER BY created_at DESC",
+                    (library_id,),
+                )
+            ]
+
+    def clustering_media(self, library_id: str) -> list[dict[str, Any]]:
+        self.library(library_id)
+        with self.connect() as db:
+            return [
+                json.loads(row[0])
+                for row in db.execute(
+                    "SELECT record_json FROM media WHERE library_id=? AND missing=0 AND captured_at IS NOT NULL "
+                    "ORDER BY captured_at,id",
+                    (library_id,),
+                )
+            ]
+
+    def _set_suggestion_status_db(self, db: sqlite3.Connection, suggestion_id: str, status: str) -> None:
+        row = db.execute("SELECT suggestion_json FROM suggestions WHERE id=?", (suggestion_id,)).fetchone()
+        if not row:
+            raise DomainError("NOT_FOUND", "Suggestion not found")
+        value = json.loads(row[0])
+        value["status"] = status
+        value["updatedAt"] = now_iso()
+        db.execute(
+            "UPDATE suggestions SET status=?,suggestion_json=?,updated_at=? WHERE id=?",
+            (status, json.dumps(value), value["updatedAt"], suggestion_id),
+        )
+
+    def _invalidate_suggestions_db(
+        self,
+        db: sqlite3.Connection,
+        predicate: str,
+        params: tuple[Any, ...],
+        reason: str,
+    ) -> None:
+        rows = list(db.execute(f"SELECT id,suggestion_json FROM suggestions WHERE {predicate}", params))
+        for row in rows:
+            value = json.loads(row["suggestion_json"])
+            value["status"] = "STALE"
+            value["invalidationReason"] = reason
+            value["updatedAt"] = now_iso()
+            db.execute(
+                "UPDATE suggestions SET status='STALE',suggestion_json=?,updated_at=? WHERE id=?",
+                (json.dumps(value), value["updatedAt"], row["id"]),
+            )
 
     # Durable jobs and events
 
@@ -1303,6 +1421,12 @@ class Store:
                 "createdAt": row["created_at"],
                 "updatedAt": row["updated_at"],
             }
+
+    def artifacts(self, *, incomplete_only: bool = False) -> list[dict[str, Any]]:
+        with self.connect() as db:
+            where = "WHERE status NOT IN ('COMPLETE','CANCELED','FAILED')" if incomplete_only else ""
+            ids = [row[0] for row in db.execute(f"SELECT id FROM artifacts {where} ORDER BY created_at")]
+        return [self.artifact(artifact_id) for artifact_id in ids]
 
     def output_path(self, grant_id: str, filename: str) -> Path:
         if not filename or Path(filename).name != filename or filename in {".", ".."}:

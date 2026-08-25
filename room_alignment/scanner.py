@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import subprocess
+import time
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import fields
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -101,7 +104,11 @@ def _rate(value: str | None) -> float | None:
         return None
 
 
-def probe(path: Path, timeout: float = 15) -> tuple[dict[str, Any], list[ProvenanceEvidence], str | None]:
+def probe(
+    path: Path,
+    timeout: float = 15,
+    canceled: Callable[[], bool] | None = None,
+) -> tuple[dict[str, Any], list[ProvenanceEvidence], str | None]:
     command = [
         "ffprobe", "-v", "error", "-show_entries",
         "format=duration,start_time,format_name:format_tags=creation_time,date,location,com.apple.quicktime.creationdate:"
@@ -111,14 +118,46 @@ def probe(path: Path, timeout: float = 15) -> tuple[dict[str, Any], list[Provena
         "-of", "json", str(path),
     ]
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout, check=False)
-    except (OSError, subprocess.TimeoutExpired) as error:
-        return {}, [], f"ffprobe unavailable or timed out: {error}"
-    if result.returncode != 0:
-        detail = result.stderr.strip().splitlines()[-1] if result.stderr.strip() else "unknown ffprobe error"
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+    except OSError as error:
+        return {}, [], f"ffprobe unavailable ({error.errno or 'unknown'})"
+    deadline = time.monotonic() + timeout
+    while True:
+        if canceled and canceled():
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=1)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            return {}, [], "Probe canceled"
+        try:
+            stdout, stderr = process.communicate(timeout=0.2)
+            break
+        except subprocess.TimeoutExpired:
+            if time.monotonic() < deadline:
+                continue
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+            return {}, [], "ffprobe timed out"
+    if len(stdout) > 2_000_000 or len(stderr) > 200_000:
+        return {}, [], "ffprobe output exceeded safe bounds"
+    if process.returncode != 0:
+        detail = stderr.strip().splitlines()[-1] if stderr.strip() else "unknown ffprobe error"
         return {}, [], detail[:300]
     try:
-        payload = json.loads(result.stdout)
+        payload = json.loads(stdout)
     except json.JSONDecodeError:
         return {}, [], "ffprobe returned invalid JSON"
     values: dict[str, Any] = {}
@@ -194,28 +233,78 @@ def iter_scan_records(
     existing_lookup: Callable[[str], dict[str, Any] | None] | None = None,
     canceled: Callable[[], bool] | None = None,
     max_files: int | None = None,
+    probe_workers: int = 4,
 ) -> Iterable[MediaRecord]:
     resolved = root.expanduser().resolve(strict=True)
     if not resolved.is_dir():
         raise ValueError("Library root must be a directory")
-    scanned = 0
-    for path in iter_videos(resolved):
-        if canceled and canceled():
-            return
-        if max_files is not None and scanned >= max_files:
-            return
-        scanned += 1
-        relative = path.relative_to(resolved)
-        relative_text = relative.as_posix()
-        cheap = cheap_fingerprint(path)
-        existing = existing_lookup(relative_text) if existing_lookup else None
-        if mode == "INCREMENTAL" and existing and _fingerprint_matches(existing.get("fingerprint", {}), cheap):
-            yield media_record_from_dict(existing, library_id)
-            continue
-        fingerprint = quick_fingerprint(path)
-        inferred = infer_from_path(path, relative)
-        sidecar = read_sidecar(path, relative)
-        probed_values, probed_evidence, warning = probe(path)
+    worker_count = max(1, min(int(probe_workers), 8))
+    pending: set[Future[MediaRecord]] = set()
+    discovered = 0
+    paths = iter(iter_videos(resolved))
+    exhausted = False
+    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="media-probe") as executor:
+        while pending or not exhausted:
+            while not exhausted and len(pending) < worker_count * 2:
+                if canceled and canceled():
+                    exhausted = True
+                    break
+                if max_files is not None and discovered >= max_files:
+                    exhausted = True
+                    break
+                try:
+                    path = next(paths)
+                except StopIteration:
+                    exhausted = True
+                    break
+                discovered += 1
+                relative = path.relative_to(resolved)
+                relative_text = relative.as_posix()
+                try:
+                    cheap = cheap_fingerprint(path)
+                except OSError:
+                    cheap = {}
+                existing = existing_lookup(relative_text) if existing_lookup else None
+                if mode == "INCREMENTAL" and existing and _fingerprint_matches(existing.get("fingerprint", {}), cheap):
+                    yield media_record_from_dict(existing, library_id)
+                    continue
+                pending.add(executor.submit(_scan_path, resolved, path, library_id, canceled))
+            if not pending:
+                continue
+            completed, pending = wait(pending, return_when=FIRST_COMPLETED)
+            for future in completed:
+                if canceled and canceled():
+                    for queued in pending:
+                        queued.cancel()
+                    return
+                yield future.result()
+
+
+def _scan_path(
+    root: Path,
+    path: Path,
+    library_id: str,
+    canceled: Callable[[], bool] | None,
+) -> MediaRecord:
+    relative = path.relative_to(root)
+    relative_text = relative.as_posix()
+    try:
+        resolved_path = path.resolve(strict=True)
+        if not resolved_path.is_relative_to(root) or not resolved_path.is_file():
+            stat = path.lstat()
+            return MediaRecord(
+                id=stable_media_id(library_id, relative_text),
+                library_id=library_id,
+                relative_path=relative_text,
+                size=stat.st_size,
+                modified_ns=stat.st_mtime_ns,
+                warning="Source path resolves outside the authorized library root",
+                source_candidate_id=f"candidate_{digest_json({'parent': relative.parent.as_posix()})[:24]}",
+            )
+        fingerprint = quick_fingerprint(resolved_path)
+        inferred = infer_from_path(resolved_path, relative)
+        sidecar = read_sidecar(resolved_path, relative)
+        probed_values, probed_evidence, warning = probe(resolved_path, canceled=canceled)
         values, evidence = merge_evidence(inferred, (probed_values, probed_evidence), sidecar)
         candidate_material = {
             "cameraEvidence": [
@@ -225,17 +314,33 @@ def iter_scan_records(
             ],
             "parent": relative.parent.as_posix(),
         }
-        yield MediaRecord(
+        stat = resolved_path.stat()
+        return MediaRecord(
             id=stable_media_id(library_id, relative_text),
             library_id=library_id,
             relative_path=relative_text,
-            size=path.stat().st_size,
-            modified_ns=path.stat().st_mtime_ns,
+            size=stat.st_size,
+            modified_ns=stat.st_mtime_ns,
             warning=warning,
             evidence=evidence,
             fingerprint=fingerprint,
             source_candidate_id=f"candidate_{digest_json(candidate_material)[:24]}",
             **values,
+        )
+    except OSError as error:
+        try:
+            stat = path.lstat()
+            size, modified_ns = stat.st_size, stat.st_mtime_ns
+        except OSError:
+            size, modified_ns = 0, 0
+        return MediaRecord(
+            id=stable_media_id(library_id, relative_text),
+            library_id=library_id,
+            relative_path=relative_text,
+            size=size,
+            modified_ns=modified_ns,
+            warning=f"Source could not be inspected ({error.errno or 'unknown'})",
+            source_candidate_id=f"candidate_{digest_json({'parent': relative.parent.as_posix()})[:24]}",
         )
 
 

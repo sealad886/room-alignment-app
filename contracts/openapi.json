@@ -19,6 +19,8 @@
       "post": {"operationId": "createLibrary", "responses": {"201": {"description": "Library"}}}
     },
     "/libraries/{libraryId}/scans": {"post": {"operationId": "startScan", "responses": {"202": {"description": "Scan"}}}},
+    "/libraries/{libraryId}/cluster-jobs": {"post": {"operationId": "startClusterAnalysis", "responses": {"202": {"description": "Non-mutating cluster analysis job"}}}},
+    "/libraries/{libraryId}/cluster-suggestions": {"get": {"operationId": "listClusterSuggestions", "responses": {"200": {"description": "Evidence-bearing project membership suggestions"}}}},
     "/scans/{scanId}": {"get": {"operationId": "getScan", "responses": {"200": {"description": "Scan"}}}},
     "/scans/{scanId}/cancel": {"post": {"operationId": "cancelScan", "responses": {"200": {"description": "Scan"}}}},
     "/libraries/{libraryId}/media": {"get": {"operationId": "listMedia", "responses": {"200": {"description": "Stable media page"}}}},
@@ -42,6 +44,7 @@
     "/projects/{projectId}/program": {"get": {"operationId": "getCompiledProgram", "responses": {"200": {"description": "Compiled program"}}}},
     "/projects/{projectId}/program-at": {"get": {"operationId": "getProgramAt", "responses": {"200": {"description": "Canonical program selection at outputUs"}}}},
     "/projects/{projectId}/suggestions": {"get": {"operationId": "listSuggestions", "responses": {"200": {"description": "Suggestions"}}}},
+    "/projects/{projectId}/alignment-jobs": {"post": {"operationId": "startAlignmentAnalysis", "responses": {"202": {"description": "Non-mutating alignment analysis job"}}}},
     "/projects/{projectId}/render-plans": {"post": {"operationId": "createRenderPlan", "responses": {"201": {"description": "Immutable render plan"}}}},
     "/render-plans/{planId}": {"get": {"operationId": "getRenderPlan", "responses": {"200": {"description": "Render plan"}}}},
     "/render-plans/{planId}/review": {"post": {"operationId": "attestReview", "responses": {"201": {"description": "Review attestation"}}}},

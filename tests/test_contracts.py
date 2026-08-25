@@ -18,8 +18,11 @@ class ContractTests(unittest.TestCase):
         for path in (
             "/grants",
             "/libraries/{libraryId}/scans",
+            "/libraries/{libraryId}/cluster-jobs",
+            "/libraries/{libraryId}/cluster-suggestions",
             "/projects/{projectId}/commands",
             "/projects/{projectId}/program-at",
+            "/projects/{projectId}/alignment-jobs",
             "/projects/{projectId}/render-plans",
             "/jobs/event-token",
             "/events",

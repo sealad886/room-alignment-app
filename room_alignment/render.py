@@ -3,13 +3,16 @@ from __future__ import annotations
 import json
 import os
 import signal
+import shutil
 import subprocess
 import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
+from .domain import DomainError, compile_program, digest_json, now_iso, opaque_id
+from .scanner import full_digest
 from .store import Store
 
 
@@ -241,3 +244,392 @@ class RenderManager:
             except ProcessLookupError:
                 return False
             return True
+
+
+def build_render_plan(
+    store: Store,
+    project_id: str,
+    settings: dict[str, Any],
+) -> dict[str, Any]:
+    project = store.project(project_id)
+    assets = store.media_records(item["assetId"] for item in project["clips"])
+    compiled = compile_program(project, assets)
+    output_grant_id = str(settings.get("outputGrantId", ""))
+    filename = str(settings.get("filename", ""))
+    profile = str(settings.get("profile", project.get("renderSettings", {}).get("profile", "COMPATIBLE")))
+    if profile not in {"COMPATIBLE", "ARCHIVAL_LOSSLESS"}:
+        raise DomainError("VALIDATION_FAILED", "Unknown output profile")
+    output = store.output_path(output_grant_id, filename)
+    expected_suffix = ".mp4" if profile == "COMPATIBLE" else ".mkv"
+    if output.suffix.lower() != expected_suffix:
+        raise DomainError("VALIDATION_FAILED", f"{profile} output filename must end with {expected_suffix}")
+    issues = list(compiled["issues"])
+    if output.exists() or output.with_name(output.name + ".manifest.json").exists():
+        issues.append(
+            {
+                "id": "issue_destination_exists",
+                "code": "DESTINATION_EXISTS",
+                "severity": "BLOCKING",
+                "message": "Output video or manifest already exists",
+            }
+        )
+    selected_ids = sorted(
+        {
+            item["assetId"]
+            for item in compiled["videoSlices"] + compiled["audioSlices"]
+            if item.get("assetId")
+        }
+    )
+    root = store.library_root(project["libraryId"])
+    sources: list[dict[str, Any]] = []
+    for media_id in selected_ids:
+        media = assets[media_id]
+        source = _safe_source(root, media["relative_path"])
+        digest = full_digest(source)
+        sources.append(
+            {
+                "assetId": media_id,
+                "libraryRelativePath": media["relative_path"],
+                "size": source.stat().st_size,
+                "modifiedNs": source.stat().st_mtime_ns,
+                "sha256": digest,
+                "fingerprint": media.get("fingerprint", {}),
+            }
+        )
+    first_video = assets.get(compiled["videoSlices"][0]["assetId"]) if compiled["videoSlices"] else {}
+    normalization = {
+        "width": int(settings.get("width") or first_video.get("width") or 1920),
+        "height": int(settings.get("height") or first_video.get("height") or 1080),
+        "frameRate": float(settings.get("frameRate") or first_video.get("frame_rate") or 30),
+        "frameRatePolicy": "CONSTANT",
+        "aspectPolicy": "FIT_AND_PAD",
+        "rotationPolicy": "APPLY_DISPLAY_ROTATION",
+        "sampleAspectRatio": "1:1",
+        "colorPolicy": "PRESERVE_WHEN_COMPATIBLE",
+        "hdrPolicy": "BLOCK_UNDECLARED_CONVERSION",
+        "pixelFormat": "yuv420p" if profile == "COMPATIBLE" else "source-compatible",
+        "audioSampleRate": 48_000,
+        "audioChannelLayout": "stereo",
+    }
+    warning_codes: list[str] = []
+    for source_slice in compiled["videoSlices"]:
+        media = assets[source_slice["assetId"]]
+        for stream in media.get("streams", []):
+            if stream.get("codecType") != "video":
+                continue
+            if stream.get("colorTransfer") in {"smpte2084", "arib-std-b67"}:
+                issues.append(
+                    {
+                        "id": f"issue_hdr_{source_slice['assetId']}",
+                        "code": "UNSUPPORTED_MEDIA",
+                        "severity": "BLOCKING",
+                        "message": "HDR source requires an explicit supported color-conversion policy",
+                    }
+                )
+            if stream.get("rotation") not in {None, 0, "0"}:
+                warning_codes.append("ROTATION_APPLIED")
+    estimate = _estimate_output_bytes(compiled["durationUs"], profile)
+    free = shutil.disk_usage(output.parent).free
+    if free < int(estimate * 1.25) + 64 * 1024 * 1024:
+        issues.append(
+            {
+                "id": "issue_insufficient_space",
+                "code": "INSUFFICIENT_SPACE",
+                "severity": "BLOCKING",
+                "message": "Output directory lacks estimated temporary and final space",
+            }
+        )
+    plan_body = {
+        "schema": "room-alignment-render-plan/v1",
+        "projectId": project["id"],
+        "projectRevision": project["revision"],
+        "provenanceRevision": project.get("provenanceRevision", 0),
+        "compiledProgram": compiled,
+        "sources": sources,
+        "sourceSetDigest": digest_json(sources),
+        "profile": profile,
+        "container": "mp4" if profile == "COMPATIBLE" else "matroska",
+        "videoCodec": "h264" if profile == "COMPATIBLE" else "ffv1",
+        "audioCodec": "aac" if profile == "COMPATIBLE" else "pcm_s24le",
+        "normalization": normalization,
+        "output": {"grantId": output_grant_id, "filename": filename},
+        "estimatedBytes": estimate,
+        "warningCodes": sorted(set(warning_codes)),
+        "issues": issues,
+        "status": "BLOCKED" if any(item.get("severity") == "BLOCKING" for item in issues) else "READY",
+        "createdAt": now_iso(),
+    }
+    plan = {"id": opaque_id("plan"), **plan_body}
+    plan["planDigest"] = digest_json({key: value for key, value in plan_body.items() if key != "createdAt"})
+    return store.save_render_plan(plan)
+
+
+def build_v1_manifest(plan: dict[str, Any], artifact: dict[str, Any] | None = None) -> dict[str, Any]:
+    program = plan["compiledProgram"]
+    manifest = {
+        "schema": "room-alignment-provenance-manifest/v1",
+        "artifact": {
+            "id": artifact.get("id") if artifact else None,
+            "videoSha256": artifact.get("videoDigest") if artifact else None,
+            "manifestSha256": artifact.get("manifestDigest") if artifact else None,
+        },
+        "project": {
+            "id": plan["projectId"],
+            "revision": plan["projectRevision"],
+            "provenanceRevision": plan["provenanceRevision"],
+        },
+        "renderPlan": {"id": plan["id"], "digest": plan["planDigest"]},
+        "sourceSetDigest": plan["sourceSetDigest"],
+        "sources": [
+            {
+                "assetId": item["assetId"],
+                "libraryRelativePath": item["libraryRelativePath"],
+                "size": item["size"],
+                "sha256": item["sha256"],
+            }
+            for item in plan["sources"]
+        ],
+        "outputTimebase": {"unit": "microseconds", "intervals": "half-open"},
+        "videoSlices": program["videoSlices"],
+        "audioSlices": program["audioSlices"],
+        "transforms": {
+            "profile": plan["profile"],
+            "container": plan["container"],
+            "videoCodec": plan["videoCodec"],
+            "audioCodec": plan["audioCodec"],
+            "normalization": plan["normalization"],
+            "sourceMediaUnchanged": True,
+            "streamCopy": False,
+            "decodedAndReencoded": True,
+        },
+        "warnings": plan["warningCodes"],
+        "fidelity": {
+            "claim": "lossless-encode-after-processing" if plan["profile"] == "ARCHIVAL_LOSSLESS" else "compatible-reencode",
+            "sourceFilesModified": False,
+            "generatedSilenceDisclosed": any(item.get("synthetic") for item in program["audioSlices"]),
+        },
+    }
+    return manifest
+
+
+def build_v1_ffmpeg_command(store: Store, plan: dict[str, Any], output: Path) -> list[str]:
+    if plan["status"] != "READY":
+        raise DomainError("COVERAGE_INVALID", "Render plan has blocking issues")
+    project = store.project(plan["projectId"])
+    root = store.library_root(project["libraryId"])
+    assets = store.media_records(item["assetId"] for item in project["clips"])
+    video = plan["compiledProgram"]["videoSlices"]
+    audio = plan["compiledProgram"]["audioSlices"]
+    command = ["ffmpeg", "-hide_banner", "-nostdin", "-y"]
+    filters: list[str] = []
+    for item in video:
+        media = assets[item["assetId"]]
+        source = _safe_source(root, media["relative_path"])
+        source_duration = (item["sourceEndUs"] - item["sourceStartUs"]) / 1_000_000
+        command += ["-ss", _seconds(item["sourceStartUs"]), "-t", f"{source_duration:.6f}", "-i", str(source)]
+    audio_base = len(video)
+    for item in audio:
+        output_duration = (item["endUs"] - item["startUs"]) / 1_000_000
+        if item.get("synthetic"):
+            command += ["-f", "lavfi", "-t", f"{output_duration:.6f}", "-i", "anullsrc=r=48000:cl=stereo"]
+        else:
+            media = assets[item["assetId"]]
+            source = _safe_source(root, media["relative_path"])
+            source_start = int(item["sourceStartUs"]) + int(item.get("offsetUs", 0))
+            source_duration = (item["sourceEndUs"] - item["sourceStartUs"]) / 1_000_000
+            command += ["-ss", _seconds(max(0, source_start)), "-t", f"{source_duration:.6f}", "-i", str(source)]
+    norm = plan["normalization"]
+    for index, item in enumerate(video):
+        output_duration = (item["endUs"] - item["startUs"]) / 1_000_000
+        source_duration = (item["sourceEndUs"] - item["sourceStartUs"]) / 1_000_000
+        speed = output_duration / source_duration if source_duration else 1
+        filters.append(
+            f"[{index}:v:0]setpts=(PTS-STARTPTS)*{speed:.12f},"
+            f"scale={norm['width']}:{norm['height']}:force_original_aspect_ratio=decrease,"
+            f"pad={norm['width']}:{norm['height']}:(ow-iw)/2:(oh-ih)/2,"
+            f"fps={norm['frameRate']:.6f},setsar=1[v{index}]"
+        )
+    filters.append(f"{''.join(f'[v{i}]' for i in range(len(video)))}concat=n={len(video)}:v=1:a=0[vout]")
+    for index, item in enumerate(audio):
+        input_index = audio_base + index
+        output_duration = (item["endUs"] - item["startUs"]) / 1_000_000
+        source_duration = (
+            (item.get("sourceEndUs", item["endUs"]) - item.get("sourceStartUs", item["startUs"])) / 1_000_000
+        )
+        tempo = source_duration / output_duration if output_duration else 1
+        chain = f"[{input_index}:a:0]asetpts=PTS-STARTPTS,aresample=48000"
+        if not item.get("synthetic") and abs(tempo - 1) > 0.000001:
+            chain += f",atempo={tempo:.12f}"
+        chain += f",apad,atrim=duration={output_duration:.6f}[a{index}]"
+        filters.append(chain)
+    if audio:
+        filters.append(f"{''.join(f'[a{i}]' for i in range(len(audio)))}concat=n={len(audio)}:v=0:a=1[aout]")
+    command += ["-filter_complex", ";".join(filters), "-map", "[vout]"]
+    if audio:
+        command += ["-map", "[aout]"]
+    if plan["profile"] == "ARCHIVAL_LOSSLESS":
+        command += ["-c:v", "ffv1", "-level", "3"]
+        if audio:
+            command += ["-c:a", "pcm_s24le"]
+    else:
+        command += ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
+        if audio:
+            command += ["-c:a", "aac", "-b:a", "192k"]
+        command += ["-movflags", "+faststart"]
+    command.append(str(output))
+    return command
+
+
+class CanonicalRenderManager:
+    def __init__(self, store: Store):
+        self.store = store
+        self.jobs: dict[str, RunningJob] = {}
+        self.lock = threading.RLock()
+        self.reconcile_artifacts()
+
+    def start(self, plan_id: str) -> dict[str, Any]:
+        plan = self.store.render_plan(plan_id)
+        if plan["status"] != "READY":
+            raise DomainError("COVERAGE_INVALID", "Render plan has blocking issues")
+        review = self.store.review_for_plan(plan_id)
+        if not review or review["planDigest"] != plan["planDigest"]:
+            raise DomainError("REVIEW_STALE", "Render plan requires a current review attestation")
+        project = self.store.project(plan["projectId"])
+        if project["revision"] != plan["projectRevision"]:
+            raise DomainError("PLAN_STALE", "Project changed after review")
+        output = plan["output"]
+        final = self.store.output_path(output["grantId"], output["filename"])
+        manifest = final.with_name(final.name + ".manifest.json")
+        if final.exists() or manifest.exists():
+            raise DomainError("DESTINATION_EXISTS", "Output video or manifest already exists")
+        artifact = self.store.create_artifact(plan_id, output["grantId"], output["filename"])
+        job = self.store.create_job("RENDER", project_id=plan["projectId"], message="Render queued")
+        artifact = self.store.update_artifact(artifact["id"], job_id=job["id"], status="QUEUED")
+        thread = threading.Thread(target=self._run, args=(job["id"], artifact["id"], plan), daemon=True)
+        thread.start()
+        return {"job": job, "artifact": artifact}
+
+    def _run(self, job_id: str, artifact_id: str, plan: dict[str, Any]) -> None:
+        artifact = self.store.artifact(artifact_id)
+        final = self.store.output_path(artifact["outputGrantId"], artifact["filename"])
+        manifest_final = final.with_name(artifact["manifestFilename"])
+        token = artifact_id.rsplit("_", 1)[-1]
+        partial = final.with_name(f".{final.stem}.partial.{token}{final.suffix}")
+        manifest_partial = final.with_name(f".{manifest_final.name}.partial.{token}")
+        try:
+            self.store.transition_job(job_id, "RUNNING", 0.05, "Validating immutable sources")
+            self.store.update_artifact(artifact_id, status="RENDERING")
+            self._validate_sources(plan)
+            command = build_v1_ffmpeg_command(self.store, plan, partial)
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,
+            )
+            with self.lock:
+                self.jobs[job_id] = RunningJob(process)
+            _, stderr = process.communicate()
+            with self.lock:
+                running = self.jobs.pop(job_id, RunningJob(process))
+            if running.cancel_requested:
+                _unlink_exact(partial)
+                _unlink_exact(manifest_partial)
+                self.store.update_artifact(artifact_id, status="CANCELED")
+                self.store.transition_job(job_id, "CANCELED", 0, "Canceled; temporary outputs removed")
+                return
+            if process.returncode != 0:
+                detail = stderr.strip().splitlines()[-1] if stderr and stderr.strip() else "ffmpeg failed"
+                raise RuntimeError(detail[:500])
+            self.store.transition_job(job_id, "RUNNING", 0.85, "Verifying sources and output")
+            self._validate_sources(plan)
+            video_digest = full_digest(partial)
+            manifest_value = build_v1_manifest(plan, {"id": artifact_id, "videoDigest": video_digest, "manifestDigest": None})
+            manifest_partial.write_text(json.dumps(manifest_value, indent=2, sort_keys=True), encoding="utf-8")
+            manifest_digest = full_digest(manifest_partial)
+            if final.exists() or manifest_final.exists():
+                raise DomainError("DESTINATION_EXISTS", "Output destination changed during render")
+            os.replace(partial, final)
+            os.replace(manifest_partial, manifest_final)
+            self.store.update_artifact(
+                artifact_id,
+                status="COMPLETE",
+                video_digest=video_digest,
+                manifest_digest=manifest_digest,
+                details_json={"videoBytes": final.stat().st_size, "manifestBytes": manifest_final.stat().st_size},
+            )
+            self.store.transition_job(
+                job_id,
+                "SUCCEEDED",
+                1,
+                "Video and provenance manifest complete",
+                result={"artifactId": artifact_id},
+            )
+        except DomainError as error:
+            _unlink_exact(partial)
+            _unlink_exact(manifest_partial)
+            self.store.update_artifact(artifact_id, status="FAILED", details_json={"errorCode": error.code})
+            self.store.transition_job(job_id, "FAILED", 0, str(error), error_code=error.code)
+        except Exception as error:
+            _unlink_exact(partial)
+            _unlink_exact(manifest_partial)
+            self.store.update_artifact(artifact_id, status="FAILED", details_json={"error": type(error).__name__})
+            self.store.transition_job(job_id, "FAILED", 0, str(error)[:500], error_code="INTERNAL_ERROR")
+
+    def _validate_sources(self, plan: dict[str, Any]) -> None:
+        project = self.store.project(plan["projectId"])
+        root = self.store.library_root(project["libraryId"])
+        for expected in plan["sources"]:
+            media = self.store.media_record(expected["assetId"])
+            source = _safe_source(root, media["relative_path"])
+            stat = source.stat()
+            if stat.st_size != expected["size"] or full_digest(source) != expected["sha256"]:
+                raise DomainError("SOURCE_CHANGED", "A selected source changed after review")
+
+    def cancel(self, job_id: str) -> dict[str, Any]:
+        job = self.store.job(job_id)
+        if job["status"] in {"CANCELED", "SUCCEEDED", "FAILED", "INTERRUPTED", "FAILED_RECOVERABLE"}:
+            return job
+        self.store.transition_job(job_id, "CANCEL_REQUESTED", job["progress"], "Cancellation requested")
+        with self.lock:
+            running = self.jobs.get(job_id)
+            if running:
+                running.cancel_requested = True
+                try:
+                    os.killpg(running.process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+        return self.store.job(job_id)
+
+    def reconcile_artifacts(self) -> None:
+        for artifact in self.store.artifacts(incomplete_only=True):
+            try:
+                final = self.store.output_path(artifact["outputGrantId"], artifact["filename"])
+            except DomainError:
+                self.store.update_artifact(artifact["id"], status="FAILED_RECOVERABLE", details_json={"reason": "grant unavailable"})
+                continue
+            manifest = final.with_name(artifact["manifestFilename"])
+            if final.exists() or manifest.exists():
+                self.store.update_artifact(
+                    artifact["id"],
+                    status="FAILED_RECOVERABLE",
+                    details_json={"videoPresent": final.exists(), "manifestPresent": manifest.exists()},
+                )
+
+
+def _estimate_output_bytes(duration_us: int, profile: str) -> int:
+    seconds = max(1, duration_us / 1_000_000)
+    bits_per_second = 40_000_000 if profile == "ARCHIVAL_LOSSLESS" else 10_000_000
+    return int(seconds * bits_per_second / 8)
+
+
+def _seconds(value_us: int) -> str:
+    return f"{value_us / 1_000_000:.6f}"
+
+
+def _unlink_exact(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass

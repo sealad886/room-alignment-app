@@ -42,7 +42,7 @@
           <div class="section-head"><div><p class="eyebrow">Indexed libraries</p><h2>Dates and source groups</h2></div><span class="mono" id="library-count">No library indexed</span></div>
           <div id="scan-progress" class="progress-panel hidden" role="status" aria-live="polite"><div><strong>Reading metadata</strong><span id="scan-count">0 clips</span></div><div class="meter"><i></i></div><p>Index may continue while you work. Source files are never opened for writing.</p></div>
           <div id="library-empty" class="empty-state"><div class="signal-art" aria-hidden="true"><i></i><i></i><i></i><i></i></div><h2>Bring scattered clips onto one clock</h2><p>Index a local folder to discover time groups and camera candidates. You can correct every inferred field later.</p></div>
-          <div id="library-content" class="hidden"><div class="library-actions"><div id="library-list" class="library-list"></div><button class="btn primary" id="open-event">Open selected date</button></div><div class="media-table-wrap"><table><thead><tr><th>Captured</th><th>Source label</th><th>Duration</th><th>Format</th><th>Provenance</th></tr></thead><tbody id="media-table"></tbody></table></div></div>
+          <div id="library-content" class="hidden"><div class="library-actions"><div id="library-list" class="library-list"></div><button class="btn" id="load-more-media">Load more</button><button class="btn primary" id="open-event">Open selected date</button></div><div class="media-table-wrap"><table><thead><tr><th>Captured</th><th>Source label</th><th>Duration</th><th>Format</th><th>Provenance</th></tr></thead><tbody id="media-table"></tbody></table></div></div>
         </div>
       </section>
 
@@ -53,6 +53,7 @@
           <div id="source-monitors" class="source-monitors"></div>
           <div class="transport"><button class="round" data-action="rewind" aria-label="Back ten seconds">−10</button><button class="play" data-action="play" aria-label="Play">▶</button><button class="round" data-action="forward" aria-label="Forward ten seconds">+10</button><input class="scrubber" type="range" min="0" max="100" value="30" aria-label="Shared playhead"><span class="mono" id="align-time">00:00:09.300</span></div>
           <div class="timeline-shell"><div class="ruler"></div><div id="alignment-tracks"></div><div class="playhead" style="left:30%"></div></div>
+          <div class="align-program"><div class="lane-label"><strong>Program Video</strong><span>canonical single-view selection</span></div><div class="lane" id="align-video-lane"></div><div class="lane-label"><strong>Program Audio</strong><span>independent source or silence</span></div><div class="lane audio" id="align-audio-lane"></div></div>
         </div>
         <aside class="inspector"><div class="tabs"><button class="tab active" data-inspector="sync">Source sync</button><button class="tab" data-inspector="provenance">Provenance</button></div><div id="sync-panel"><p class="eyebrow">Selected source</p><h2 id="selected-source-name">—</h2><label class="field"><span>Synchronization offset (ms)</span><input id="sync-offset" type="number" value="0"></label><div class="nudge-grid"><button data-nudge="-100">−100</button><button data-nudge="-10">−10</button><button data-nudge="10">+10</button><button data-nudge="100">+100</button></div><div class="confidence"><strong id="confidence-label">Evidence incomplete</strong><p>Offsets are user decisions. Inferred timestamps remain visible as evidence.</p></div><button class="btn wide" id="set-reference">Set as reference source</button><button class="btn primary wide next" data-view="cut">Continue to Cut</button></div><div id="provenance-panel" class="hidden"></div></aside>
       </section>
@@ -77,6 +78,7 @@
     <footer><span><i class="status-dot"></i><b id="footer-status">Ready · no library selected</b></span><span class="mono">metadata separate · original media read-only</span></footer>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
   </div>
+  <script src="/api-client.js"></script>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

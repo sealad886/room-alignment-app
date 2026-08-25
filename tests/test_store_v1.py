@@ -6,6 +6,7 @@ from pathlib import Path
 
 from room_alignment.domain import DomainError
 from room_alignment.models import MediaRecord
+from room_alignment.scanner import quick_fingerprint
 from room_alignment.store import Store
 
 
@@ -117,8 +118,40 @@ class StoreV1Tests(unittest.TestCase):
         scan = self.store.begin_scan(self.library["id"], "FULL")
         self.store.revoke_grant(self.library["sourceGrantId"])
         self.assertEqual(self.store.job(scan["id"])["status"], "INTERRUPTED")
+        self.assertEqual(self.store.events(job_id=scan["id"])[-1]["details"]["reason"], "GRANT_REQUIRED")
         with self.assertRaisesRegex(DomainError, "revoked"):
             self.store.library_root(self.library["id"])
+
+    def test_unambiguous_rename_preserves_asset_identity(self):
+        original_path = self.root / "old-name.mp4"
+        original_path.write_bytes(b"stable source bytes")
+        first = MediaRecord(
+            "asset-original",
+            self.library["id"],
+            original_path.name,
+            original_path.stat().st_size,
+            original_path.stat().st_mtime_ns,
+            duration=1,
+            duration_us=1_000_000,
+            fingerprint=quick_fingerprint(original_path),
+        )
+        self.scan("FULL", [first])
+        renamed_path = original_path.with_name("new-name.mp4")
+        original_path.rename(renamed_path)
+        renamed = MediaRecord(
+            "path-derived-new-id",
+            self.library["id"],
+            renamed_path.name,
+            renamed_path.stat().st_size,
+            renamed_path.stat().st_mtime_ns,
+            duration=1,
+            duration_us=1_000_000,
+            fingerprint=quick_fingerprint(renamed_path),
+        )
+        self.scan("FULL", [renamed])
+        self.assertEqual(self.store.media_record("asset-original")["relative_path"], "new-name.mp4")
+        with self.assertRaises(DomainError):
+            self.store.media_record("path-derived-new-id")
 
 
 if __name__ == "__main__":
