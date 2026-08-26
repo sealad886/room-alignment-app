@@ -1548,7 +1548,12 @@ class Store:
             raise DomainError("NOT_FOUND", "Job not found")
         if row["status"] in TERMINAL_JOB_STATES and status != row["status"]:
             raise DomainError("JOB_STATE_CONFLICT", "Terminal job cannot transition")
-        if row["status"] == "CANCEL_REQUESTED" and status not in {"CANCELED", "FAILED", "FAILED_RECOVERABLE"}:
+        if row["status"] == "CANCEL_REQUESTED" and status not in {
+            "CANCEL_REQUESTED",
+            "CANCELED",
+            "FAILED",
+            "FAILED_RECOVERABLE",
+        }:
             raise DomainError("JOB_STATE_CONFLICT", "Cancellation can only finish as canceled or failed")
         next_progress = float(row["progress"] if progress is None else max(0, min(1, progress)))
         db.execute(
@@ -1914,6 +1919,7 @@ class Store:
     ) -> bool:
         """Atomically publish durable success unless cancellation already owns the job."""
         with self._lock, self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
             if not job:
                 raise DomainError("NOT_FOUND", "Job not found")

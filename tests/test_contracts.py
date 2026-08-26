@@ -75,6 +75,9 @@ class ContractTests(unittest.TestCase):
             "room-alignment-canonical-json/v1",
         )
         self.assertIsNone(manifest["properties"]["artifact"]["properties"]["manifestSha256"]["const"])
+        api_schema = json.loads((ROOT / "contracts" / "api.schema.json").read_text(encoding="utf-8"))
+        frame_rate = api_schema["$defs"]["RenderPlanCreate"]["properties"]["frameRate"]
+        self.assertEqual(frame_rate, {"type": "number", "minimum": 1, "maximum": 240})
 
     def test_generated_browser_client_is_current(self):
         result = subprocess.run(

@@ -172,9 +172,16 @@ class CanonicalRenderTests(unittest.TestCase):
             {"width": 15},
             {"height": 15},
             {"frameRate": 0},
+            {"frameRate": 0.5},
             {"frameRate": 241},
             {"frameRate": float("nan")},
             {"width": "1920"},
+            {"width": True},
+            {"width": False},
+            {"height": True},
+            {"height": False},
+            {"frameRate": True},
+            {"frameRate": False},
         ]
         for index, invalid in enumerate(invalid_settings):
             with self.subTest(invalid=invalid), self.assertRaises(DomainError) as raised:
@@ -220,6 +227,17 @@ class CanonicalRenderTests(unittest.TestCase):
             CanonicalRenderManager(self.store)._validate_sources(plan)
         self.assertEqual(raised.exception.code, "SOURCE_CHANGED")
 
+    def test_reviewed_plan_reports_a_deleted_source_as_changed(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "deleted.mp4", "profile": "COMPATIBLE"},
+        )
+        self.media_path.unlink()
+        with self.assertRaises(DomainError) as raised:
+            CanonicalRenderManager(self.store)._validate_sources(plan)
+        self.assertEqual(raised.exception.code, "SOURCE_CHANGED")
+
     def test_archival_profile_declares_and_builds_lossless_output(self):
         plan = build_render_plan(
             self.store,
@@ -259,6 +277,7 @@ class CanonicalRenderTests(unittest.TestCase):
         manager = CanonicalRenderManager(self.store)
         with patch("room_alignment.render.threading.Thread.start"):
             started = manager.start(plan["id"])
+        manager.cancel(started["job"]["id"])
         manager.cancel(started["job"]["id"])
         manager._run(started["job"]["id"], started["artifact"]["id"], plan)
         self.assertEqual(self.store.job(started["job"]["id"])["status"], "CANCELED")

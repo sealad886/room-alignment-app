@@ -327,10 +327,10 @@ def build_render_plan(
         isinstance(frame_rate, bool)
         or not isinstance(frame_rate, (int, float))
         or not math.isfinite(float(frame_rate))
-        or float(frame_rate) <= 0
+        or float(frame_rate) < 1
         or float(frame_rate) > 240
     ):
-        raise DomainError("VALIDATION_FAILED", "Render frameRate must be finite, positive, and at most 240")
+        raise DomainError("VALIDATION_FAILED", "Render frameRate must be finite and between 1 and 240")
     normalization = {
         "width": width,
         "height": height,
@@ -660,7 +660,6 @@ class CanonicalRenderManager:
             if process.returncode != 0:
                 raise RuntimeError(f"Media engine exited with status {process.returncode}")
             self.store.transition_job(job_id, "RUNNING", 0.85, "Verifying sources and output")
-            self._validate_sources(plan)
             video_digest = full_digest(partial)
             manifest_value = build_v1_manifest(plan, {"id": artifact_id, "videoDigest": video_digest, "manifestDigest": None})
             manifest_partial.write_text(json.dumps(manifest_value, indent=2, sort_keys=True), encoding="utf-8")
@@ -674,7 +673,7 @@ class CanonicalRenderManager:
                 return
             os.replace(partial, final)
             video_promoted = True
-            if self._finalization_stopped(job_id, artifact, plan, final):
+            if self._finalization_stopped(job_id, artifact, plan, final, revalidate_sources=False):
                 _unlink_exact(final)
                 video_promoted = False
                 _unlink_exact(manifest_partial)
@@ -682,7 +681,7 @@ class CanonicalRenderManager:
                 return
             os.replace(manifest_partial, manifest_final)
             manifest_promoted = True
-            if self._finalization_stopped(job_id, artifact, plan, final):
+            if self._finalization_stopped(job_id, artifact, plan, final, revalidate_sources=False):
                 _unlink_exact(final)
                 video_promoted = False
                 _unlink_exact(manifest_final)
@@ -744,10 +743,13 @@ class CanonicalRenderManager:
         artifact: dict[str, Any],
         plan: dict[str, Any],
         expected_final: Path,
+        *,
+        revalidate_sources: bool = True,
     ) -> bool:
         if self.store.job(job_id)["status"] == "CANCEL_REQUESTED":
             return True
-        self._validate_sources(plan)
+        if revalidate_sources:
+            self._validate_sources(plan)
         current_final = self.store.output_path(artifact["outputGrantId"], artifact["filename"])
         if current_final != expected_final:
             raise DomainError("PLAN_STALE", "Output destination changed during finalization")
@@ -760,8 +762,11 @@ class CanonicalRenderManager:
             media = self.store.media_record(expected["assetId"])
             if media["relative_path"] != expected["libraryRelativePath"]:
                 raise DomainError("SOURCE_CHANGED", "A selected source path changed after review")
-            source = _safe_source(root, expected["libraryRelativePath"])
-            stat = source.stat()
+            try:
+                source = _safe_source(root, expected["libraryRelativePath"])
+                stat = source.stat()
+            except (OSError, PreflightError) as error:
+                raise DomainError("SOURCE_CHANGED", "A selected source is no longer available") from error
             if stat.st_size != expected["size"] or full_digest(source) != expected["sha256"]:
                 raise DomainError("SOURCE_CHANGED", "A selected source changed after review")
 
