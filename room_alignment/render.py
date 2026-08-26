@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import json
 import os
 import signal
@@ -186,6 +187,8 @@ def build_ffmpeg_command(store: Store, project: dict[str, Any], output: Path, lo
 class RunningJob:
     process: subprocess.Popen[str]
     cancel_requested: bool = False
+    term_sent_at: float | None = None
+    kill_sent: bool = False
 
 
 class RenderManager:
@@ -460,9 +463,9 @@ def build_v1_ffmpeg_command(store: Store, plan: dict[str, Any], output: Path) ->
         else:
             media = assets[item["assetId"]]
             source = _safe_source(root, media["relative_path"])
-            source_start = int(item["sourceStartUs"]) + int(item.get("offsetUs", 0))
+            source_start = int(item["sourceStartUs"])
             source_duration = (item["sourceEndUs"] - item["sourceStartUs"]) / 1_000_000
-            command += ["-ss", _seconds(max(0, source_start)), "-t", f"{source_duration:.6f}", "-i", str(source)]
+            command += ["-ss", _seconds(source_start), "-t", f"{source_duration:.6f}", "-i", str(source)]
     norm = plan["normalization"]
     for index, item in enumerate(video):
         output_duration = (item["endUs"] - item["startUs"]) / 1_000_000
@@ -591,28 +594,21 @@ class CanonicalRenderManager:
                 with self.lock:
                     self.jobs[job_id] = running
                     if self.store.job(job_id)["status"] == "CANCEL_REQUESTED":
-                        running.cancel_requested = True
-                        try:
-                            os.killpg(process.pid, signal.SIGTERM)
-                        except ProcessLookupError:
-                            pass
+                        self._request_process_stop(running)
                 space_failure = False
                 next_progress_update = time.monotonic()
                 continuation_floor = 64 * 1024 * 1024 + int(plan["estimatedBytes"] * 0.05)
                 while process.poll() is None:
                     current_job = self.store.job(job_id)
                     if current_job["status"] == "CANCEL_REQUESTED":
-                        running.cancel_requested = True
-                        try:
-                            os.killpg(process.pid, signal.SIGTERM)
-                        except ProcessLookupError:
-                            pass
-                        continue
+                        self._request_process_stop(running)
                     if shutil.disk_usage(final.parent).free < continuation_floor:
                         space_failure = True
                         try:
                             os.killpg(process.pid, signal.SIGTERM)
                             process.wait(timeout=2)
+                        except ProcessLookupError:
+                            pass
                         except subprocess.TimeoutExpired:
                             try:
                                 os.killpg(process.pid, signal.SIGKILL)
@@ -709,12 +705,26 @@ class CanonicalRenderManager:
         with self.lock:
             running = self.jobs.get(job_id)
             if running:
-                running.cancel_requested = True
-                try:
-                    os.killpg(running.process.pid, signal.SIGTERM)
-                except ProcessLookupError:
-                    pass
+                self._request_process_stop(running)
         return self.store.job(job_id)
+
+    @staticmethod
+    def _request_process_stop(running: RunningJob, grace_seconds: float = 5) -> None:
+        running.cancel_requested = True
+        current = time.monotonic()
+        if running.term_sent_at is None:
+            running.term_sent_at = current
+            try:
+                os.killpg(running.process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            return
+        if not running.kill_sent and current - running.term_sent_at >= grace_seconds:
+            running.kill_sent = True
+            try:
+                os.killpg(running.process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     def shutdown(self, timeout_seconds: float = 5) -> None:
         """Request cancellation and wait briefly for owned process trees to settle."""
@@ -738,10 +748,8 @@ class CanonicalRenderManager:
             unsettled = list(self.jobs.items())
         for job_id, running in unsettled:
             if running.process.poll() is None:
-                try:
-                    os.killpg(running.process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
+                running.term_sent_at = running.term_sent_at or time.monotonic() - timeout_seconds
+                self._request_process_stop(running, grace_seconds=0)
         final_deadline = time.monotonic() + 1
         for job_id, _running in unsettled:
             while time.monotonic() < final_deadline:
@@ -777,14 +785,20 @@ class CanonicalRenderManager:
                 final.with_name(f".{manifest.name}.partial.{token}"),
             ]
             quarantined: list[str] = []
+            quarantine_failures: list[dict[str, Any]] = []
             for partial in partials:
                 if not partial.exists():
                     continue
                 recovery = self.store.path.parent / "recovery"
                 recovery.mkdir(parents=True, exist_ok=True)
                 destination = recovery / f"{artifact['id']}-{partial.name.lstrip('.')}"
-                os.replace(partial, destination)
-                quarantined.append(destination.name)
+                try:
+                    self._quarantine_partial(partial, destination)
+                    quarantined.append(destination.name)
+                except OSError as error:
+                    quarantine_failures.append(
+                        {"filename": partial.name, "error": type(error).__name__, "errno": error.errno}
+                    )
             if final.exists() or manifest.exists():
                 self.store.update_artifact(
                     artifact["id"],
@@ -793,14 +807,27 @@ class CanonicalRenderManager:
                         "videoPresent": final.exists(),
                         "manifestPresent": manifest.exists(),
                         "quarantinedTemporaryFiles": quarantined,
+                        "quarantineFailures": quarantine_failures,
                     },
                 )
-            elif quarantined:
+            elif quarantined or quarantine_failures:
                 self.store.update_artifact(
                     artifact["id"],
                     status="FAILED_RECOVERABLE",
-                    details_json={"quarantinedTemporaryFiles": quarantined},
+                    details_json={
+                        "quarantinedTemporaryFiles": quarantined,
+                        "quarantineFailures": quarantine_failures,
+                    },
                 )
+
+    @staticmethod
+    def _quarantine_partial(partial: Path, destination: Path) -> None:
+        try:
+            os.replace(partial, destination)
+        except OSError as error:
+            if error.errno != errno.EXDEV:
+                raise
+            shutil.move(str(partial), str(destination))
 
 
 def _estimate_output_bytes(duration_us: int, profile: str) -> int:

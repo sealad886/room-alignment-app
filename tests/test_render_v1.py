@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import errno
 import json
+import signal
 import shutil
 import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from room_alignment.models import MediaRecord
-from room_alignment.render import CanonicalRenderManager, build_render_plan
+from room_alignment.render import CanonicalRenderManager, RunningJob, build_render_plan, build_v1_ffmpeg_command
 from room_alignment.scanner import probe, quick_fingerprint
 from room_alignment.store import Store
 
@@ -137,6 +139,34 @@ class CanonicalRenderTests(unittest.TestCase):
         self.assertEqual(plan["status"], "BLOCKED")
         self.assertIn("DESTINATION_EXISTS", {item["code"] for item in plan["issues"]})
 
+    def test_identical_render_plan_request_is_idempotent(self):
+        settings = {
+            "outputGrantId": self.output_grant_id,
+            "filename": "idempotent.mp4",
+            "profile": "COMPATIBLE",
+        }
+        first = build_render_plan(self.store, self.project["id"], settings)
+        second = build_render_plan(self.store, self.project["id"], settings)
+        self.assertEqual(first["planDigest"], second["planDigest"])
+        self.assertEqual(first["id"], second["id"])
+
+    def test_archival_profile_declares_and_builds_lossless_output(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "archive.mkv", "profile": "ARCHIVAL_LOSSLESS"},
+        )
+        self.assertEqual(plan["status"], "READY", plan["issues"])
+        command = build_v1_ffmpeg_command(self.store, plan, self.output / ".archive.partial.mkv")
+        self.assertIn("ffv1", command)
+        self.assertIn("pcm_s24le", command)
+        with self.assertRaisesRegex(ValueError, "must end with .mkv"):
+            build_render_plan(
+                self.store,
+                self.project["id"],
+                {"outputGrantId": self.output_grant_id, "filename": "archive.mp4", "profile": "ARCHIVAL_LOSSLESS"},
+            )
+
     def test_provenance_correction_invalidates_plan_and_review(self):
         plan = build_render_plan(
             self.store,
@@ -217,6 +247,31 @@ class CanonicalRenderTests(unittest.TestCase):
         self.assertFalse(partial.exists())
         quarantine = Path(self.store.path).parent / "recovery"
         self.assertEqual(len(list(quarantine.iterdir())), 1)
+
+    def test_render_process_stop_sends_term_once_then_kill_once(self):
+        process = Mock(pid=1234)
+        running = RunningJob(process)
+        with patch("room_alignment.render.time.monotonic", side_effect=[10, 11, 16]), patch(
+            "room_alignment.render.os.killpg"
+        ) as killpg:
+            CanonicalRenderManager._request_process_stop(running)
+            CanonicalRenderManager._request_process_stop(running)
+            CanonicalRenderManager._request_process_stop(running)
+        self.assertEqual(killpg.call_count, 2)
+        self.assertEqual(killpg.call_args_list[0].args[1], signal.SIGTERM)
+        self.assertEqual(killpg.call_args_list[1].args[1], signal.SIGKILL)
+
+    def test_cross_filesystem_quarantine_falls_back_to_move(self):
+        source = self.output / "partial"
+        destination = Path(self.temp.name) / "recovery" / "partial"
+        source.write_bytes(b"partial")
+        destination.parent.mkdir()
+        cross_device = OSError(errno.EXDEV, "cross-device")
+        with patch("room_alignment.render.os.replace", side_effect=cross_device), patch(
+            "room_alignment.render.shutil.move"
+        ) as move:
+            CanonicalRenderManager._quarantine_partial(source, destination)
+        move.assert_called_once_with(str(source), str(destination))
 
 
 if __name__ == "__main__":

@@ -52,7 +52,7 @@ def normalize_timestamp(
         return result
     try:
         zone = ZoneInfo(time_zone)
-    except ZoneInfoNotFoundError:
+    except (ZoneInfoNotFoundError, ValueError):
         result["ambiguity"] = "INVALID_TIME_ZONE"
         return result
 

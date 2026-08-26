@@ -19,9 +19,9 @@ The local source release candidate is accepted only when all of the following re
 - `docs/requirements-ledger.md` maps every `REQ-001` through `REQ-150` without silent waiver.
 - `docs/verification-report.md` records a current full-suite, contract/static, browser, performance, render, and corpus result.
 - `docs/adversarial-audit.md` has no open critical/high correctness, security, data-integrity, contract, accessibility, migration, or recovery finding.
-- Source media integrity is unchanged and no private path/name/media is committed.
+- Source tree path, size, and modification-time metadata is unchanged and no private path/name/media is committed. The bounded corpus check does not claim a full-content hash of every source byte.
 - Frontend uses named command APIs and the generated client; backend remains the only compiler/preflight/render authority.
 
 ## Delivery state
 
-Implementation is complete and locally verified in the isolated `codex/technology-agnostic-backend` worktree. Milestone commits are local only. No push, pull request, package, installation, signing, notarization, publication, deployment, distribution, or production observation was performed or implied.
+Implementation is complete and locally verified in the isolated `codex/technology-agnostic-backend` worktree. The branch is published to `origin` and under automated review in pull request #2. No package, installation, signing, notarization, publication, deployment, distribution, merge, or production observation was performed or implied.

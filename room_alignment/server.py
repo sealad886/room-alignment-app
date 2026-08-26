@@ -78,8 +78,12 @@ class SessionManager:
 
     def event_token(self, session_id: str) -> dict[str, object]:
         with self.lock:
+            current = time.monotonic()
+            for existing_token, value in list(self.event_tokens.items()):
+                if float(value["expiresAt"]) < current:
+                    self.event_tokens.pop(existing_token, None)
             token = secrets.token_urlsafe(32)
-            expires_at = time.monotonic() + 60
+            expires_at = current + 60
             self.event_tokens[token] = {"sessionId": session_id, "expiresAt": expires_at}
             return {"token": token, "expiresInSeconds": 60}
 
@@ -117,12 +121,15 @@ class App:
 
     def close(self) -> None:
         self.closing = True
-        for scan_id in list(self.scan_threads):
+        with self.lock:
+            scans = dict(self.scan_threads)
+            analyses = dict(self.analysis_threads)
+        for scan_id in scans:
             try:
                 self.store.cancel_scan(scan_id)
             except DomainError:
                 pass
-        for job_id in list(self.analysis_threads):
+        for job_id in analyses:
             try:
                 job = self.store.job(job_id)
                 if job["status"] not in TERMINAL_JOB_STATES:
@@ -131,7 +138,7 @@ class App:
                 pass
         self.render.shutdown()
         deadline = time.monotonic() + 5
-        workers = {**self.scan_threads, **self.analysis_threads}
+        workers = {**scans, **analyses}
         for thread in workers.values():
             thread.join(timeout=max(0, deadline - time.monotonic()))
         for job_id, thread in workers.items():
@@ -662,9 +669,9 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(
                 APP.store.media_page(
                     parts[3],
-                    int(query.get("limit", ["200"])[0]),
+                    _int_input(query.get("limit", ["200"])[0], "limit"),
                     cursor,
-                    int(generation) if generation is not None else None,
+                    _int_input(generation, "generation") if generation is not None else None,
                 )
             )
         if len(parts) == 5 and parts[2] == "libraries" and parts[4] == "cluster-suggestions":
@@ -678,12 +685,13 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 4 and parts[2] == "projects":
             return self.respond(APP.store.project(parts[3]))
         if len(parts) == 6 and parts[2] == "projects" and parts[4] == "revisions":
-            return self.respond(APP.store.project_revision(parts[3], int(parts[5])))
+            return self.respond(APP.store.project_revision(parts[3], _int_input(parts[5], "revision")))
         if len(parts) == 5 and parts[2] == "projects" and parts[4] == "program":
             return self.respond(APP.store.compiled_project(parts[3]))
         if len(parts) == 5 and parts[2] == "projects" and parts[4] == "program-at":
+            output_us = _int_input(query.get("outputUs", ["0"])[0], "outputUs")
             compiled = APP.store.compiled_project(parts[3])
-            return self.respond(program_at(compiled, int(query.get("outputUs", ["0"])[0])))
+            return self.respond(program_at(compiled, output_us))
         if len(parts) == 5 and parts[2] == "projects" and parts[4] == "suggestions":
             return self.respond(APP.store.suggestions(parts[3]))
         if len(parts) == 4 and parts[2] == "render-plans":
@@ -707,12 +715,22 @@ class Handler(BaseHTTPRequestHandler):
         raise DomainError("NOT_FOUND", "API resource not found")
 
     def stream_file(self, path: Path) -> None:
+        if any(ord(character) < 32 or ord(character) == 127 for character in path.name):
+            raise DomainError("VALIDATION_FAILED", "Artifact filename contains control characters")
         size = path.stat().st_size
         self.send_response(HTTPStatus.OK)
         self._security_headers()
         self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
         self.send_header("Content-Length", str(size))
-        self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
+        encoded_name = quote(path.name, safe="")
+        fallback_name = "".join(
+            character if character.isascii() and character not in {'"', "\\"} else "_"
+            for character in path.name
+        )
+        self.send_header(
+            "Content-Disposition",
+            f"attachment; filename=\"{fallback_name}\"; filename*=UTF-8''{encoded_name}",
+        )
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Request-ID", self.request_id())
         self.end_headers()
@@ -736,14 +754,17 @@ class Handler(BaseHTTPRequestHandler):
     def post_api(self, path: str, query: dict[str, list[str]], body: dict[str, object]) -> None:
         if path == "/api/v1/grants":
             return self.respond(
-                APP.store.create_grant(Path(str(body["path"])), str(body["role"])), HTTPStatus.CREATED
+                APP.store.create_grant(
+                    Path(str(_required(body, "path"))), str(_required(body, "role"))
+                ),
+                HTTPStatus.CREATED,
             )
         if path == "/api/v1/libraries":
             return self.respond(
                 APP.store.create_library(
-                    str(body["sourceGrantId"]),
+                    str(_required(body, "sourceGrantId")),
                     str(body.get("timeZone", "UTC")),
-                    int(body.get("dstFold", 0)),
+                    _int_input(body.get("dstFold", 0), "dstFold"),
                     str(body.get("nonexistentPolicy", "REJECT")),
                 ),
                 HTTPStatus.CREATED,
@@ -752,8 +773,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(
                 APP.store.create_project(
                     str(body.get("name", "Untitled alignment")),
-                    str(body["libraryId"]),
-                    [str(item) for item in body.get("assetIds", [])],
+                    str(_required(body, "libraryId")),
+                    [str(item) for item in _list_input(body.get("assetIds", []), "assetIds")],
                 ),
                 HTTPStatus.CREATED,
             )
@@ -765,7 +786,7 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(APP.store.revoke_grant(parts[3]))
         if len(parts) == 5 and parts[2] == "libraries" and parts[4] == "scans":
             mode = str(body.get("mode", "INCREMENTAL"))
-            limit = int(body["limit"]) if body.get("limit") is not None else None
+            limit = _int_input(body["limit"], "limit") if body.get("limit") is not None else None
             if limit is not None:
                 mode = "BOUNDED"
             return self.respond(APP.start_scan(parts[3], mode, limit), HTTPStatus.ACCEPTED)
@@ -773,8 +794,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(
                 APP.store.update_library_time_policy(
                     parts[3],
-                    str(body["timeZone"]),
-                    int(body.get("dstFold", 0)),
+                    str(_required(body, "timeZone")),
+                    _int_input(body.get("dstFold", 0), "dstFold"),
                     str(body.get("nonexistentPolicy", "REJECT")),
                 )
             )
@@ -786,8 +807,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(
                 APP.store.resolve_provenance(
                     parts[3],
-                    str(body["field"]),
-                    dict(body.get("resolution") or {}),
+                    str(_required(body, "field")),
+                    _dict_input(body.get("resolution", {}), "resolution"),
                     str(body.get("rationale")) if body.get("rationale") is not None else None,
                     "local-user",
                 ),
@@ -807,7 +828,10 @@ class Handler(BaseHTTPRequestHandler):
                 APP.hash_slot.release()
         if len(parts) == 5 and parts[2] == "render-plans" and parts[4] == "review":
             return self.respond(
-                APP.store.attest_review(parts[3], [str(item) for item in body.get("acknowledgedWarnings", [])]),
+                APP.store.attest_review(
+                    parts[3],
+                    [str(item) for item in _list_input(body.get("acknowledgedWarnings", []), "acknowledgedWarnings")],
+                ),
                 HTTPStatus.CREATED,
             )
         if len(parts) == 5 and parts[2] == "render-plans" and parts[4] == "render":
@@ -825,7 +849,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def stream_events(self, query: dict[str, list[str]]) -> None:
         after_header = self.headers.get("Last-Event-ID", "0")
-        after = int(query.get("after", [after_header or "0"])[0])
+        after = _int_input(query.get("after", [after_header or "0"])[0], "after")
         self.send_response(200)
         self._security_headers()
         self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -843,7 +867,8 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.flush()
             cursor = latest
         while time.monotonic() < deadline:
-            events = APP.store.events(cursor, 1_000)
+            wait_seconds = min(5 - (time.monotonic() - heartbeat), deadline - time.monotonic())
+            events = APP.store.wait_for_events(cursor, max(0, wait_seconds), 1_000)
             for event in events:
                 cursor = int(event["sequence"])
                 data = json.dumps(event, separators=(",", ":"), ensure_ascii=False)
@@ -854,7 +879,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.wfile.write(b"event: heartbeat\ndata: {}\n\n")
                 self.wfile.flush()
                 heartbeat = time.monotonic()
-            time.sleep(0.25)
 
     def serve_static(self, request_path: str) -> None:
         relative = unquote(request_path).lstrip("/") or "index.html"
@@ -881,6 +905,33 @@ def _trusted_host(value: str, port: int) -> bool:
     if host not in {"127.0.0.1", "localhost", "::1"}:
         return False
     return supplied_port in {None, port}
+
+
+def _required(body: dict[str, object], name: str) -> object:
+    if name not in body or body[name] is None:
+        raise DomainError("VALIDATION_FAILED", f"Missing required field: {name}")
+    return body[name]
+
+
+def _int_input(value: object, name: str) -> int:
+    if isinstance(value, bool):
+        raise DomainError("VALIDATION_FAILED", f"{name} must be an integer")
+    try:
+        return int(value)
+    except (TypeError, ValueError) as error:
+        raise DomainError("VALIDATION_FAILED", f"{name} must be an integer") from error
+
+
+def _list_input(value: object, name: str) -> list[object]:
+    if not isinstance(value, list):
+        raise DomainError("VALIDATION_FAILED", f"{name} must be an array")
+    return value
+
+
+def _dict_input(value: object, name: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise DomainError("VALIDATION_FAILED", f"{name} must be an object")
+    return value
 
 
 def _trusted_origin(value: str, port: int) -> bool:

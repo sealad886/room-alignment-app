@@ -47,8 +47,10 @@
         "observed_at": {"type": "string", "format": "date-time"},
         "extractor": {"type": "string"},
         "extractor_version": {"type": "string"},
-        "uncertainty": {"type": ["string", "null"]}
-      }
+        "uncertainty": {"type": ["string", "null"]},
+        "custom": {"type": "object"}
+      },
+      "additionalProperties": false
     },
     "MediaStream": {
       "type": "object",

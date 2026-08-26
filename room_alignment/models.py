@@ -21,6 +21,7 @@ class ProvenanceEvidence:
     extractor: str = "room-alignment"
     extractor_version: str = "0.2.0"
     uncertainty: str | None = None
+    custom: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

@@ -4,10 +4,11 @@ import copy
 import hashlib
 import json
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, ROUND_HALF_EVEN
-from typing import Any, Iterable
+from typing import Any
 
 
 MAX_RATE_PPM = 2_000
@@ -15,6 +16,39 @@ AUDIO_MODES = {"FOLLOW_VIDEO", "FIXED_SOURCE", "FIXED_CLIP", "SILENCE"}
 ANCHOR_MODES = {"PROGRAM_TIME", "SOURCE_TIME"}
 BLOCKING = "BLOCKING"
 WARNING = "WARNING"
+COMMAND_PAYLOAD_FIELDS = {
+    "UpdateProjectMetadata": {"name"},
+    "AddLogicalSource": {"id", "label"},
+    "RenameLogicalSource": {"sourceId", "label"},
+    "MergeLogicalSources": {"targetSourceId", "sourceIds"},
+    "SplitLogicalSource": {"sourceId", "newSourceId", "clipIds", "label"},
+    "ArchiveLogicalSource": {"sourceId", "archived"},
+    "AssignClip": {"clipId", "logicalSourceId"},
+    "SetReferenceSource": {"sourceId"},
+    "SetSyncTransform": {"clipId", "sync", "confirmDrift"},
+    "InitializeProgram": set(),
+    "AddVideoBlock": {"id", "startUs", "endUs", "logicalSourceId", "pinnedClipId"},
+    "SplitVideoBlock": {"blockId", "atUs", "newBlockId"},
+    "MoveVideoBoundary": {"leftBlockId", "rightBlockId", "atUs"},
+    "DeleteVideoBlock": {"blockId"},
+    "AssignVideoSource": {"blockId", "logicalSourceId"},
+    "PinVideoClip": {"blockId", "clipId"},
+    "CutToSource": {"blockId", "atUs", "logicalSourceId", "pinnedClipId", "newBlockId"},
+    "AddAudioBlock": {
+        "id", "startUs", "endUs", "mode", "logicalSourceId", "clipId", "offsetUs", "ratePpm"
+    },
+    "SplitAudioBlock": {"blockId", "atUs"},
+    "MoveAudioBoundary": {"leftBlockId", "rightBlockId", "atUs"},
+    "DeleteAudioBlock": {"blockId"},
+    "SetAudioMode": {
+        "blockId", "mode", "logicalSourceId", "clipId", "offsetUs", "ratePpm", "confirmDrift"
+    },
+    "SetAnchoringMode": {"anchorMode"},
+    "ReconcileBoundary": {"operation", "leftBlockId", "rightBlockId", "atUs", "startUs", "endUs"},
+    "ArchiveProject": set(),
+    "AcceptAlignmentSuggestion": {"suggestionId", "clipId", "sync", "confirmDrift"},
+    "RejectAlignmentSuggestion": {"suggestionId"},
+}
 
 
 class DomainError(ValueError):
@@ -251,6 +285,8 @@ def compile_program(project: dict[str, Any], assets: dict[str, dict[str, Any]]) 
     audio_blocks = sorted(project["audioBlocks"], key=lambda item: (int(item["startUs"]), item["id"]))
     issues: list[dict[str, Any]] = []
     duration_us = max((int(item["endUs"]) for item in video_blocks), default=0)
+    if not video_blocks or duration_us <= 0:
+        issues.append(_issue("VIDEO_GAP", 0, 0, "A positive-duration video program is required"))
     _interval_issues(video_blocks, duration_us, "VIDEO", issues)
     video_slices: list[dict[str, Any]] = []
     for block in video_blocks:
@@ -326,7 +362,14 @@ def apply_command(
     handler = handlers.get(command_type)
     if handler is None:
         raise DomainError("VALIDATION_FAILED", f"Unsupported commandType: {command_type}")
-    handler(result, payload)
+    if set(payload) - COMMAND_PAYLOAD_FIELDS[command_type]:
+        raise DomainError("VALIDATION_FAILED", "Command payload contains unknown fields")
+    try:
+        handler(result, payload)
+    except DomainError:
+        raise
+    except (KeyError, TypeError, ValueError) as error:
+        raise DomainError("VALIDATION_FAILED", "Command payload is invalid") from error
     result["review"] = None
     result["updatedAt"] = now_iso()
     validate_project(result)
@@ -367,7 +410,10 @@ def _rename_source(project: dict[str, Any], payload: dict[str, Any]) -> None:
 def _merge_sources(project: dict[str, Any], payload: dict[str, Any]) -> None:
     target = payload["targetSourceId"]
     merged = set(payload.get("sourceIds", [])) - {target}
-    _find(project["logicalSources"], target, "logical source")
+    target_source = _find(project["logicalSources"], target, "logical source")
+    target_source["reference"] = bool(target_source.get("reference")) or any(
+        bool(source.get("reference")) for source in project["logicalSources"] if source["id"] in merged
+    )
     for clip in project["clips"]:
         if clip["logicalSourceId"] in merged:
             clip["logicalSourceId"] = target
@@ -486,12 +532,9 @@ def _pin_video_clip(project: dict[str, Any], payload: dict[str, Any]) -> None:
 def _cut_to_source(project: dict[str, Any], payload: dict[str, Any]) -> None:
     block = _find(project["videoBlocks"], payload["blockId"], "video block")
     at = int(payload["atUs"])
-    _split_video_block(project, {"blockId": block["id"], "atUs": at, "newBlockId": payload.get("newBlockId")})
-    new_block = next(
-        item
-        for item in project["videoBlocks"]
-        if item["startUs"] == at and item["endUs"] > at and item["id"] != block["id"]
-    )
+    new_block_id = payload.get("newBlockId") or opaque_id("vblock")
+    _split_video_block(project, {"blockId": block["id"], "atUs": at, "newBlockId": new_block_id})
+    new_block = _find(project["videoBlocks"], new_block_id, "video block")
     new_block["logicalSourceId"] = payload["logicalSourceId"]
     new_block["pinnedClipId"] = payload.get("pinnedClipId")
 
@@ -663,7 +706,14 @@ def _compile_source_block(
         transform: SyncTransform = selected["transform"]
         slices.append(
             {
-                "id": opaque_id("vslice" if not require_audio else "aslice"),
+                "id": _compiled_slice_id(
+                    "aslice" if require_audio else "vslice",
+                    block["id"],
+                    start_us,
+                    end_us,
+                    selected["assetId"],
+                    selected["clipId"],
+                ),
                 "blockId": block["id"],
                 "startUs": start_us,
                 "endUs": end_us,
@@ -692,7 +742,7 @@ def _compile_audio_block(
     if mode == "SILENCE":
         return [
             {
-                "id": opaque_id("aslice"),
+                "id": _compiled_slice_id("aslice", block["id"], block["startUs"], block["endUs"], "silence"),
                 "blockId": block["id"],
                 "startUs": block["startUs"],
                 "endUs": block["endUs"],
@@ -727,19 +777,17 @@ def _compile_audio_block(
             slices.append(
                 {
                     **copy.deepcopy(video),
-                    "id": opaque_id("aslice"),
+                    "id": _compiled_slice_id(
+                        "aslice", block["id"], start_us, end_us, video["assetId"], video["clipId"]
+                    ),
                     "blockId": block["id"],
                     "startUs": start_us,
                     "endUs": end_us,
-                    "sourceStartUs": video["sourceStartUs"] + (start_us - video["startUs"]),
-                    "sourceEndUs": video["sourceEndUs"] - (video["endUs"] - end_us),
                     "streamId": _primary_stream_id(asset, "audio"),
                     "mode": mode,
-                    "offsetUs": int(block.get("offsetUs", 0)),
-                    "ratePpm": int(block.get("ratePpm", 0)),
                 }
             )
-        return slices
+        return _apply_audio_timing(slices, block, assets, issues)
     synthetic_block = {
         "id": block["id"],
         "startUs": block["startUs"],
@@ -749,11 +797,62 @@ def _compile_audio_block(
     }
     slices = _compile_source_block(project, assets, synthetic_block, issues, require_audio=True)
     for item in slices:
-        item.update(
-            mode=mode,
-            offsetUs=int(block.get("offsetUs", 0)),
-            ratePpm=int(block.get("ratePpm", 0)),
-        )
+        item["mode"] = mode
+    return _apply_audio_timing(slices, block, assets, issues)
+
+
+def _apply_audio_timing(
+    slices: list[dict[str, Any]],
+    block: dict[str, Any],
+    assets: dict[str, dict[str, Any]],
+    issues: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Compile independent audio timing into exact source ranges.
+
+    The renderer and manifest consume these ranges directly. Keeping offset/rate
+    application here prevents editorial decisions, preflight, and output media
+    from disagreeing about which source samples are selected.
+    """
+
+    offset_us = int(block.get("offsetUs", 0))
+    rate_ppm = int(block.get("ratePpm", 0))
+    rate_denominator = 1_000_000 + rate_ppm
+    anchor_output_us = int(block["startUs"])
+    for item in slices:
+        sync = SyncTransform.from_dict(item.get("sync"))
+        anchor_source_us = sync.output_to_source(anchor_output_us)
+
+        def source_at(output_us: int) -> int:
+            base_delta = sync.output_to_source(output_us) - anchor_source_us
+            return anchor_source_us + _round_ratio(base_delta * 1_000_000, rate_denominator) + offset_us
+
+        item["sourceStartUs"] = source_at(int(item["startUs"]))
+        item["sourceEndUs"] = source_at(int(item["endUs"]))
+        item["offsetUs"] = offset_us
+        item["ratePpm"] = rate_ppm
+        transforms = list(item.get("transforms", []))
+        if offset_us:
+            transforms.append(f"audio source offset {offset_us} us")
+        if rate_ppm:
+            transforms.append(f"audio rate correction {rate_ppm} ppm")
+        item["transforms"] = transforms
+        asset = assets.get(item["assetId"], {})
+        duration_us = int(asset.get("durationUs") or seconds_to_us(asset.get("duration", 0)))
+        if (
+            item["sourceStartUs"] < 0
+            or item["sourceEndUs"] <= item["sourceStartUs"]
+            or (duration_us > 0 and item["sourceEndUs"] > duration_us)
+        ):
+            issues.append(
+                _issue(
+                    "AUDIO_UNAVAILABLE",
+                    int(item["startUs"]),
+                    int(item["endUs"]),
+                    "Independent audio timing exceeds the selected source range",
+                    blockId=block["id"],
+                    assetId=item["assetId"],
+                )
+            )
     return slices
 
 
@@ -801,6 +900,10 @@ def _issue(code: str, start_us: int, end_us: int, message: str, **refs: Any) -> 
         "message": message,
         "refs": refs,
     }
+
+
+def _compiled_slice_id(prefix: str, *parts: object) -> str:
+    return f"{prefix}_{digest_json([str(part) for part in parts])[:24]}"
 
 
 def _dedupe_issues(issues: list[dict[str, Any]]) -> list[dict[str, Any]]:

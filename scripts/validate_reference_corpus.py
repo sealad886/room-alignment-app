@@ -68,8 +68,8 @@ def validate(root: Path, state_dir: Path, probe_workers: int) -> dict[str, objec
     if before != after:
         raise RuntimeError("Source corpus tree metadata changed during read-only validation")
     return {
-        "sourceIntegrityPreserved": True,
-        "sourceTreeDigest": after["treeDigest"],
+        "sourceTreeMetadataPreserved": True,
+        "sourceTreeMetadataDigest": after["treeDigest"],
         "sourceFiles": after["files"],
         "sourceBytes": after["bytes"],
         "indexedVideos": final_scan["videos"],

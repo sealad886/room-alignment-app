@@ -42,6 +42,16 @@ class StateAdministrationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "--replace"):
                 restore(state, backup_file, False)
 
+    def test_read_only_sqlite_uri_handles_reserved_path_characters(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "state ? # directory"
+            root.mkdir()
+            state = root / "room #1?.sqlite3"
+            Store(state)
+            backup_file = root / "backup ? #.sqlite3"
+            self.assertEqual(backup(state, backup_file)["integrity"], "ok")
+            self.assertEqual(dry_run_migration(backup_file)["integrity"], "ok")
+
     def test_failed_staged_migration_keeps_original_and_removes_staging_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             state = Path(temporary) / "state.sqlite3"

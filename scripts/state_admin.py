@@ -18,7 +18,7 @@ from room_alignment.store import Store
 def _validate_database(path: Path) -> dict[str, int | str]:
     if not path.is_file():
         raise ValueError("Database file does not exist")
-    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
     try:
         result = str(connection.execute("PRAGMA integrity_check").fetchone()[0])
         if result != "ok":
@@ -34,7 +34,7 @@ def _online_backup(source: Path, destination: Path) -> dict[str, int | str]:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         raise ValueError("Backup destination already exists")
-    source_db = sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+    source_db = sqlite3.connect(f"{source.resolve().as_uri()}?mode=ro", uri=True)
     destination_db = sqlite3.connect(destination)
     try:
         source_db.backup(destination_db)

@@ -158,6 +158,16 @@ class ServerBoundaryTests(unittest.TestCase):
         self.assertEqual(401, status)
         self.assertEqual("UNAUTHENTICATED", payload["error"]["code"])
 
+        other_session = "other-session"
+        self.app.sessions.sessions[other_session] = {"csrf": "other-csrf", "created": time.monotonic()}
+        status, _headers, payload = self.request(
+            "GET",
+            f"/api/v1/events?token={token['token']}",
+            cookie=f"{server_module.SESSION_COOKIE}={other_session}",
+        )
+        self.assertEqual(401, status)
+        self.assertEqual("UNAUTHENTICATED", payload["error"]["code"])
+
     def test_server_enforces_session_expiry_not_only_cookie_age(self) -> None:
         cookie, _csrf = self.bootstrap()
         session_id = cookie.split("=", 1)[1]
@@ -175,6 +185,23 @@ class ServerBoundaryTests(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertEqual(schema["title"], "Room Alignment provenance manifest v1")
 
+    def test_malformed_client_values_return_stable_validation_errors(self) -> None:
+        cookie, csrf = self.bootstrap()
+        requests = [
+            ("POST", "/api/v1/grants", {}, csrf),
+            ("GET", "/api/v1/libraries/library/media?limit=bad", None, None),
+            ("GET", "/api/v1/projects/project/revisions/not-an-integer", None, None),
+            ("GET", "/api/v1/projects/project/program-at?outputUs=bad", None, None),
+        ]
+        for method, path, body, request_csrf in requests:
+            with self.subTest(path=path):
+                status, _headers, payload = self.request(
+                    method, path, body=body, cookie=cookie, csrf=request_csrf
+                )
+                self.assertEqual(status, 400)
+                self.assertEqual(payload["error"]["code"], "VALIDATION_FAILED")
+                self.assertFalse(payload["error"]["retryable"])
+
 
 class WorkerBackpressureTests(unittest.TestCase):
     def test_analysis_jobs_have_a_two_job_backpressure_limit(self) -> None:
@@ -183,15 +210,26 @@ class WorkerBackpressureTests(unittest.TestCase):
             source = root / "source"
             source.mkdir()
             app = server_module.App(root / "state")
+            release = threading.Event()
             try:
                 grant = app.store.create_grant(source, "READ_ONLY_SOURCE")
                 library = app.store.create_library(grant["id"])
-                with patch("room_alignment.server.threading.Thread.start"):
+                original_check = app._raise_if_job_stopping
+
+                def hold(job_id):
+                    release.wait(2)
+                    return original_check(job_id)
+
+                with patch.object(app, "_raise_if_job_stopping", side_effect=hold):
                     app.start_cluster_analysis(library["id"])
                     app.start_cluster_analysis(library["id"])
                     with self.assertRaisesRegex(DomainError, "two analysis"):
                         app.start_cluster_analysis(library["id"])
+                    release.set()
+                    for thread in list(app.analysis_threads.values()):
+                        thread.join(timeout=2)
             finally:
+                release.set()
                 app.analysis_threads.clear()
                 app.analysis_reserved.clear()
                 app.close()

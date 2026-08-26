@@ -32,8 +32,15 @@ class ContractTests(unittest.TestCase):
             self.assertIn(path, paths)
         self.assertEqual(
             contract["components"]["schemas"]["ProjectCommand"]["$ref"],
-            "./contracts/commands.schema.json",
+            "https://room-alignment.local/contracts/commands.schema.json",
         )
+        self.assertEqual(contract["security"], [{"sessionCookie": []}])
+        for path_item in contract["paths"].values():
+            if "post" in path_item:
+                self.assertEqual(
+                    path_item["post"]["security"],
+                    [{"sessionCookie": [], "csrfToken": []}],
+                )
         commands = json.loads((ROOT / "contracts" / "commands.schema.json").read_text(encoding="utf-8"))
         command_types = {
             commands["$defs"][variant["$ref"].split("/")[-1]]["properties"]["commandType"]["const"]

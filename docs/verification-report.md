@@ -48,7 +48,7 @@ The runtime-only corpus validator completed a full read-only scan with four prob
 - elapsed scan: 339.974 seconds;
 - peak tracked Python allocation: 1,756,445 bytes;
 - warnings: 0;
-- source integrity preserved: **true**, proven by identical sanitized SHA-256 tree digest before and after.
+- source tree metadata preserved: **true**, proven by identical sanitized path/size/mtime SHA-256 tree digest before and after. This check does not read and hash the full contents of every source file.
 
 The runtime path and identifying filenames are intentionally absent from this repository and report.
 
@@ -60,4 +60,4 @@ The runtime path and identifying filenames are intentionally absent from this re
 
 ## Delivery-state boundary
 
-Implementation, local verification, browser observation, and representative-corpus observation are complete. Milestone commits are local only. Packaging, installation, push, pull request, signing, notarization, publication, deployment, distribution, and production observation were not authorized or performed.
+Implementation, local verification, browser observation, and representative-corpus observation are complete. The branch is pushed to `origin` and pull request #2 is open for automated review. Packaging, installation, merge, signing, notarization, publication, deployment, distribution, and production observation were not authorized or performed.

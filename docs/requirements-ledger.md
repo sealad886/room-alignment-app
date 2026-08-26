@@ -153,4 +153,4 @@
 | REQ-147 | Verified | Verified backup precedes irreversible schema/restore; failure retains prior/rollback DB. |
 | REQ-148 | Verified | Legacy whole-project HTTP writes removed; generated command client is sole frontend writer. |
 | REQ-149 | Implemented | Legacy reader/importer remains only as migration/recovery seam. |
-| REQ-150 | Verified | Baseline preserved in isolated worktree; milestone commits local only; no push/package/deploy. |
+| REQ-150 | Verified | Baseline preserved in isolated worktree; branch pushed and pull request #2 opened under explicit authority; no merge/package/deploy. |

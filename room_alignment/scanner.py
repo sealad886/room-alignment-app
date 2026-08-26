@@ -5,11 +5,13 @@ import json
 import os
 import signal
 import subprocess
+import threading
 import time
+from collections.abc import Callable, Iterable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import fields
 from pathlib import Path
-from typing import Any, Callable, Iterable
+from typing import Any
 
 from .domain import digest_json, seconds_to_us
 from .models import MediaRecord, ProvenanceEvidence, ScanSummary
@@ -260,13 +262,16 @@ def iter_scan_records(
         raise ValueError("Library root must be a directory")
     worker_count = max(1, min(int(probe_workers), 8))
     pending: set[Future[MediaRecord]] = set()
+    local_stop = threading.Event()
+    should_stop = lambda: local_stop.is_set() or bool(canceled and canceled())
     discovered = 0
     paths = iter(iter_videos(resolved))
     exhausted = False
-    with ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="media-probe") as executor:
+    executor = ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="media-probe")
+    try:
         while pending or not exhausted:
             while not exhausted and len(pending) < worker_count * 2:
-                if canceled and canceled():
+                if should_stop():
                     exhausted = True
                     break
                 if max_files is not None and discovered >= max_files:
@@ -288,16 +293,21 @@ def iter_scan_records(
                 if mode == "INCREMENTAL" and existing and _fingerprint_matches(existing.get("fingerprint", {}), cheap):
                     yield media_record_from_dict(existing, library_id)
                     continue
-                pending.add(executor.submit(_scan_path, resolved, path, library_id, canceled))
+                pending.add(executor.submit(_scan_path, resolved, path, library_id, should_stop))
             if not pending:
                 continue
             completed, pending = wait(pending, return_when=FIRST_COMPLETED)
             for future in completed:
-                if canceled and canceled():
+                if should_stop():
                     for queued in pending:
                         queued.cancel()
                     return
                 yield future.result()
+    finally:
+        local_stop.set()
+        for future in pending:
+            future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
 
 
 def _scan_path(
@@ -389,7 +399,14 @@ def _evidence_kwargs(value: dict[str, Any]) -> dict[str, Any]:
         "observedAt": "observed_at",
         "extractorVersion": "extractor_version",
     }
-    return {aliases.get(key, key): item for key, item in value.items()}
+    allowed = {item.name for item in fields(ProvenanceEvidence)}
+    normalized = {aliases.get(key, key): item for key, item in value.items()}
+    custom = dict(normalized.get("custom") or {})
+    for key in tuple(normalized):
+        if key not in allowed:
+            custom[key] = normalized.pop(key)
+    normalized["custom"] = custom
+    return normalized
 
 
 def scan_library(

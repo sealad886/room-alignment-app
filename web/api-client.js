@@ -2,256 +2,347 @@
 (() => {
   const OPERATIONS = {
   "applyProjectCommand": {
+    "binary": false,
     "method": "POST",
     "path": "/projects/{projectId}/commands",
     "pathParameters": [
       "projectId"
-    ]
+    ],
+    "queryParameters": {
+      "preview": false
+    }
   },
   "attestReview": {
+    "binary": false,
     "method": "POST",
     "path": "/render-plans/{planId}/review",
     "pathParameters": [
       "planId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "cancelJob": {
+    "binary": false,
     "method": "POST",
     "path": "/jobs/{jobId}/cancel",
     "pathParameters": [
       "jobId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "cancelScan": {
+    "binary": false,
     "method": "POST",
     "path": "/scans/{scanId}/cancel",
     "pathParameters": [
       "scanId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "createEventToken": {
+    "binary": false,
     "method": "POST",
     "path": "/jobs/event-token",
-    "pathParameters": []
+    "pathParameters": [],
+    "queryParameters": {}
   },
   "createGrant": {
+    "binary": false,
     "method": "POST",
     "path": "/grants",
-    "pathParameters": []
+    "pathParameters": [],
+    "queryParameters": {}
   },
   "createLibrary": {
+    "binary": false,
     "method": "POST",
     "path": "/libraries",
-    "pathParameters": []
+    "pathParameters": [],
+    "queryParameters": {}
   },
   "createProject": {
+    "binary": false,
     "method": "POST",
     "path": "/projects",
-    "pathParameters": []
+    "pathParameters": [],
+    "queryParameters": {}
   },
   "createRenderPlan": {
+    "binary": false,
     "method": "POST",
     "path": "/projects/{projectId}/render-plans",
     "pathParameters": [
       "projectId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "getArtifact": {
+    "binary": false,
     "method": "GET",
     "path": "/artifacts/{artifactId}",
     "pathParameters": [
       "artifactId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "getArtifactVideo": {
+    "binary": true,
     "method": "GET",
     "path": "/artifacts/{artifactId}/video",
     "pathParameters": [
       "artifactId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "getCompiledProgram": {
+    "binary": false,
     "method": "GET",
     "path": "/projects/{projectId}/program",
     "pathParameters": [
       "projectId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "getJob": {
+    "binary": false,
     "method": "GET",
     "path": "/jobs/{jobId}",
     "pathParameters": [
       "jobId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "getJsonSchemaContract": {
+    "binary": false,
     "method": "GET",
     "path": "/contracts/{contractName}",
     "pathParameters": [
       "contractName"
-    ]
+    ],
+    "queryParameters": {}
   },
   "getManifest": {
+    "binary": false,
     "method": "GET",
     "path": "/artifacts/{artifactId}/manifest",
     "pathParameters": [
       "artifactId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "getMedia": {
+    "binary": false,
     "method": "GET",
     "path": "/media/{mediaId}",
     "pathParameters": [
       "mediaId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "getOpenApiContract": {
+    "binary": false,
     "method": "GET",
     "path": "/openapi.json",
-    "pathParameters": []
+    "pathParameters": [],
+    "queryParameters": {}
   },
   "getProgramAt": {
+    "binary": false,
     "method": "GET",
     "path": "/projects/{projectId}/program-at",
     "pathParameters": [
       "projectId"
-    ]
+    ],
+    "queryParameters": {
+      "outputUs": false
+    }
   },
   "getProject": {
+    "binary": false,
     "method": "GET",
     "path": "/projects/{projectId}",
     "pathParameters": [
       "projectId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "getProjectRevision": {
+    "binary": false,
     "method": "GET",
     "path": "/projects/{projectId}/revisions/{revision}",
     "pathParameters": [
       "projectId",
       "revision"
-    ]
+    ],
+    "queryParameters": {}
   },
   "getRenderPlan": {
+    "binary": false,
     "method": "GET",
     "path": "/render-plans/{planId}",
     "pathParameters": [
       "planId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "getScan": {
+    "binary": false,
     "method": "GET",
     "path": "/scans/{scanId}",
     "pathParameters": [
       "scanId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "getSession": {
+    "binary": false,
     "method": "GET",
     "path": "/session",
-    "pathParameters": []
+    "pathParameters": [],
+    "queryParameters": {}
   },
   "getSystem": {
+    "binary": false,
     "method": "GET",
     "path": "/system",
-    "pathParameters": []
+    "pathParameters": [],
+    "queryParameters": {}
   },
   "listClusterSuggestions": {
+    "binary": false,
     "method": "GET",
     "path": "/libraries/{libraryId}/cluster-suggestions",
     "pathParameters": [
       "libraryId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "listGrants": {
+    "binary": false,
     "method": "GET",
     "path": "/grants",
-    "pathParameters": []
+    "pathParameters": [],
+    "queryParameters": {}
   },
   "listLibraries": {
+    "binary": false,
     "method": "GET",
     "path": "/libraries",
-    "pathParameters": []
+    "pathParameters": [],
+    "queryParameters": {}
   },
   "listMedia": {
+    "binary": false,
     "method": "GET",
     "path": "/libraries/{libraryId}/media",
     "pathParameters": [
       "libraryId"
-    ]
+    ],
+    "queryParameters": {
+      "cursor": false,
+      "generation": false,
+      "limit": false
+    }
   },
   "listProjects": {
+    "binary": false,
     "method": "GET",
     "path": "/projects",
-    "pathParameters": []
+    "pathParameters": [],
+    "queryParameters": {}
   },
   "listProvenanceResolutions": {
+    "binary": false,
     "method": "GET",
     "path": "/media/{mediaId}/provenance/resolutions",
     "pathParameters": [
       "mediaId"
-    ]
+    ],
+    "queryParameters": {
+      "field": false
+    }
   },
   "listSuggestions": {
+    "binary": false,
     "method": "GET",
     "path": "/projects/{projectId}/suggestions",
     "pathParameters": [
       "projectId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "resolveProvenance": {
+    "binary": false,
     "method": "POST",
     "path": "/media/{mediaId}/provenance/resolutions",
     "pathParameters": [
       "mediaId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "revokeGrant": {
+    "binary": false,
     "method": "POST",
     "path": "/grants/{grantId}/revoke",
     "pathParameters": [
       "grantId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "startAlignmentAnalysis": {
+    "binary": false,
     "method": "POST",
     "path": "/projects/{projectId}/alignment-jobs",
     "pathParameters": [
       "projectId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "startClusterAnalysis": {
+    "binary": false,
     "method": "POST",
     "path": "/libraries/{libraryId}/cluster-jobs",
     "pathParameters": [
       "libraryId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "startRender": {
+    "binary": false,
     "method": "POST",
     "path": "/render-plans/{planId}/render",
     "pathParameters": [
       "planId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "startScan": {
+    "binary": false,
     "method": "POST",
     "path": "/libraries/{libraryId}/scans",
     "pathParameters": [
       "libraryId"
-    ]
+    ],
+    "queryParameters": {}
   },
   "streamEvents": {
+    "binary": false,
     "method": "GET",
     "path": "/events",
-    "pathParameters": []
+    "pathParameters": [],
+    "queryParameters": {
+      "after": false,
+      "token": true
+    }
   },
   "updateLibraryTimePolicy": {
+    "binary": false,
     "method": "POST",
     "path": "/libraries/{libraryId}/time-policy",
     "pathParameters": [
       "libraryId"
-    ]
+    ],
+    "queryParameters": {}
   }
 };
 
@@ -273,9 +364,12 @@
       const headers = {"Accept": "application/json", ...(options.headers || {})};
       if (options.body !== undefined) headers["Content-Type"] = "application/json";
       if (options.method && options.method !== "GET" && this.csrf) headers["X-CSRF-Token"] = this.csrf;
-      const response = await fetch(`${this.base}${path}`, {...options, headers, credentials: "same-origin"});
+      const {binary, ...requestOptions} = options;
+      const response = await fetch(`${this.base}${path}`, {...requestOptions, headers, credentials: "same-origin"});
       const contentType = response.headers.get("Content-Type") || "";
-      const payload = contentType.includes("json") ? await response.json() : await response.text();
+      const payload = contentType.includes("json")
+        ? await response.json()
+        : (binary ? await response.blob() : await response.text());
       if (!response.ok) throw new APIError(payload?.error, response.status);
       return payload;
     }
@@ -290,10 +384,23 @@
         }
         path = path.replace(`{${name}}`, encodeURIComponent(String(parameters[name])));
       }
-      const query = new URLSearchParams(parameters.query || {}).toString();
+      const supplied = parameters.query || {};
+      const allowed = new Set(Object.keys(operation.queryParameters));
+      for (const name of Object.keys(supplied)) {
+        if (!allowed.has(name)) throw new Error(`Unknown query parameter ${name} for ${operationId}`);
+      }
+      for (const [name, required] of Object.entries(operation.queryParameters)) {
+        if (required && (supplied[name] === undefined || supplied[name] === null)) {
+          throw new Error(`Missing query parameter ${name} for ${operationId}`);
+        }
+      }
+      const unexpected = Object.keys(parameters).filter(name => name !== "query" && !operation.pathParameters.includes(name));
+      if (unexpected.length) throw new Error(`Unknown parameter ${unexpected[0]} for ${operationId}`);
+      const query = new URLSearchParams(supplied).toString();
       if (query) path += `?${query}`;
       const options = {method: operation.method};
       if (body !== undefined) options.body = JSON.stringify(body);
+      options.binary = operation.binary;
       const value = await this.request(path, options);
       if (operationId === "getSession") this.csrf = value.csrfToken;
       return value;

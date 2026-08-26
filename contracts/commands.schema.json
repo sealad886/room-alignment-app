@@ -58,10 +58,6 @@
     "Id": {"type": "string", "minLength": 1},
     "Us": {"type": "integer", "minimum": 0},
     "Empty": {"type": "object", "maxProperties": 0},
-    "Discriminator": {
-      "type": "object",
-      "required": ["commandType", "payload"]
-    },
     "UpdateProjectMetadata": {
       "properties": {"commandType": {"const": "UpdateProjectMetadata"}, "payload": {"type": "object", "additionalProperties": false, "required": ["name"], "properties": {"name": {"type": "string", "minLength": 1, "maxLength": 200}}}}
     },
@@ -124,7 +120,7 @@
       "properties": {"commandType": {"const": "SetAnchoringMode"}, "payload": {"type": "object", "additionalProperties": false, "required": ["anchorMode"], "properties": {"anchorMode": {"enum": ["PROGRAM_TIME", "SOURCE_TIME"]}}}}
     },
     "ReconcileBoundary": {
-      "properties": {"commandType": {"const": "ReconcileBoundary"}, "payload": {"type": "object", "required": ["operation"], "properties": {"operation": {"enum": ["CLOSE_GAP", "TRIM_OVERLAP", "NORMALIZE_RANGE"]}, "leftBlockId": {"$ref": "#/$defs/Id"}, "rightBlockId": {"$ref": "#/$defs/Id"}, "atUs": {"$ref": "#/$defs/Us"}, "startUs": {"$ref": "#/$defs/Us"}, "endUs": {"$ref": "#/$defs/Us"}}}}
+      "properties": {"commandType": {"const": "ReconcileBoundary"}, "payload": {"type": "object", "additionalProperties": false, "required": ["operation"], "properties": {"operation": {"enum": ["CLOSE_GAP", "TRIM_OVERLAP", "NORMALIZE_RANGE"]}, "leftBlockId": {"$ref": "#/$defs/Id"}, "rightBlockId": {"$ref": "#/$defs/Id"}, "atUs": {"$ref": "#/$defs/Us"}, "startUs": {"$ref": "#/$defs/Us"}, "endUs": {"$ref": "#/$defs/Us"}}}}
     },
     "ArchiveProject": {"properties": {"commandType": {"const": "ArchiveProject"}, "payload": {"$ref": "#/$defs/Empty"}}},
     "AcceptAlignmentSuggestion": {
@@ -142,6 +138,7 @@
     },
     "AudioPayload": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["startUs", "endUs", "mode"],
       "properties": {
         "id": {"$ref": "#/$defs/Id"}, "startUs": {"$ref": "#/$defs/Us"}, "endUs": {"$ref": "#/$defs/Us"},

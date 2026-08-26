@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from room_alignment.models import MediaRecord
 from room_alignment.scanner import iter_scan_records, quick_fingerprint
 
 
@@ -61,6 +64,59 @@ class ScannerSafetyTests(unittest.TestCase):
             self.assertEqual(len(records), 1)
             probe.assert_called_once()
             self.assertEqual(records[0].camera, "different and larger")
+
+    def test_unchanged_incremental_asset_reuses_cached_probe_record(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            media = root / "clip.mp4"
+            media.write_bytes(b"media")
+            existing = {
+                "id": "asset",
+                "library_id": "library",
+                "relative_path": "clip.mp4",
+                "size": media.stat().st_size,
+                "modified_ns": media.stat().st_mtime_ns,
+                "fingerprint": quick_fingerprint(media),
+                "evidence": [],
+            }
+            with patch("room_alignment.scanner.probe") as probe:
+                records = list(
+                    iter_scan_records(
+                        root,
+                        "library",
+                        mode="INCREMENTAL",
+                        existing_lookup=lambda _path: existing,
+                        probe_workers=1,
+                    )
+                )
+            probe.assert_not_called()
+            self.assertEqual([record.id for record in records], ["asset"])
+
+    def test_closing_scan_generator_stops_owned_probe_work_promptly(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index in range(4):
+                (root / f"{index}.mp4").write_bytes(b"media")
+            second_started = threading.Event()
+            stopped = threading.Event()
+
+            def controlled_scan(_root, path, library_id, canceled):
+                if path.name == "0.mp4":
+                    second_started.wait(1)
+                else:
+                    second_started.set()
+                    while not canceled():
+                        time.sleep(0.01)
+                    stopped.set()
+                return MediaRecord(path.name, library_id, path.name, 5, 1)
+
+            with patch("room_alignment.scanner._scan_path", side_effect=controlled_scan):
+                records = iter_scan_records(root, "library", probe_workers=2)
+                next(records)
+                started = time.monotonic()
+                records.close()
+                self.assertLess(time.monotonic() - started, 0.5)
+                self.assertTrue(stopped.wait(1))
 
 
 if __name__ == "__main__":

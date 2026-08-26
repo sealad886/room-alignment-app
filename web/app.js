@@ -34,6 +34,8 @@ const state = {
   eventFeedOpen: false,
   eventReconnectTimer: null,
   suggestions: [],
+  outputGrantByDirectory: new Map(),
+  eventReconnectAttempts: 0,
 };
 
 function safe(value) {
@@ -56,6 +58,11 @@ function formatUs(valueUs = 0) {
   const minutes = Math.floor(milliseconds / 60_000) % 60;
   const seconds = Math.floor(milliseconds / 1000) % 60;
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(Math.abs(milliseconds) % 1000).padStart(3, "0")}`;
+}
+
+function normalizeInteger(value, fallback = 0) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number) : fallback;
 }
 
 function mediaLabel(media) {
@@ -227,9 +234,19 @@ function selectGroup(index) {
 }
 
 async function ensureProjectMedia(project) {
-  const missing = project.clips.map(clip => clip.assetId).filter(assetId => !state.mediaById.has(assetId));
-  const records = await Promise.all(missing.map(mediaId => client.getMedia({mediaId})));
-  for (const record of records) state.mediaById.set(record.id, record);
+  const missing = [...new Set(
+    project.clips.map(clip => clip.assetId).filter(assetId => !state.mediaById.has(assetId))
+  )];
+  for (let index = 0; index < missing.length; index += 50) {
+    const results = await Promise.allSettled(
+      missing.slice(index, index + 50).map(mediaId => client.getMedia({mediaId}))
+    );
+    for (const result of results) {
+      if (result.status === "fulfilled") state.mediaById.set(result.value.id, result.value);
+    }
+    const failed = results.find(result => result.status === "rejected");
+    if (failed) throw failed.reason;
+  }
 }
 
 async function createProjectFromGroup() {
@@ -346,12 +363,15 @@ function renderSources() {
         const deltaUs = ((moveEvent.clientX - startX) / width) * state.durationUs;
         $("#sync-offset").value = Math.round(startMs + deltaUs / 1000);
       };
-      track.onpointerup = upEvent => {
-        track.releasePointerCapture(upEvent.pointerId);
+      const finishPointer = upEvent => {
+        if (track.hasPointerCapture(upEvent.pointerId)) track.releasePointerCapture(upEvent.pointerId);
         track.onpointermove = null;
         track.onpointerup = null;
+        track.onpointercancel = null;
         $("#sync-offset").dispatchEvent(new Event("change"));
       };
+      track.onpointerup = finishPointer;
+      track.onpointercancel = finishPointer;
     };
   });
   const selected = state.sources[state.selectedSource];
@@ -427,6 +447,7 @@ async function recordProvenanceCorrection(event, media) {
     state.renderPlan = null;
     deriveSources();
     renderSources();
+    renderProgram();
     toast("Correction recorded without erasing raw evidence; review invalidated");
   } catch (error) { handleError(error); }
 }
@@ -600,11 +621,11 @@ async function ensureAudioSliceForVideo() {
   let audio = sortedAudioBlocks().find(block => block.startUs <= video.startUs && block.endUs > video.startUs);
   if (!audio) return null;
   if (audio.startUs < video.startUs) {
-    await command("SplitAudioBlock", {blockId: audio.id, atUs: video.startUs});
+    if (!await command("SplitAudioBlock", {blockId: audio.id, atUs: video.startUs})) return null;
     audio = sortedAudioBlocks().find(block => block.startUs === video.startUs);
   }
   if (audio && audio.endUs > video.endUs) {
-    await command("SplitAudioBlock", {blockId: audio.id, atUs: video.endUs});
+    if (!await command("SplitAudioBlock", {blockId: audio.id, atUs: video.endUs})) return null;
     audio = sortedAudioBlocks().find(block => block.startUs === video.startUs);
   }
   return audio;
@@ -618,8 +639,8 @@ async function setAudioDecision(value, offsetUs = null) {
     mode: value === "follow" ? "FOLLOW_VIDEO" : value === "silence" ? "SILENCE" : value.startsWith("clip:") ? "FIXED_CLIP" : "FIXED_SOURCE",
     logicalSourceId: value.startsWith("source:") ? value.slice(7) : null,
     clipId: value.startsWith("clip:") ? value.slice(5) : null,
-    offsetUs: offsetUs ?? Number(block.offsetUs || 0),
-    ratePpm: Number(block.ratePpm || 0),
+    offsetUs: normalizeInteger(offsetUs ?? block.offsetUs),
+    ratePpm: normalizeInteger(block.ratePpm),
     confirmDrift: Boolean(block.ratePpm),
   };
   await command("SetAudioMode", payload);
@@ -676,7 +697,11 @@ async function prepareReview() {
     const profile = $("#lossless-check").checked ? "ARCHIVAL_LOSSLESS" : "COMPATIBLE";
     const suffix = profile === "ARCHIVAL_LOSSLESS" ? ".mkv" : ".mp4";
     if (!filename.toLowerCase().endsWith(suffix)) throw new Error(`${profile} output filename must end with ${suffix}`);
-    const grant = await client.createGrant({}, {path: directory, role: "WRITE_OUTPUT"});
+    let grant = state.outputGrantByDirectory.get(directory);
+    if (!grant || grant.revoked) {
+      grant = await client.createGrant({}, {path: directory, role: "WRITE_OUTPUT"});
+      state.outputGrantByDirectory.set(directory, grant);
+    }
     state.renderPlan = await client.createRenderPlan({projectId: state.project.id}, {outputGrantId: grant.id, filename, profile});
     renderReviewPlan();
   } catch (error) {
@@ -743,11 +768,13 @@ async function pollJob(jobId, onUpdate) {
   return new Promise((resolve, reject) => {
     let finished = false;
     let polling = false;
+    let consecutiveFailures = 0;
     const update = async () => {
       if (finished || polling) return;
       polling = true;
       try {
         const job = await client.getJob({jobId});
+        consecutiveFailures = 0;
         onUpdate(job);
         if (terminal.has(job.status)) {
           finished = true;
@@ -757,7 +784,8 @@ async function pollJob(jobId, onUpdate) {
           resolve(job);
         }
       } catch (error) {
-        if (!state.eventFeedOpen) {
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= 3) {
           finished = true;
           window.removeEventListener("room-alignment-job", onEvent);
           window.removeEventListener("room-alignment-event-reset", onReset);
@@ -787,7 +815,10 @@ async function connectEventFeed() {
     const query = new URLSearchParams({token: authorization.token, after: String(state.eventCursor)});
     const feed = new EventSource(`/api/v1/events?${query}`);
     state.eventFeed = feed;
-    feed.onopen = () => { state.eventFeedOpen = true; };
+    feed.onopen = () => {
+      state.eventFeedOpen = true;
+      state.eventReconnectAttempts = 0;
+    };
     feed.addEventListener("job", event => {
       const value = JSON.parse(event.data);
       state.eventCursor = Math.max(state.eventCursor, Number(value.sequence || event.lastEventId || 0));
@@ -801,11 +832,15 @@ async function connectEventFeed() {
     feed.onerror = () => {
       state.eventFeedOpen = false;
       feed.close();
-      state.eventReconnectTimer = setTimeout(connectEventFeed, 500);
+      state.eventReconnectAttempts += 1;
+      const delay = Math.min(30_000, 500 * (2 ** Math.min(state.eventReconnectAttempts, 6)));
+      state.eventReconnectTimer = setTimeout(connectEventFeed, delay);
     };
   } catch (_error) {
     state.eventFeedOpen = false;
-    state.eventReconnectTimer = setTimeout(connectEventFeed, 1000);
+    state.eventReconnectAttempts += 1;
+    const delay = Math.min(30_000, 500 * (2 ** Math.min(state.eventReconnectAttempts, 6)));
+    state.eventReconnectTimer = setTimeout(connectEventFeed, delay);
   }
 }
 
@@ -921,11 +956,12 @@ function setupEvents() {
       const anchorMode = radio.value === "source-clips" ? "SOURCE_TIME" : "PROGRAM_TIME";
       const preview = await command("SetAnchoringMode", {anchorMode}, {preview: true});
       if (preview && window.confirm(anchorMode === "SOURCE_TIME" ? "Attach future timing edits to source-relative points? Alignment changes may move output boundaries." : "Keep future program boundaries fixed on the output clock?")) {
-        await command("SetAnchoringMode", {anchorMode});
-      } else if (preview) {
-        radio.checked = false;
-        $$('input[name="anchor"]').find(item => item.value !== radio.value).checked = true;
+        if (await command("SetAnchoringMode", {anchorMode})) return;
       }
+      radio.checked = false;
+      const currentValue = state.project.anchorMode === "SOURCE_TIME" ? "source-clips" : "wall-clock";
+      const current = $$('input[name="anchor"]').find(item => item.value === currentValue);
+      if (current) current.checked = true;
     };
   });
   $("#cut-camera").onclick = cutToSelected;
@@ -1008,7 +1044,7 @@ function setupEvents() {
     link.href = URL.createObjectURL(blob);
     link.download = `${state.project.name.replace(/\W+/g, "-").toLowerCase()}-${state.artifact ? "manifest" : "render-plan"}.json`;
     link.click();
-    URL.revokeObjectURL(link.href);
+    setTimeout(() => URL.revokeObjectURL(link.href), 0);
   };
   $("#download-video").onclick = () => {
     if (!state.artifact || state.artifact.status !== "COMPLETE") return toast("Complete the artifact pair first");

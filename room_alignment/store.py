@@ -6,9 +6,11 @@ import json
 import os
 import sqlite3
 import threading
+import time
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .domain import (
@@ -24,7 +26,7 @@ from .domain import (
 from .models import MediaRecord, ScanSummary
 from .models import ProvenanceEvidence
 from .provenance import normalize_timestamp
-from .scanner import media_record_from_dict
+from .scanner import media_record_from_dict, quick_fingerprint
 
 
 SCHEMA_VERSION = 3
@@ -271,6 +273,8 @@ class Store:
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._event_condition = threading.Condition()
+        self._event_generation = 0
         self._backup_before_migration()
         with self.connect() as db:
             db.executescript(SCHEMA)
@@ -308,7 +312,7 @@ class Store:
         finally:
             source.close()
         staging = self.path.with_name(f".{self.path.name}.migration-{timestamp}")
-        source = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True)
+        source = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True)
         destination = sqlite3.connect(staging)
         try:
             source.backup(destination)
@@ -465,7 +469,7 @@ class Store:
     ) -> dict[str, Any]:
         try:
             ZoneInfo(time_zone)
-        except ZoneInfoNotFoundError as error:
+        except (ZoneInfoNotFoundError, ValueError) as error:
             raise DomainError("VALIDATION_FAILED", "Library timeZone must be a valid IANA zone") from error
         if nonexistent_policy not in {"REJECT", "SHIFT_FORWARD"}:
             raise DomainError("VALIDATION_FAILED", "Unknown nonexistent local-time policy")
@@ -490,6 +494,7 @@ class Store:
                 self._renormalize_library_timestamps_db(
                     db, library_id, time_zone, int(bool(dst_fold)), nonexistent_policy
                 )
+            if changed:
                 self._invalidate_suggestions_db(
                     db,
                     "library_id=? AND status IN ('PENDING','ACCEPTED')",
@@ -541,12 +546,13 @@ class Store:
     def library_root(self, library_id: str) -> Path:
         with self.connect() as db:
             row = db.execute(
-                "SELECT l.root,g.revoked FROM libraries l LEFT JOIN directory_grants g ON g.id=l.grant_id WHERE l.id=?",
+                "SELECT l.root,l.grant_id,g.revoked FROM libraries l "
+                "LEFT JOIN directory_grants g ON g.id=l.grant_id WHERE l.id=?",
                 (library_id,),
             ).fetchone()
             if not row:
                 raise DomainError("NOT_FOUND", "Unknown library")
-            if row["revoked"]:
+            if row["grant_id"] is None or row["revoked"] is None or row["revoked"]:
                 raise DomainError("GRANT_REQUIRED", "Library source grant has been revoked")
             return Path(row["root"])
 
@@ -564,8 +570,12 @@ class Store:
             if active:
                 raise DomainError("JOB_STATE_CONFLICT", "A scan is already active for this library")
             generation = int(
-                db.execute("SELECT current_generation FROM libraries WHERE id=?", (library_id,)).fetchone()[0]
-            ) + 1
+                db.execute(
+                    "SELECT MAX(l.current_generation,COALESCE(MAX(s.generation),0))+1 "
+                    "FROM libraries l LEFT JOIN scan_generations s ON s.library_id=l.id WHERE l.id=?",
+                    (library_id,),
+                ).fetchone()[0]
+            )
             scan_id = opaque_id("scan")
             timestamp = now_iso()
             db.execute(
@@ -608,6 +618,8 @@ class Store:
             row = db.execute("SELECT * FROM scan_generations WHERE id=?", (scan_id,)).fetchone()
             if not row:
                 raise DomainError("NOT_FOUND", "Scan not found")
+            if row["cancel_requested"] or row["status"] in {"CANCEL_REQUESTED", "CANCELED", "FAILED", "SUCCEEDED"}:
+                return
             scanned = int(row["scanned"]) + 1
             warnings = int(row["warnings"]) + int(warning)
             db.execute(
@@ -669,11 +681,59 @@ class Store:
                             (scan["library_id"], identity_key),
                         )
                     )
-                    rename_matches = [
-                        item for item in rename_candidates if not (library_root / item["relative_path"]).exists()
-                    ]
+                    rename_matches = []
+                    for item in rename_candidates:
+                        previous_path = library_root / item["relative_path"]
+                        try:
+                            previous_identity = _identity_key_from_fingerprint(quick_fingerprint(previous_path))
+                        except OSError:
+                            previous_identity = None
+                        if previous_identity != identity_key:
+                            rename_matches.append(item)
                     if len(rename_matches) == 1:
                         record.id = rename_matches[0]["asset_id"]
+                target_owner = db.execute(
+                    "SELECT media.id,keys.identity_key FROM media LEFT JOIN media_identity_keys keys "
+                    "ON keys.asset_id=media.id WHERE media.library_id=? AND media.relative_path=?",
+                    (scan["library_id"], record.relative_path),
+                ).fetchone()
+                if target_owner and identity_key and target_owner["identity_key"] == identity_key:
+                    record.id = target_owner["id"]
+                existing_asset = db.execute(
+                    "SELECT id,relative_path,record_json FROM media "
+                    "WHERE library_id=? AND relative_path=? AND id<>?",
+                    (scan["library_id"], record.relative_path, record.id),
+                ).fetchone()
+                if existing_asset:
+                    moving = db.execute(
+                        "SELECT relative_path FROM media WHERE id=?", (record.id,)
+                    ).fetchone()
+                    replacement_path = f".__unavailable__/{existing_asset['id']}"
+                    replacement_missing = 1
+                    if moving:
+                        old_path = library_root / moving["relative_path"]
+                        try:
+                            old_identity = _identity_key_from_fingerprint(quick_fingerprint(old_path))
+                        except OSError:
+                            old_identity = None
+                        owner_identity_row = db.execute(
+                            "SELECT identity_key FROM media_identity_keys WHERE asset_id=?",
+                            (existing_asset["id"],),
+                        ).fetchone()
+                        if owner_identity_row and old_identity == owner_identity_row["identity_key"]:
+                            replacement_path = moving["relative_path"]
+                            replacement_missing = 0
+                        db.execute(
+                            "UPDATE media SET relative_path=? WHERE id=?",
+                            (f".__moving__/{record.id}-{scan_id}", record.id),
+                        )
+                    owner_payload = json.loads(existing_asset["record_json"])
+                    owner_payload["relative_path"] = replacement_path
+                    owner_payload["missing"] = bool(replacement_missing)
+                    db.execute(
+                        "UPDATE media SET relative_path=?,missing=?,record_json=? WHERE id=?",
+                        (replacement_path, replacement_missing, json.dumps(owner_payload), existing_asset["id"]),
+                    )
                 payload = record.to_dict()
                 payload["generation"] = int(scan["generation"])
                 payload["missing"] = False
@@ -711,26 +771,40 @@ class Store:
         dst_fold: int,
         nonexistent_policy: str,
     ) -> None:
-        rows = list(db.execute("SELECT id,record_json FROM media WHERE library_id=?", (library_id,)))
-        for row in rows:
-            record = media_record_from_dict(json.loads(row["record_json"]), library_id)
-            custom_policy = record.custom.get("timestampPolicy", {}) if isinstance(record.custom, dict) else {}
-            raw = custom_policy.get("rawValue") or _raw_timestamp_from_evidence(record)
-            if raw is None:
-                continue
-            record.captured_at = str(raw)
-            _normalize_media_record_timestamp(
-                record,
-                {
-                    "time_zone": time_zone,
-                    "dst_fold": dst_fold,
-                    "nonexistent_policy": nonexistent_policy,
-                },
-            )
-            db.execute(
-                "UPDATE media SET captured_at=?,record_json=? WHERE id=?",
-                (record.captured_at, json.dumps(record.to_dict()), row["id"]),
-            )
+        cursor = db.execute("SELECT id,record_json FROM media WHERE library_id=? ORDER BY id", (library_id,))
+        while rows := cursor.fetchmany(500):
+            for row in rows:
+                self._renormalize_timestamp_row_db(
+                    db, row, library_id, time_zone, dst_fold, nonexistent_policy
+                )
+
+    def _renormalize_timestamp_row_db(
+        self,
+        db: sqlite3.Connection,
+        row: sqlite3.Row,
+        library_id: str,
+        time_zone: str,
+        dst_fold: int,
+        nonexistent_policy: str,
+    ) -> None:
+        record = media_record_from_dict(json.loads(row["record_json"]), library_id)
+        custom_policy = record.custom.get("timestampPolicy", {}) if isinstance(record.custom, dict) else {}
+        raw = custom_policy.get("rawValue") or _raw_timestamp_from_evidence(record)
+        if raw is None:
+            return
+        record.captured_at = str(raw)
+        _normalize_media_record_timestamp(
+            record,
+            {
+                "time_zone": time_zone,
+                "dst_fold": dst_fold,
+                "nonexistent_policy": nonexistent_policy,
+            },
+        )
+        db.execute(
+            "UPDATE media SET captured_at=?,record_json=? WHERE id=?",
+            (record.captured_at, json.dumps(record.to_dict()), row["id"]),
+        )
 
     def finish_scan(
         self,
@@ -746,6 +820,18 @@ class Store:
             scan = db.execute("SELECT * FROM scan_generations WHERE id=?", (scan_id,)).fetchone()
             if not scan:
                 raise DomainError("NOT_FOUND", "Scan not found")
+            if scan["cancel_requested"]:
+                job = db.execute("SELECT error_code FROM jobs WHERE id=?", (scan_id,)).fetchone()
+                error_code = (job["error_code"] if job else None) or error_code
+                grant_revoked = error_code == "GRANT_REQUIRED"
+                status = "FAILED" if grant_revoked else "CANCELED"
+                error_code = "GRANT_REQUIRED" if grant_revoked else None
+                message = (
+                    "Directory grant revoked; visited records retained"
+                    if grant_revoked
+                    else "Scan canceled; visited records retained"
+                )
+                summary = {**summary, "interrupted": True}
             if status == "SUCCEEDED" and scan["mode"] == "FULL":
                 db.execute(
                     "UPDATE media SET missing=1 WHERE library_id=? AND last_generation<?",
@@ -1065,6 +1151,24 @@ class Store:
         canonical = new_project(
             project.get("name", "Migrated project"), project["libraryId"], list(assets.values()), project["id"]
         )
+        source_remap: dict[str, str] = {}
+        clip_remap: dict[str, str] = {}
+        for source, clip in zip(canonical["logicalSources"], canonical["clips"]):
+            asset_id = str(clip["assetId"])
+            next_source_id = _stable_migration_id("src", project["id"], asset_id)
+            next_clip_id = _stable_migration_id("clip", project["id"], asset_id)
+            source_remap[source["id"]] = next_source_id
+            clip_remap[clip["id"]] = next_clip_id
+            source["id"] = next_source_id
+            clip["id"] = next_clip_id
+            clip["logicalSourceId"] = next_source_id
+        for index, block in enumerate(canonical["videoBlocks"]):
+            block["id"] = _stable_migration_id("vblock", project["id"], index, block["startUs"], block["endUs"])
+            block["logicalSourceId"] = source_remap.get(block["logicalSourceId"], block["logicalSourceId"])
+            if block.get("pinnedClipId"):
+                block["pinnedClipId"] = clip_remap.get(block["pinnedClipId"], block["pinnedClipId"])
+        for index, block in enumerate(canonical["audioBlocks"]):
+            block["id"] = _stable_migration_id("ablock", project["id"], index, block["startUs"], block["endUs"])
         canonical["revision"] = int(project.get("revision", 1))
         canonical["legacy"] = copy.deepcopy(project)
         canonical["migration"] = {
@@ -1086,18 +1190,20 @@ class Store:
         if project.get("videoSegments"):
             canonical["videoBlocks"] = [
                 {
-                    "id": item.get("id") or opaque_id("vblock"),
+                    "id": item.get("id") or _stable_migration_id(
+                        "vblock", project["id"], index, item["start"], item["end"], item.get("mediaId")
+                    ),
                     "startUs": seconds_to_us(item["start"]),
                     "endUs": seconds_to_us(item["end"]),
                     "logicalSourceId": source_by_asset[item["mediaId"]],
                     "pinnedClipId": clip_by_asset[item["mediaId"]]["id"],
                 }
-                for item in project["videoSegments"]
+                for index, item in enumerate(project["videoSegments"])
                 if item.get("mediaId") in source_by_asset
             ]
         if project.get("audioSegments"):
             canonical["audioBlocks"] = []
-            for item in project["audioSegments"]:
+            for index, item in enumerate(project["audioSegments"]):
                 media_id = item.get("mediaId")
                 explicit_silence = bool(item.get("silence")) or item.get("provenance", {}).get("source") == "silence"
                 if not media_id and not explicit_silence:
@@ -1105,7 +1211,9 @@ class Store:
                 mode = "FOLLOW_VIDEO" if item.get("linked", True) and media_id else ("FIXED_CLIP" if media_id else "SILENCE")
                 canonical["audioBlocks"].append(
                     {
-                        "id": item.get("id") or opaque_id("ablock"),
+                        "id": item.get("id") or _stable_migration_id(
+                            "ablock", project["id"], index, item["start"], item["end"], media_id
+                        ),
                         "startUs": seconds_to_us(item["start"]),
                         "endUs": seconds_to_us(item["end"]),
                         "mode": mode,
@@ -1398,6 +1506,8 @@ class Store:
             raise DomainError("NOT_FOUND", "Job not found")
         if row["status"] in TERMINAL_JOB_STATES and status != row["status"]:
             raise DomainError("JOB_STATE_CONFLICT", "Terminal job cannot transition")
+        if row["status"] == "CANCEL_REQUESTED" and status not in TERMINAL_JOB_STATES:
+            raise DomainError("JOB_STATE_CONFLICT", "Cancellation can only transition to a terminal state")
         next_progress = float(row["progress"] if progress is None else max(0, min(1, progress)))
         db.execute(
             "UPDATE jobs SET status=?,progress=?,message=?,result_json=?,error_code=?,updated_at=? WHERE id=?",
@@ -1406,7 +1516,7 @@ class Store:
                 next_progress,
                 message if message is not None else row["message"],
                 json.dumps(result) if result is not None else row["result_json"],
-                error_code,
+                error_code if error_code is not None else row["error_code"],
                 now_iso(),
                 job_id,
             ),
@@ -1427,6 +1537,9 @@ class Store:
             "INSERT INTO job_events(job_id,event_type,status,progress,message,details_json,created_at) VALUES(?,?,?,?,?,?,?)",
             (job_id, event_type, status, progress, message, json.dumps(details), now_iso()),
         )
+        with self._event_condition:
+            self._event_generation += 1
+            self._event_condition.notify_all()
         if int(cursor.lastrowid or 0) % 1_000 == 0:
             self._compact_events_db(db)
 
@@ -1483,7 +1596,28 @@ class Store:
             if not row:
                 legacy = db.execute("SELECT * FROM render_jobs WHERE id=?", (job_id,)).fetchone()
                 if legacy:
-                    return dict(legacy)
+                    status = {
+                        "queued": "QUEUED",
+                        "running": "RUNNING",
+                        "complete": "SUCCEEDED",
+                        "succeeded": "SUCCEEDED",
+                        "canceled": "CANCELED",
+                        "failed": "FAILED",
+                    }.get(str(legacy["status"]).lower(), str(legacy["status"]).upper())
+                    return {
+                        "id": legacy["id"],
+                        "kind": "RENDER",
+                        "projectId": legacy["project_id"],
+                        "libraryId": None,
+                        "status": status,
+                        "progress": legacy["progress"],
+                        "message": legacy["message"],
+                        "checkpoint": {},
+                        "result": {"outputPath": legacy["output_path"]} if legacy["output_path"] else None,
+                        "errorCode": None,
+                        "createdAt": legacy["created_at"],
+                        "updatedAt": legacy["updated_at"],
+                    }
                 raise DomainError("NOT_FOUND", "Job not found")
             return {
                 "id": row["id"],
@@ -1526,6 +1660,28 @@ class Store:
                 }
                 for row in db.execute(query, params)
             ]
+
+    def wait_for_events(self, after: int, timeout: float, limit: int = 500) -> list[dict[str, Any]]:
+        """Wait for durable events without polling the database while idle."""
+
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        with self._event_condition:
+            observed_generation = self._event_generation
+        while True:
+            events = self.events(after, limit)
+            if events:
+                return events
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return []
+            with self._event_condition:
+                if observed_generation == self._event_generation:
+                    self._event_condition.wait(remaining)
+                else:
+                    # A writer may have notified immediately before its SQLite
+                    # transaction committed. Yield briefly, then retry the read.
+                    self._event_condition.wait(min(0.05, remaining))
+                observed_generation = self._event_generation
 
     def latest_event_sequence(self, db: sqlite3.Connection | None = None) -> int:
         owns = db is None
@@ -1589,7 +1745,12 @@ class Store:
                     now_iso(),
                 ),
             )
-        return self.render_plan(plan["id"])
+            row = db.execute(
+                "SELECT plan_json FROM render_plans WHERE plan_digest=?", (plan["planDigest"],)
+            ).fetchone()
+            if not row:
+                raise DomainError("INTERNAL_ERROR", "Render plan could not be persisted")
+            return json.loads(row[0])
 
     def render_plan(self, plan_id: str) -> dict[str, Any]:
         with self.connect() as db:
@@ -1827,6 +1988,22 @@ def _raw_timestamp_from_evidence(record: MediaRecord) -> object | None:
         if item.field == "captured_at" and item.origin != "library-time-policy":
             return item.raw_value if item.raw_value is not None else item.value
     return None
+
+
+def _stable_migration_id(prefix: str, *parts: object) -> str:
+    return f"{prefix}_{digest_json([str(part) for part in parts])[:24]}"
+
+
+def _identity_key_from_fingerprint(fingerprint: dict[str, Any]) -> str | None:
+    material = {
+        "device": fingerprint.get("device"),
+        "inode": fingerprint.get("inode"),
+        "size": fingerprint.get("size"),
+        "sampleSha256": fingerprint.get("sampleSha256"),
+    }
+    if any(material.get(key) is None for key in material):
+        return None
+    return digest_json(material)
 
 
 def _contains(parent: Path, child: Path) -> bool:

@@ -64,6 +64,28 @@ class StoreV1Tests(unittest.TestCase):
         self.scan("FULL", [one])
         self.assertTrue(self.store.media_record("two")["missing"])
 
+    def test_canceled_full_scan_cannot_commit_success_or_reuse_generation(self):
+        one = self.record("one", "one.mp4")
+        two = self.record("two", "two.mp4")
+        first = self.scan("FULL", [one, two])
+        interrupted = self.store.begin_scan(self.library["id"], "FULL")
+        self.store.save_media_batch(interrupted["id"], [one])
+        self.store.scan_progress(interrupted["id"])
+        self.store.cancel_scan(interrupted["id"])
+        self.store.finish_scan(interrupted["id"], "SUCCEEDED", {"videos": 1})
+        self.assertEqual(self.store.scan(interrupted["id"])["status"], "CANCELED")
+        self.assertEqual(self.store.job(interrupted["id"])["status"], "CANCELED")
+        self.assertFalse(self.store.media_record("two")["missing"])
+        self.assertEqual(self.store.library(self.library["id"])["currentGeneration"], first["generation"])
+        next_scan = self.store.begin_scan(self.library["id"], "INCREMENTAL")
+        self.assertEqual(next_scan["generation"], interrupted["generation"] + 1)
+
+    def test_scan_generation_advances_past_migrated_library_counter(self):
+        with self.store.connect() as db:
+            db.execute("DELETE FROM scan_generations WHERE library_id=?", (self.library["id"],))
+            db.execute("UPDATE libraries SET current_generation=7 WHERE id=?", (self.library["id"],))
+        self.assertEqual(self.store.begin_scan(self.library["id"], "FULL")["generation"], 8)
+
     def test_media_cursor_stays_on_snapshot_and_excludes_new_records(self):
         self.scan("FULL", [self.record("a", "a.mp4"), self.record("b", "b.mp4")])
         first = self.store.media_page(self.library["id"], limit=1)
@@ -127,6 +149,13 @@ class StoreV1Tests(unittest.TestCase):
         with self.assertRaisesRegex(DomainError, "revoked"):
             self.store.library_root(self.library["id"])
 
+    def test_legacy_library_without_grant_is_fail_closed(self):
+        with self.store.connect() as db:
+            db.execute("UPDATE libraries SET grant_id=NULL WHERE id=?", (self.library["id"],))
+        with self.assertRaises(DomainError) as raised:
+            self.store.library_root(self.library["id"])
+        self.assertEqual(raised.exception.code, "GRANT_REQUIRED")
+
     def test_project_rejects_media_from_a_different_library(self):
         self.scan("FULL", [self.record("one", "one.mp4")])
         other_root = Path(self.temp.name) / "other-source"
@@ -166,6 +195,36 @@ class StoreV1Tests(unittest.TestCase):
         self.assertEqual(self.store.media_record("asset-original")["relative_path"], "new-name.mp4")
         with self.assertRaises(DomainError):
             self.store.media_record("path-derived-new-id")
+
+    def test_path_swap_preserves_both_asset_identities(self):
+        first_path = self.root / "first.mp4"
+        second_path = self.root / "second.mp4"
+        first_path.write_bytes(b"first stable bytes")
+        second_path.write_bytes(b"second stable bytes")
+
+        def media(media_id: str, path: Path) -> MediaRecord:
+            return MediaRecord(
+                media_id,
+                self.library["id"],
+                path.name,
+                path.stat().st_size,
+                path.stat().st_mtime_ns,
+                duration=1,
+                duration_us=1_000_000,
+                fingerprint=quick_fingerprint(path),
+            )
+
+        self.scan("FULL", [media("asset-first", first_path), media("asset-second", second_path)])
+        temporary = self.root / "swap.tmp"
+        first_path.rename(temporary)
+        second_path.rename(first_path)
+        temporary.rename(second_path)
+        scan = self.store.begin_scan(self.library["id"], "FULL")
+        self.store.save_media_batch(scan["id"], [media("new-at-first", first_path)])
+        self.store.save_media_batch(scan["id"], [media("new-at-second", second_path)])
+        self.store.finish_scan(scan["id"], "SUCCEEDED", {"videos": 2})
+        self.assertEqual(self.store.media_record("asset-second")["relative_path"], "first.mp4")
+        self.assertEqual(self.store.media_record("asset-first")["relative_path"], "second.mp4")
 
     def test_library_time_policy_renormalizes_without_losing_raw_evidence(self):
         media = self.record("clock", "clock.mp4")
@@ -209,6 +268,45 @@ class StoreV1Tests(unittest.TestCase):
         self.assertTrue(migrated["legacy"]["unknownRecoveryField"]["retain"])
         self.assertEqual(migrated["migration"]["rounding"], "half-even")
         self.assertIsNone(migrated["review"])
+        repeated = self.store.project("legacy-project")
+        self.assertEqual(
+            [item["id"] for item in migrated["logicalSources"]],
+            [item["id"] for item in repeated["logicalSources"]],
+        )
+        self.assertEqual(
+            [item["id"] for item in migrated["clips"]],
+            [item["id"] for item in repeated["clips"]],
+        )
+
+    def test_legacy_job_is_exposed_with_canonical_shape(self):
+        self.scan("FULL", [self.record("one", "one.mp4")])
+        project = self.store.create_project("Event", self.library["id"], ["one"])
+        with self.store.connect() as db:
+            db.execute(
+                "INSERT INTO render_jobs(id,project_id,status,output_path,progress,message) VALUES(?,?,?,?,?,?)",
+                ("legacy-job", project["id"], "complete", "/redacted/output.mp4", 1, "Done"),
+            )
+        job = self.store.job("legacy-job")
+        self.assertEqual(job["kind"], "RENDER")
+        self.assertEqual(job["status"], "SUCCEEDED")
+        self.assertEqual(job["projectId"], project["id"])
+        self.assertEqual(job["checkpoint"], {})
+
+    def test_duplicate_render_plan_digest_returns_original_plan(self):
+        self.scan("FULL", [self.record("plan-media", "plan.mp4")])
+        project = self.store.create_project("Plan", self.library["id"], ["plan-media"])
+        base = {
+            "projectId": project["id"],
+            "projectRevision": 1,
+            "planDigest": "same-digest",
+            "sourceSetDigest": "sources",
+            "provenanceRevision": 0,
+            "status": "READY",
+        }
+        first = self.store.save_render_plan({"id": "plan-one", **base})
+        second = self.store.save_render_plan({"id": "plan-two", **base})
+        self.assertEqual(first["id"], "plan-one")
+        self.assertEqual(second["id"], "plan-one")
 
 
 if __name__ == "__main__":

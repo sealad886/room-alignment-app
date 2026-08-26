@@ -9,7 +9,20 @@ from pathlib import Path
 from room_alignment.scanner import iter_scan_records
 
 
-@unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg toolchain required")
+def _ffmpeg_major() -> int:
+    try:
+        output = subprocess.run(
+            ["ffmpeg", "-version"], capture_output=True, text=True, check=False, timeout=3
+        ).stdout
+        return int(output.split()[2].split(".", 1)[0])
+    except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+        return 0
+
+
+@unittest.skipUnless(
+    shutil.which("ffmpeg") and shutil.which("ffprobe") and _ffmpeg_major() >= 6,
+    "FFmpeg 6+ toolchain required",
+)
 class MediaCompatibilityMatrixTests(unittest.TestCase):
     def ffmpeg(self, *arguments: str) -> None:
         result = subprocess.run(

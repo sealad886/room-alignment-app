@@ -43,6 +43,15 @@ class TimeTransformTests(unittest.TestCase):
 
 
 class ProgramCompilerTests(unittest.TestCase):
+    def test_empty_video_program_is_blocking(self):
+        media = asset("a", "Door", 5_000_000)
+        project = new_project("Event", "lib", [media], "project")
+        project["videoBlocks"] = []
+        project["audioBlocks"] = []
+        compiled = compile_program(project, {"a": media})
+        self.assertFalse(compiled["valid"])
+        self.assertIn("VIDEO_GAP", {item["code"] for item in compiled["issues"]})
+
     def test_one_logical_source_block_compiles_across_consecutive_clips(self):
         assets = [asset("a", "Door", 5_000_000), asset("b", "Door", 5_000_000)]
         project = new_project("Event", "lib", assets, "project")
@@ -130,8 +139,60 @@ class ProgramCompilerTests(unittest.TestCase):
         self.assertTrue(compiled["audioSlices"][0]["synthetic"])
         self.assertEqual(program_at(compiled, 1_000_000)["audio"]["mode"], "SILENCE")
 
+    def test_independent_audio_offset_and_rate_compile_to_exact_source_range(self):
+        media = asset("a", "Door", 5_000_000)
+        project = new_project("Event", "lib", [media], "project")
+        project["audioBlocks"][0].update(offsetUs=1_000, ratePpm=1_000)
+        compiled = compile_program(project, {"a": media})
+        audio = compiled["audioSlices"][0]
+        expected_duration = SyncTransform(rate_ppm=1_000).output_to_source(5_000_000)
+        self.assertEqual(audio["sourceStartUs"], 1_000)
+        self.assertEqual(audio["sourceEndUs"], expected_duration + 1_000)
+        self.assertIn("audio rate correction 1000 ppm", audio["transforms"])
+
 
 class CommandTests(unittest.TestCase):
+    def test_malformed_payload_is_a_stable_validation_error(self):
+        media = asset("a", "Door", 5_000_000)
+        project = new_project("Event", "lib", [media], "project")
+        with self.assertRaises(DomainError) as raised:
+            apply_command(project, "RenameLogicalSource", {}, {"a": media})
+        self.assertEqual(raised.exception.code, "VALIDATION_FAILED")
+        with self.assertRaises(DomainError) as unknown:
+            apply_command(
+                project,
+                "UpdateProjectMetadata",
+                {"name": "Okay", "future": True},
+                {"a": media},
+            )
+        self.assertEqual(unknown.exception.code, "VALIDATION_FAILED")
+
+    def test_merge_preserves_reference_source_and_cut_uses_requested_block_id(self):
+        assets = [asset("a", "Door", 5_000_000), asset("b", "Yard", 5_000_000)]
+        project = new_project("Event", "lib", assets, "project")
+        target, merged = project["logicalSources"]
+        target["reference"] = False
+        merged["reference"] = True
+        project = apply_command(
+            project,
+            "MergeLogicalSources",
+            {"targetSourceId": target["id"], "sourceIds": [merged["id"]]},
+            {item["id"]: item for item in assets},
+        )
+        self.assertTrue(project["logicalSources"][0]["reference"])
+        project = apply_command(
+            project,
+            "CutToSource",
+            {
+                "blockId": project["videoBlocks"][0]["id"],
+                "atUs": 2_500_000,
+                "logicalSourceId": target["id"],
+                "newBlockId": "known-cut",
+            },
+            {item["id"]: item for item in assets},
+        )
+        cut = next(item for item in project["videoBlocks"] if item["id"] == "known-cut")
+        self.assertEqual(cut["startUs"], 2_500_000)
     def test_program_time_sync_change_keeps_video_boundaries(self):
         media = asset("a", "Door", 5_000_000)
         project = new_project("Event", "lib", [media], "project")

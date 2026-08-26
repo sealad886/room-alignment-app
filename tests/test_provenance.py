@@ -4,6 +4,7 @@ import unittest
 from pathlib import Path
 
 from room_alignment.provenance import infer_from_path, merge_evidence, normalize_timestamp, read_sidecar
+from room_alignment.scanner import media_record_from_dict
 
 
 class ProvenanceTests(unittest.TestCase):
@@ -56,6 +57,34 @@ class ProvenanceTests(unittest.TestCase):
         self.assertIsNone(rejected["resolvedUtc"])
         self.assertEqual(shifted["ambiguity"], "NONEXISTENT_SHIFTED_FORWARD")
         self.assertIsNotNone(shifted["resolvedUtc"])
+
+    def test_invalid_zone_key_is_disclosed_without_raising(self):
+        outcome = normalize_timestamp("2026-01-01T00:00:00", "../UTC")
+        self.assertEqual(outcome["ambiguity"], "INVALID_TIME_ZONE")
+        self.assertIsNone(outcome["resolvedUtc"])
+
+    def test_future_evidence_fields_survive_under_custom_metadata(self):
+        record = media_record_from_dict(
+            {
+                "id": "asset",
+                "library_id": "library",
+                "relative_path": "clip.mp4",
+                "size": 1,
+                "modified_ns": 1,
+                "evidence": [
+                    {
+                        "kind": "importer",
+                        "field": "captured_at",
+                        "value": "raw",
+                        "confidence": 0.5,
+                        "origin": "future",
+                        "futureField": {"preserve": True},
+                    }
+                ],
+            }
+        )
+        self.assertEqual(record.evidence[0].custom["futureField"], {"preserve": True})
+        self.assertEqual(record.to_dict()["evidence"][0]["custom"]["futureField"], {"preserve": True})
 
 
 if __name__ == "__main__":
