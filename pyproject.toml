@@ -3,6 +3,7 @@ name = "room-alignment"
 version = "0.2.0"
 description = "Local-first multi-camera video alignment and single-view editing"
 requires-python = ">=3.11"
+license = "Apache-2.0"
 
 [project.scripts]
 room-alignment = "room_alignment.server:main"

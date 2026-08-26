@@ -67,6 +67,18 @@ python3 scripts/state_admin.py restore /path/to/room-alignment.sqlite3 /separate
 
 Restore refuses to run while the application owns the state directory and creates a verified rollback copy before replacement. Source media is never included in application-state backup.
 
+## License
+
+Room Alignment is licensed under the [Apache License 2.0](LICENSE).
+Copyright 2026 Andrew M. Cox.
+
+FFmpeg and FFprobe are separate, user-supplied programs and are not distributed
+as part of Room Alignment. Their own license terms apply.
+
+## Project status
+
+Current implementation provides real scanning, alignment/edit-decision persistence, preflight, manifest generation, FFmpeg rendering, render cancellation, and connected browser UI. See [runbook](docs/runbook.md), [architecture](docs/architecture.md), and [risk register](docs/risk-register.md).
+
 ## Delivery state
 
 This repository is a local source release candidate only when the requirement ledger and verification report say so. Packaging, installation, signing, notarization, publication, deployment, and distribution are separate authority states.
