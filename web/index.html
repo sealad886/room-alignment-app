@@ -42,10 +42,39 @@
           <div class="source-rule"><span>Original video access</span><strong>Strictly read-only</strong></div>
         </aside>
         <div class="library-main">
-          <div class="section-head"><div><p class="eyebrow">Indexed libraries</p><h2>Dates and source groups</h2></div><span class="mono" id="library-count">No library indexed</span></div>
+          <div class="section-head"><div><p class="eyebrow">Indexed libraries</p><h2>Sessions and events</h2></div><span class="mono" id="library-count">No library indexed</span></div>
           <div id="scan-progress" class="progress-panel hidden" role="status" aria-live="polite"><div><strong>Reading metadata</strong><span id="scan-count">0 clips</span></div><div class="meter"><i></i></div><p>Index may continue while you work. Source files are never opened for writing.</p></div>
           <div id="library-empty" class="empty-state"><div class="signal-art" aria-hidden="true"><i></i><i></i><i></i><i></i></div><h2>Bring scattered clips onto one clock</h2><p>Add one or more read-only folders, then scan them together. Folder layout and vendor metadata remain evidence—not requirements.</p></div>
-          <div id="library-content" class="hidden"><div class="library-actions"><div id="library-list" class="library-list"></div><button class="btn" id="load-more-media">Load more</button><div class="source-confirmation"><label class="check compact"><input id="confirm-source-groups" type="checkbox"><span><strong>Confirm proposed logical sources</strong><small id="source-group-summary">Select an event to review source candidates.</small></span></label></div><button class="btn primary" id="open-event" disabled>Create project from selected clips</button></div><div class="media-table-wrap"><table><thead><tr><th><input id="select-group" type="checkbox" aria-label="Select all clips in this event"></th><th>Captured</th><th>Source label</th><th>Duration</th><th>Format</th><th>Provenance</th></tr></thead><tbody id="media-table"></tbody></table></div></div>
+          <div id="library-content" class="hidden">
+            <div class="cluster-toolbar">
+              <div><p class="eyebrow">Grouping rules</p><strong id="cluster-status">Create an immutable session map after scanning</strong></div>
+              <label class="field compact"><span>Event gap (seconds)</span><input id="event-gap" type="number" min="0" max="3600" step="1" value="15"></label>
+              <label class="field compact"><span>Session gap (seconds)</span><input id="session-gap" type="number" min="0" max="86400" step="1" value="120"></label>
+              <button class="btn primary" id="generate-clusters">Group into sessions &amp; events</button>
+            </div>
+            <div class="session-layout">
+              <div class="session-browser">
+                <div class="session-filters" aria-label="Session filters">
+                  <label><span>Date</span><input id="session-date-filter" type="date"></label>
+                  <label><span>Folder</span><select id="session-root-filter"><option value="">All folders</option></select></label>
+                  <label><span>Source candidate</span><select id="session-source-filter"><option value="">All candidates</option></select></label>
+                  <label class="check-inline"><input id="session-warning-filter" type="checkbox"> Warnings only</label>
+                  <button class="btn" id="show-unclustered">Unclustered</button>
+                </div>
+                <div id="session-explorer" class="session-explorer"><div class="empty-compact">Scan folders, then group media into sessions and events.</div></div>
+                <button class="btn wide" id="load-more-sessions" disabled>All sessions loaded</button>
+              </div>
+              <aside id="project-selection" class="selection-tray" aria-live="polite">
+                <p class="eyebrow">Project selection</p><h3 id="selection-title">Nothing selected</h3>
+                <dl id="selection-summary"><div><dt>Exact clips</dt><dd>0</dd></div><div><dt>Evidence span</dt><dd>—</dd></div><div><dt>Folders</dt><dd>—</dd></div><div><dt>Source candidates</dt><dd>—</dd></div></dl>
+                <div id="selection-warnings" class="selection-warnings">Select one or more sessions or events.</div>
+                <label class="field compact"><span>Project name</span><input id="selection-project-name" maxlength="200" value="Aligned security footage"></label>
+                <button class="btn primary wide" id="open-event" disabled>Create alignment project</button>
+              </aside>
+            </div>
+            <div class="membership-head"><div><p class="eyebrow">Exact media</p><h3 id="membership-title">Choose a session or event to inspect</h3></div><button class="btn" id="load-more-media" disabled>All loaded</button></div>
+            <div class="media-table-wrap"><table><thead><tr><th>Use</th><th>Captured</th><th>Source label</th><th>Duration</th><th>Format</th><th>Provenance</th></tr></thead><tbody id="media-table"></tbody></table></div>
+          </div>
         </div>
       </section>
 

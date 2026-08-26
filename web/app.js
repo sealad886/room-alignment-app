@@ -2,7 +2,6 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const colors = ["#74c9bd", "#dda96a", "#8faed2", "#b58ccc", "#91bd7c", "#d28282"];
 const MEDIA_TABLE_LIMIT = 500;
-const EVENT_GAP_US = 120_000_000;
 const {RoomAlignmentAPIClient, APIError} = window.RoomAlignmentAPI;
 const client = new RoomAlignmentAPIClient();
 
@@ -14,11 +13,23 @@ const state = {
   mediaCursor: null,
   mediaGeneration: null,
   projects: [],
-  groups: [],
-  group: [],
-  presentedGroup: [],
-  groupName: null,
-  selectedMedia: new Set(),
+  clusterGeneration: null,
+  clusterFacets: {roots: [], sourceCandidates: []},
+  sessions: [],
+  sessionCursor: null,
+  eventsBySession: new Map(),
+  expandedSessions: new Set(),
+  selectedSessions: new Set(),
+  selectedEvents: new Set(),
+  manualIncludeAssetIds: new Set(),
+  manualExcludeAssetIds: new Set(),
+  selectionPreview: null,
+  selectionPreviewVersion: 0,
+  inspectedCluster: null,
+  inspectedMemberships: [],
+  inspectedCursor: null,
+  showingUnclustered: false,
+  clusterJob: null,
   project: null,
   compiled: null,
   sources: [],
@@ -67,6 +78,10 @@ function formatUs(valueUs = 0) {
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}.${String(Math.abs(milliseconds) % 1000).padStart(3, "0")}`;
 }
 
+function countLabel(count, singular, plural = `${singular}s`) {
+  return `${Number(count).toLocaleString()} ${Number(count) === 1 ? singular : plural}`;
+}
+
 function normalizeInteger(value, fallback = 0) {
   const number = Number(value);
   return Number.isFinite(number) ? Math.round(number) : fallback;
@@ -74,67 +89,6 @@ function normalizeInteger(value, fallback = 0) {
 
 function mediaLabel(media) {
   return media?.camera || media?.relative_path?.split("/").at(-2) || "Unlabelled source";
-}
-
-function groupKey(media) {
-  return (media.captured_at || "Undated").slice(0, 10);
-}
-
-function capturedUs(media) {
-  const milliseconds = Date.parse(media.captured_at || "");
-  return Number.isFinite(milliseconds) ? milliseconds * 1000 : null;
-}
-
-function eventGroups(items) {
-  const timed = items.filter(item => capturedUs(item) !== null)
-    .sort((left, right) => capturedUs(left) - capturedUs(right) || left.id.localeCompare(right.id));
-  const groups = [];
-  let current = [];
-  let coveredUntilUs = 0;
-  for (const item of timed) {
-    const startUs = capturedUs(item);
-    const endUs = startUs + Math.max(0, Number(item.durationUs || 0));
-    if (current.length && startUs > coveredUntilUs + EVENT_GAP_US) {
-      groups.push(current);
-      current = [];
-    }
-    current.push(item);
-    coveredUntilUs = Math.max(coveredUntilUs, endUs);
-  }
-  if (current.length) groups.push(current);
-  const untimed = items.filter(item => capturedUs(item) === null);
-  if (untimed.length) groups.push(untimed);
-  return groups.map((group, index) => {
-    const first = group[0];
-    const last = group.at(-1);
-    const firstDate = capturedUs(first) === null ? null : new Date(capturedUs(first) / 1000);
-    const lastDate = capturedUs(last) === null ? null : new Date(capturedUs(last) / 1000);
-    const label = firstDate
-      ? `${firstDate.toLocaleDateString([], {year: "numeric", month: "short", day: "numeric"})} · ${firstDate.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"})}${lastDate && lastDate.getTime() !== firstDate.getTime() ? `–${lastDate.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"})}` : ""}`
-      : `Undated clips ${index + 1}`;
-    return [label, group];
-  });
-}
-
-function proposedSourceGroups(items) {
-  return groupBy(items, item => {
-    const resolvedLabel = String(item.camera || "").trim().toLocaleLowerCase();
-    return resolvedLabel ? `label-evidence:${resolvedLabel}` : (item.sourceCandidateId || `asset:${item.id}`);
-  }).map(([candidateKey, assets], index) => ({
-    candidateKey,
-    label: mediaLabel(assets[0]) || `Source ${index + 1}`,
-    assetIds: assets.map(item => item.id),
-  }));
-}
-
-function groupBy(items, keyFunction) {
-  const groups = new Map();
-  for (const item of items) {
-    const key = keyFunction(item);
-    if (!groups.has(key)) groups.set(key, []);
-    groups.get(key).push(item);
-  }
-  return [...groups.entries()];
 }
 
 function currentOutputUs() {
@@ -250,6 +204,7 @@ async function loadLibraries() {
   state.library = libraries[0];
   syncLibraryControls();
   await loadMediaPage(true);
+  await loadClusterGeneration();
 }
 
 function syncLibraryControls() {
@@ -291,6 +246,7 @@ function renderLibraryRoots() {
         await client.revokeLibraryRoot({libraryId: state.library.id, rootId: root.id}, {});
         await refreshCurrentLibrary();
         await loadMediaPage(true);
+        await loadClusterGeneration();
         toast("Folder disconnected; indexed records and decisions were preserved");
       } catch (error) { handleError(error); }
     };
@@ -312,10 +268,6 @@ async function loadMediaPage(reset = false) {
     state.mediaById.clear();
     state.mediaCursor = null;
     state.mediaGeneration = null;
-    state.groups = [];
-    state.group = [];
-    state.groupName = null;
-    state.selectedMedia = new Set();
   }
   const query = new URLSearchParams({limit: "500"});
   if (state.mediaCursor) query.set("cursor", state.mediaCursor);
@@ -327,8 +279,6 @@ async function loadMediaPage(reset = false) {
     if (!state.mediaById.has(media.id)) state.media.push(media);
     state.mediaById.set(media.id, media);
   }
-  $("#load-more-media").disabled = !state.mediaCursor;
-  $("#load-more-media").textContent = state.mediaCursor ? "Load more" : "All loaded";
   renderLibrary(page.total);
 }
 
@@ -349,67 +299,341 @@ function renderLibrary(total = state.media.length) {
   $("#library-empty").classList.toggle("hidden", state.media.length > 0);
   $("#library-content").classList.toggle("hidden", state.media.length === 0);
   $("#library-count").textContent = `${state.media.length.toLocaleString()} of ${Number(total).toLocaleString()} clips loaded · generation ${state.mediaGeneration}`;
-  state.groups = eventGroups(state.media);
-  $("#library-list").innerHTML = state.groups.slice(0, 40).map(([date, items], index) => `
-    <button class="library-card${index === 0 ? " active" : ""}" data-group-index="${index}">
-      <strong>${safe(date)}</strong>
-      <small>${items.length} clips · ${proposedSourceGroups(items).length} proposed sources</small>
-    </button>`).join("");
-  if (!state.group.length && state.groups.length) selectGroup(0);
-  else if (state.groupName) {
-    const index = state.groups.findIndex(([name]) => name === state.groupName);
-    if (index >= 0) selectGroup(index);
+}
+
+function resetClusterState() {
+  state.clusterGeneration = null;
+  state.clusterFacets = {roots: [], sourceCandidates: []};
+  state.sessions = [];
+  state.sessionCursor = null;
+  state.eventsBySession = new Map();
+  state.expandedSessions = new Set();
+  state.selectedSessions = new Set();
+  state.selectedEvents = new Set();
+  state.manualIncludeAssetIds = new Set();
+  state.manualExcludeAssetIds = new Set();
+  state.selectionPreview = null;
+  state.inspectedCluster = null;
+  state.inspectedMemberships = [];
+  state.inspectedCursor = null;
+  state.showingUnclustered = false;
+}
+
+async function loadClusterGeneration() {
+  resetClusterState();
+  if (!state.library || state.library.catalogRevision < 1) return renderSessionExplorer();
+  const page = await client.listClusterGenerations({
+    libraryId: state.library.id,
+    query: {limit: 50},
+  });
+  state.clusterGeneration = page.items.find(item =>
+    item.status === "SUCCEEDED" && item.catalogRevision === state.library.catalogRevision
+  ) || null;
+  if (!state.clusterGeneration) return renderSessionExplorer();
+  state.clusterFacets = await client.getClusterFacets({
+    clusterGenerationId: state.clusterGeneration.id,
+  });
+  renderClusterFilters();
+  await loadSessions(true);
+}
+
+function clusterFilterQuery() {
+  const query = {limit: 100};
+  const rootId = $("#session-root-filter").value;
+  const sourceCandidateId = $("#session-source-filter").value;
+  if (rootId) query.rootId = rootId;
+  if (sourceCandidateId) query.sourceCandidateId = sourceCandidateId;
+  if ($("#session-warning-filter").checked) query.warning = true;
+  const date = $("#session-date-filter").value;
+  if (date) {
+    const start = new Date(`${date}T00:00:00`);
+    const end = new Date(start);
+    end.setDate(end.getDate() + 1);
+    query.startUs = start.getTime() * 1000;
+    query.endUs = end.getTime() * 1000;
   }
-  $$('[data-group-index]').forEach(button => {
-    button.onclick = () => {
-      $$('[data-group-index]').forEach(item => item.classList.remove("active"));
-      button.classList.add("active");
-      selectGroup(Number(button.dataset.groupIndex));
-    };
-  });
+  return query;
 }
 
-function selectGroup(index) {
-  const selected = state.groups[index];
-  if (!selected) return;
-  [state.groupName, state.group] = selected;
-  state.presentedGroup = state.group.slice(0, MEDIA_TABLE_LIMIT);
-  state.selectedMedia = new Set(state.presentedGroup.map(item => item.id));
-  $("#media-table").innerHTML = state.presentedGroup.map(item => `
-    <tr data-media="${safe(item.id)}">
-      <td><input class="media-select" type="checkbox" value="${safe(item.id)}" checked aria-label="Include ${safe(mediaLabel(item))} clip"></td>
-      <td class="mono">${safe(item.captured_at?.replace("T", " ") || "Unknown")}</td>
-      <td>${safe(mediaLabel(item))}<br><small>${safe(item.relative_path)}</small></td>
-      <td class="mono">${item.durationUs == null ? "Unknown" : formatUs(item.durationUs)}</td>
-      <td>${safe(item.video_codec || "unsupported")}${item.width ? ` · ${item.width}×${item.height}` : ""}${item.audio_codec ? `<br><small>${safe(item.audio_codec)} · ${safe(item.sample_rate || "?")} Hz</small>` : "<br><small>No usable audio reported</small>"}</td>
-      <td><span class="evidence-count">${item.evidence?.length || 0} observations</span>${item.warning ? `<br><small>△ ${safe(item.warning)}</small>` : ""}</td>
-    </tr>`).join("");
-  $$("#media-table tr").forEach(row => { row.ondblclick = createProjectFromGroup; });
-  $("#select-group").checked = true;
-  $("#select-group").indeterminate = false;
-  $$(".media-select").forEach(input => {
+function renderClusterFilters() {
+  const roots = state.clusterFacets.roots || [];
+  const candidates = state.clusterFacets.sourceCandidates || [];
+  $("#session-root-filter").innerHTML = `<option value="">All folders</option>${roots.map(item =>
+    `<option value="${safe(item.id)}">${safe(item.label)} · ${Number(item.clipCount).toLocaleString()}</option>`
+  ).join("")}`;
+  $("#session-source-filter").innerHTML = `<option value="">All candidates</option>${candidates.map(item =>
+    `<option value="${safe(item.id)}">${safe(item.label)} · ${Number(item.clipCount).toLocaleString()}</option>`
+  ).join("")}`;
+}
+
+async function loadSessions(reset = false) {
+  if (!state.clusterGeneration) return renderSessionExplorer();
+  if (reset) {
+    state.sessions = [];
+    state.sessionCursor = null;
+    state.eventsBySession = new Map();
+    state.expandedSessions = new Set();
+  }
+  const query = clusterFilterQuery();
+  if (state.sessionCursor) query.cursor = state.sessionCursor;
+  const page = await client.listSessionClusters({
+    clusterGenerationId: state.clusterGeneration.id,
+    query,
+  });
+  state.sessions.push(...page.items);
+  state.sessionCursor = page.nextCursor;
+  renderSessionExplorer();
+}
+
+function clusterTimeLabel(item) {
+  const start = new Date(Number(item.startUs) / 1000);
+  const end = new Date(Number(item.endUs) / 1000);
+  const date = start.toLocaleDateString([], {year: "numeric", month: "short", day: "numeric"});
+  const time = value => value.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+  return `${date} · ${time(start)}–${time(end)}`;
+}
+
+function renderSessionExplorer() {
+  const status = $("#cluster-status");
+  $("#generate-clusters").disabled = !state.library?.catalogRevision || Boolean(state.clusterJob);
+  $("#show-unclustered").disabled = !state.clusterGeneration;
+  if (!state.clusterGeneration) {
+    status.textContent = state.library?.catalogRevision
+      ? "No session map matches the latest catalog scan"
+      : "Complete a scan before grouping media";
+    $("#session-explorer").innerHTML = '<div class="empty-compact">Group the latest catalog into immutable sessions and events.</div>';
+    $("#load-more-sessions").disabled = true;
+    renderSelectionTray();
+    return;
+  }
+  status.textContent = `${countLabel(state.clusterGeneration.sessionCount, "session")} · ${countLabel(state.clusterGeneration.eventCount, "event")} · catalog revision ${state.clusterGeneration.catalogRevision}`;
+  $("#event-gap").value = String(state.clusterGeneration.config.eventGapUs / 1_000_000);
+  $("#session-gap").value = String(state.clusterGeneration.config.sessionGapUs / 1_000_000);
+  $("#session-explorer").innerHTML = state.sessions.map(session => {
+    const expanded = state.expandedSessions.has(session.id);
+    const selected = state.selectedSessions.has(session.id);
+    const eventPage = state.eventsBySession.get(session.id);
+    const eventRows = expanded ? (eventPage?.items || []).map(event => {
+      const eventSelected = state.selectedEvents.has(event.id);
+      return `<div class="event-row${eventSelected ? " selected" : ""}" data-inspect-kind="EVENT" data-inspect-id="${safe(event.id)}" data-parent-session="${safe(session.id)}">
+        <span></span><input class="event-select" data-event-id="${safe(event.id)}" data-session-id="${safe(session.id)}" type="checkbox" ${eventSelected ? "checked" : ""} ${selected ? "disabled" : ""} aria-label="Select event ${safe(clusterTimeLabel(event))}">
+        <button class="cluster-copy" data-inspect-kind="EVENT" data-inspect-id="${safe(event.id)}" data-parent-session="${safe(session.id)}"><strong>${safe(clusterTimeLabel(event))}</strong><small>${countLabel(event.clipCount, "clip")} · ${countLabel(event.sourceCount, "source candidate")} · ${countLabel(event.rootCount, "folder")}</small></button>
+        <span class="cluster-metrics${event.warnings.length ? " cluster-warning" : ""}">${event.warnings.length ? `△ ${event.warnings.length} warning types` : "timed event"}</span>
+      </div>`;
+    }).join("") : "";
+    const moreEvents = expanded && eventPage?.nextCursor
+      ? `<button class="load-more-events" data-more-events="${safe(session.id)}">Load more events in this session</button>`
+      : "";
+    return `<div class="session-group"><div class="session-row${selected ? " selected" : ""}">
+      <button class="cluster-expand" data-expand-session="${safe(session.id)}" aria-expanded="${expanded}" aria-label="${expanded ? "Collapse" : "Expand"} session">${expanded ? "▾" : "▸"}</button>
+      <input class="session-select" data-session-id="${safe(session.id)}" type="checkbox" ${selected ? "checked" : ""} aria-label="Select session ${safe(clusterTimeLabel(session))}">
+      <button class="cluster-copy" data-inspect-kind="SESSION" data-inspect-id="${safe(session.id)}"><strong>${safe(clusterTimeLabel(session))}</strong><small>${countLabel(session.eventCount, "event")} · ${countLabel(session.clipCount, "clip")} · ${countLabel(session.sourceCount, "source candidate")}</small></button>
+      <span class="cluster-metrics${session.warnings.length ? " cluster-warning" : ""}">${session.rootCount} folder${session.rootCount === 1 ? "" : "s"}<br>${session.warnings.length ? `△ ${session.warnings.length} warning types` : "ready to inspect"}</span>
+    </div>${eventRows}${moreEvents}</div>`;
+  }).join("") || '<div class="empty-compact">No sessions match current filters.</div>';
+  $("#load-more-sessions").disabled = !state.sessionCursor;
+  $("#load-more-sessions").textContent = state.sessionCursor ? "Load more sessions" : "All sessions loaded";
+  $$('[data-expand-session]').forEach(button => { button.onclick = () => toggleSession(button.dataset.expandSession); });
+  $$(".session-select").forEach(input => { input.onchange = () => selectSession(input.dataset.sessionId, input.checked); });
+  $$(".event-select").forEach(input => { input.onchange = () => selectEvent(input.dataset.eventId, input.checked); });
+  $$('[data-more-events]').forEach(button => {
+    button.onclick = () => loadMoreSessionEvents(button.dataset.moreEvents).catch(handleError);
+  });
+  $$('[data-inspect-kind]').filter(node => node.matches("button.cluster-copy")).forEach(button => {
+    button.onclick = () => inspectCluster(button.dataset.inspectKind, button.dataset.inspectId, button.dataset.parentSession || null);
+  });
+  renderSelectionTray();
+}
+
+async function toggleSession(sessionId) {
+  if (state.expandedSessions.has(sessionId)) {
+    state.expandedSessions.delete(sessionId);
+    return renderSessionExplorer();
+  }
+  state.expandedSessions.add(sessionId);
+  if (!state.eventsBySession.has(sessionId)) {
+    const page = await client.listEventClusters({
+      clusterGenerationId: state.clusterGeneration.id,
+      query: {...clusterFilterQuery(), sessionId, limit: 500},
+    });
+    state.eventsBySession.set(sessionId, page);
+  }
+  renderSessionExplorer();
+}
+
+async function loadMoreSessionEvents(sessionId) {
+  const current = state.eventsBySession.get(sessionId);
+  if (!current?.nextCursor) return;
+  const page = await client.listEventClusters({
+    clusterGenerationId: state.clusterGeneration.id,
+    query: {
+      ...clusterFilterQuery(),
+      sessionId,
+      limit: 500,
+      cursor: current.nextCursor,
+    },
+  });
+  state.eventsBySession.set(sessionId, {
+    ...page,
+    items: [...current.items, ...page.items],
+  });
+  renderSessionExplorer();
+}
+
+function selectSession(sessionId, selected) {
+  if (selected) {
+    state.selectedSessions.add(sessionId);
+    for (const event of state.eventsBySession.get(sessionId)?.items || []) state.selectedEvents.delete(event.id);
+  } else state.selectedSessions.delete(sessionId);
+  renderSessionExplorer();
+  refreshSelectionPreview();
+}
+
+function selectEvent(eventId, selected) {
+  if (selected) state.selectedEvents.add(eventId); else state.selectedEvents.delete(eventId);
+  renderSessionExplorer();
+  refreshSelectionPreview();
+}
+
+async function inspectCluster(kind, clusterId, parentSessionId = null, append = false) {
+  if (!append) {
+    state.inspectedMemberships = [];
+    state.inspectedCursor = null;
+  }
+  state.showingUnclustered = kind === "UNCLUSTERED";
+  state.inspectedCluster = {kind, id: clusterId, parentSessionId};
+  const query = {limit: MEDIA_TABLE_LIMIT};
+  if (state.inspectedCursor) query.cursor = state.inspectedCursor;
+  const page = kind === "SESSION"
+    ? await client.listSessionMemberships({clusterId, query})
+    : kind === "EVENT"
+      ? await client.listEventMemberships({clusterId, query})
+      : await client.listUnclusteredMemberships({clusterGenerationId: state.clusterGeneration.id, query});
+  state.inspectedMemberships.push(...page.items);
+  state.inspectedCursor = page.nextCursor;
+  for (const item of page.items) state.mediaById.set(item.media.id, item.media);
+  renderMemberships();
+}
+
+function inspectedClusterSelected() {
+  const cluster = state.inspectedCluster;
+  if (!cluster) return false;
+  if (cluster.kind === "SESSION") return state.selectedSessions.has(cluster.id);
+  if (cluster.kind === "EVENT") {
+    return state.selectedEvents.has(cluster.id) || state.selectedSessions.has(cluster.parentSessionId);
+  }
+  return false;
+}
+
+function renderMemberships() {
+  const cluster = state.inspectedCluster;
+  $("#membership-title").textContent = cluster
+    ? `${cluster.kind === "UNCLUSTERED" ? "Unclustered media" : `${cluster.kind.toLocaleLowerCase()} membership`} · ${state.inspectedMemberships.length.toLocaleString()} shown`
+    : "Choose a session or event to inspect";
+  const baseSelected = inspectedClusterSelected();
+  $("#media-table").innerHTML = state.inspectedMemberships.map(item => {
+    const media = item.media;
+    const included = state.manualIncludeAssetIds.has(item.assetId) || (baseSelected && !state.manualExcludeAssetIds.has(item.assetId));
+    return `<tr data-media="${safe(item.assetId)}">
+      <td><input class="media-use" type="checkbox" value="${safe(item.assetId)}" ${included ? "checked" : ""} aria-label="Use ${safe(mediaLabel(media))} clip"></td>
+      <td class="mono">${safe(media.captured_at?.replace("T", " ") || "Unknown")}</td>
+      <td>${safe(mediaLabel(media))}<br><small>${safe(media.relative_path)}</small></td>
+      <td class="mono">${media.durationUs == null ? "Unknown" : formatUs(media.durationUs)}</td>
+      <td>${safe(media.video_codec || "unsupported")}${media.width ? ` · ${media.width}×${media.height}` : ""}${media.audio_codec ? `<br><small>${safe(media.audio_codec)} · ${safe(media.sample_rate || "?")} Hz</small>` : "<br><small>No usable audio reported</small>"}</td>
+      <td><span class="evidence-count">${media.evidence?.length || 0} observations</span>${item.warnings?.length ? `<br><small>△ ${safe(item.warnings.join(", "))}</small>` : ""}</td>
+    </tr>`;
+  }).join("") || '<tr><td colspan="6" class="muted">No media in this view.</td></tr>';
+  $$(".media-use").forEach(input => {
     input.onchange = () => {
-      if (input.checked) state.selectedMedia.add(input.value); else state.selectedMedia.delete(input.value);
-      const count = state.presentedGroup.filter(item => state.selectedMedia.has(item.id)).length;
-      $("#select-group").checked = count === state.presentedGroup.length;
-      $("#select-group").indeterminate = count > 0 && count < state.presentedGroup.length;
-      updateSourceGroupingConfirmation();
+      if (input.checked) {
+        state.manualExcludeAssetIds.delete(input.value);
+        if (!baseSelected) state.manualIncludeAssetIds.add(input.value);
+      } else {
+        state.manualIncludeAssetIds.delete(input.value);
+        if (baseSelected) state.manualExcludeAssetIds.add(input.value);
+      }
+      refreshSelectionPreview();
     };
   });
-  $("#event-title").textContent = state.group.length > state.presentedGroup.length
-    ? `${state.groupName} · showing ${state.presentedGroup.length} of ${state.group.length} clips; unshown clips are excluded`
-    : `${state.groupName} · ${state.group.length} clips`;
-  updateSourceGroupingConfirmation();
+  $("#load-more-media").disabled = !state.inspectedCursor;
+  $("#load-more-media").textContent = state.inspectedCursor ? "Load more exact media" : "All loaded";
 }
 
-function updateSourceGroupingConfirmation() {
-  const selected = state.group.filter(item => state.selectedMedia.has(item.id));
-  const groups = proposedSourceGroups(selected);
-  $("#source-group-summary").textContent = selected.length
-    ? `${groups.length} proposed logical source${groups.length === 1 ? "" : "s"} across ${selected.length} selected clip${selected.length === 1 ? "" : "s"}. Confirm to keep repeated clips from the same candidate together.`
-    : "Select clips to review proposed logical sources.";
-  $("#confirm-source-groups").checked = false;
-  $("#open-event").disabled = !selected.length || !$("#confirm-source-groups").checked;
+async function refreshSelectionPreview() {
+  const version = ++state.selectionPreviewVersion;
+  const hasSelection = state.selectedSessions.size || state.selectedEvents.size || state.manualIncludeAssetIds.size;
+  if (!state.clusterGeneration || !hasSelection) {
+    state.selectionPreview = null;
+    return renderSelectionTray();
+  }
+  try {
+    const preview = await client.previewProjectSelection(
+      {clusterGenerationId: state.clusterGeneration.id},
+      selectionPayload(),
+    );
+    if (version !== state.selectionPreviewVersion) return;
+    state.selectionPreview = preview;
+    renderSelectionTray();
+  } catch (error) {
+    if (version === state.selectionPreviewVersion) handleError(error);
+  }
+}
+
+function selectionPayload() {
+  return {
+    sessionIds: [...state.selectedSessions],
+    eventIds: [...state.selectedEvents],
+    includeAssetIds: [...state.manualIncludeAssetIds],
+    excludeAssetIds: [...state.manualExcludeAssetIds],
+  };
+}
+
+function renderSelectionTray() {
+  const preview = state.selectionPreview;
+  const clusterCount = state.selectedSessions.size + state.selectedEvents.size;
+  $("#selection-title").textContent = clusterCount
+    ? `${countLabel(state.selectedSessions.size, "session")} · ${countLabel(state.selectedEvents.size, "event")}`
+    : (state.manualIncludeAssetIds.size ? "Manual media selection" : "Nothing selected");
+  $("#selection-summary").innerHTML = `<div><dt>Exact clips</dt><dd>${preview ? preview.exactAssetCount.toLocaleString() : "0"}</dd></div>
+    <div><dt>Evidence span</dt><dd>${preview ? formatUs(preview.evidenceSpanUs) : "—"}</dd></div>
+    <div><dt>Folders</dt><dd>${preview ? `${preview.rootCount} represented` : "—"}</dd></div>
+    <div><dt>Source candidates</dt><dd>${preview ? preview.sourceCandidateCount : "—"}</dd></div>`;
+  const warnings = preview
+    ? [
+        preview.unresolvedTimestampCount ? `${preview.unresolvedTimestampCount} unresolved timestamps` : null,
+        preview.unavailableAssetCount ? `${preview.unavailableAssetCount} unavailable assets` : null,
+        preview.warningAssetCount ? `${preview.warningAssetCount} clips carry timing warnings` : null,
+        state.manualExcludeAssetIds.size ? `${state.manualExcludeAssetIds.size} manual exclusions` : null,
+      ].filter(Boolean)
+    : [];
+  $("#selection-warnings").textContent = warnings.join(" · ") || (preview ? "Exact membership frozen when project is created." : "Select one or more sessions or events.");
+  $("#selection-warnings").classList.toggle("warning", warnings.length > 0);
+  $("#open-event").disabled = !preview?.exactAssetCount;
+}
+
+async function generateClusters() {
+  if (!state.library?.catalogRevision) return toast("Complete a scan before grouping media");
+  $("#generate-clusters").disabled = true;
+  try {
+    const job = await client.startClusterAnalysis({libraryId: state.library.id}, {
+      catalogRevision: state.library.catalogRevision,
+      eventGapUs: Math.round(Number($("#event-gap").value) * 1_000_000),
+      sessionGapUs: Math.round(Number($("#session-gap").value) * 1_000_000),
+    });
+    state.clusterJob = job;
+    $("#cluster-status").textContent = "Grouping coverage into sessions and events…";
+    let current = job;
+    while (!["SUCCEEDED", "FAILED", "CANCELED", "INTERRUPTED"].includes(current.status)) {
+      await new Promise(resolve => setTimeout(resolve, 150));
+      current = await client.getJob({jobId: job.id});
+    }
+    if (current.status !== "SUCCEEDED") throw new Error(current.message || "Clustering did not complete");
+    await loadClusterGeneration();
+    toast(`Created ${countLabel(current.result.sessionCount, "session")} and ${countLabel(current.result.eventCount, "event")}`);
+  } finally {
+    state.clusterJob = null;
+    $("#generate-clusters").disabled = false;
+  }
 }
 
 async function ensureProjectMedia(project) {
@@ -429,22 +653,19 @@ async function ensureProjectMedia(project) {
   }
 }
 
-async function createProjectFromGroup() {
-  const selected = state.group.filter(item => state.selectedMedia.has(item.id));
-  if (!selected.length) return toast("Select at least one exact media asset");
-  if (!$("#confirm-source-groups").checked) return toast("Confirm the proposed logical sources before creating the project");
+async function createProjectFromSelection() {
+  if (!state.selectionPreview?.exactAssetCount) return toast("Select at least one exact media asset");
   try {
-    const sourceGroups = proposedSourceGroups(selected).map(({label, assetIds}) => ({label, assetIds}));
     const project = await client.createProject({}, {
-      name: `${state.groupName} alignment`,
+      name: $("#selection-project-name").value.trim() || "Aligned security footage",
       libraryId: state.library.id,
-      assetIds: selected.map(item => item.id),
-      sourceGroups,
+      clusterGenerationId: state.clusterGeneration.id,
+      ...selectionPayload(),
     });
     state.projects = await client.listProjects();
     renderRecentProjects();
     await openProject(project);
-    toast("Draft program created; unresolved coverage remains visible");
+    toast("Evidence selected. Review timing before building the first cut.");
   } catch (error) {
     handleError(error);
   }
@@ -1164,6 +1385,7 @@ async function scanRoots(rootIds) {
   if (scan.status !== "SUCCEEDED") throw new Error(scan.message || `Scan ${scan.status.toLowerCase()}`);
   await refreshCurrentLibrary();
   await loadMediaPage(true);
+  await loadClusterGeneration();
   toast("Read-only scan complete; warnings and incomplete evidence remain inspectable");
 }
 
@@ -1211,27 +1433,28 @@ function setupEvents() {
     renderLibraryRoots();
     handleError(error);
   });
-  $("#load-more-media").onclick = () => loadMediaPage(false).catch(handleError);
+  $("#generate-clusters").onclick = () => generateClusters().catch(handleError);
+  $("#load-more-sessions").onclick = () => loadSessions(false).catch(handleError);
+  $("#load-more-media").onclick = () => {
+    const cluster = state.inspectedCluster;
+    if (cluster) inspectCluster(cluster.kind, cluster.id, cluster.parentSessionId, true).catch(handleError);
+  };
+  $("#show-unclustered").onclick = () => inspectCluster(
+    "UNCLUSTERED", state.clusterGeneration?.id || "", null, false,
+  ).catch(handleError);
+  for (const selector of ["#session-date-filter", "#session-root-filter", "#session-source-filter", "#session-warning-filter"]) {
+    $(selector).onchange = () => loadSessions(true).catch(handleError);
+  }
   $("#apply-time-policy").onclick = async () => {
     if (!state.library) return toast("Index or open a library first");
     try {
       state.library = await client.updateLibraryTimePolicy({libraryId: state.library.id}, {timeZone: $("#library-time-zone").value, dstFold: Number($("#library-dst-fold").value), nonexistentPolicy: $("#library-nonexistent").value});
       await loadMediaPage(true);
+      await loadClusterGeneration();
       toast("Timestamp policy applied; raw evidence retained and suggestions invalidated");
     } catch (error) { handleError(error); }
   };
-  $("#select-group").onchange = event => {
-    state.selectedMedia = event.target.checked
-      ? new Set(state.presentedGroup.map(item => item.id))
-      : new Set();
-    $$(".media-select").forEach(input => { input.checked = event.target.checked; });
-    event.target.indeterminate = false;
-    updateSourceGroupingConfirmation();
-  };
-  $("#confirm-source-groups").onchange = event => {
-    $("#open-event").disabled = !event.target.checked || !state.selectedMedia.size;
-  };
-  $("#open-event").onclick = createProjectFromGroup;
+  $("#open-event").onclick = createProjectFromSelection;
   $("#sync-offset").onchange = async event => {
     await applySelectedSync(Math.round(Number(event.target.value) * 1000), Number($("#sync-rate").value));
   };

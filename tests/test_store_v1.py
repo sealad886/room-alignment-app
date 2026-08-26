@@ -139,10 +139,15 @@ class StoreV1Tests(unittest.TestCase):
         second_grant = self.store.create_grant(second_root, "READ_ONLY_SOURCE")
         second = self.store.add_library_root(self.library["id"], second_grant["id"])
         first = self.store.library(self.library["id"])["roots"][0]
+        before_revision = self.store.library(self.library["id"])["catalogRevision"]
         self.store.revoke_library_root(self.library["id"], first["id"])
         active = self.store.active_library_root_paths(self.library["id"])
         self.assertEqual([item[0] for item in active], [second["id"]])
         self.assertFalse(self.store.library_roots(self.library["id"])[0]["active"])
+        after_revision = self.store.library(self.library["id"])["catalogRevision"]
+        self.assertEqual(after_revision, before_revision + 1)
+        self.store.revoke_library_root(self.library["id"], first["id"])
+        self.assertEqual(self.store.library(self.library["id"])["catalogRevision"], after_revision)
 
     def test_disconnected_root_reconnects_with_stable_root_identity(self):
         root = self.store.library(self.library["id"])["roots"][0]

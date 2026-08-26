@@ -314,8 +314,116 @@ class ServerBoundaryTests(unittest.TestCase):
                 self.assertEqual(payload["error"]["code"], "VALIDATION_FAILED")
                 self.assertFalse(payload["error"]["retryable"])
 
+    def test_cluster_resources_and_project_selection_are_connected(self) -> None:
+        cookie, csrf = self.bootstrap()
+        grant = self.app.store.create_grant(self.source, "READ_ONLY_SOURCE")
+        library = self.app.store.create_library(grant["id"], "UTC")
+        (self.source / "one.mp4").write_bytes(b"one")
+        record = MediaRecord(
+            "one",
+            library["id"],
+            "one.mp4",
+            3,
+            1,
+            duration=5,
+            duration_us=5_000_000,
+            captured_at="2025-10-15T12:00:00+00:00",
+            camera="Door",
+            source_candidate_id="door-candidate",
+        )
+        scan = self.app.store.begin_scan(library["id"], "FULL")
+        self.app.store.save_media_batch(scan["id"], [record])
+        self.app.store.finish_scan(scan["id"], "SUCCEEDED", {"videos": 1})
+        library = self.app.store.library(library["id"])
+
+        status, _headers, job = self.request(
+            "POST",
+            f"/api/v1/libraries/{library['id']}/cluster-jobs",
+            body={
+                "catalogRevision": library["catalogRevision"],
+                "eventGapUs": 15_000_000,
+                "sessionGapUs": 120_000_000,
+            },
+            cookie=cookie,
+            csrf=csrf,
+        )
+        self.assertEqual(status, 202)
+        generation_id = job["clusterGenerationId"]
+        self.app.analysis_threads[job["id"]].join(timeout=2)
+
+        status, _headers, generation = self.request(
+            "GET", f"/api/v1/cluster-generations/{generation_id}", cookie=cookie
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(generation["status"], "SUCCEEDED")
+        status, _headers, session_page = self.request(
+            "GET", f"/api/v1/cluster-generations/{generation_id}/sessions", cookie=cookie
+        )
+        self.assertEqual(status, 200)
+        session = session_page["items"][0]
+        status, _headers, event_page = self.request(
+            "GET",
+            f"/api/v1/cluster-generations/{generation_id}/events?sessionId={session['id']}",
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200)
+        event = event_page["items"][0]
+        status, _headers, members = self.request(
+            "GET", f"/api/v1/event-clusters/{event['id']}/memberships", cookie=cookie
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual([item["assetId"] for item in members["items"]], ["one"])
+
+        status, _headers, preview = self.request(
+            "POST",
+            f"/api/v1/cluster-generations/{generation_id}/selection-preview",
+            body={"eventIds": [event["id"]]},
+            cookie=cookie,
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(preview["exactAssetCount"], 1)
+        self.assertEqual(preview["sourceCandidateCount"], 1)
+        self.assertEqual(preview["evidenceSpanUs"], 5_000_000)
+
+        status, _headers, project = self.request(
+            "POST",
+            "/api/v1/projects",
+            body={
+                "name": "Selected event",
+                "libraryId": library["id"],
+                "clusterGenerationId": generation_id,
+                "eventIds": [event["id"]],
+            },
+            cookie=cookie,
+            csrf=csrf,
+        )
+        self.assertEqual(status, 201)
+        self.assertEqual(project["selectionSnapshot"]["assetIds"], ["one"])
+        self.assertEqual(project["videoBlocks"], [])
+
 
 class WorkerBackpressureTests(unittest.TestCase):
+    def test_cluster_worker_start_failure_closes_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source"
+            source.mkdir()
+            app = server_module.App(root / "state")
+            try:
+                grant = app.store.create_grant(source, "READ_ONLY_SOURCE")
+                library = app.store.create_library(grant["id"])
+                scan = app.store.begin_scan(library["id"], "FULL")
+                app.store.finish_scan(scan["id"], "SUCCEEDED", {"videos": 0})
+                with patch.object(threading.Thread, "start", side_effect=RuntimeError("no thread")):
+                    with self.assertRaisesRegex(RuntimeError, "no thread"):
+                        app.start_cluster_analysis(library["id"])
+                generations = app.store.cluster_generations_page(library["id"])["items"]
+                self.assertEqual(generations[0]["status"], "FAILED")
+                self.assertEqual(app.store.job(generations[0]["jobId"])["status"], "FAILED")
+            finally:
+                app.close()
+
     def test_analysis_jobs_have_a_two_job_backpressure_limit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -324,8 +432,15 @@ class WorkerBackpressureTests(unittest.TestCase):
             app = server_module.App(root / "state")
             release = threading.Event()
             try:
-                grant = app.store.create_grant(source, "READ_ONLY_SOURCE")
-                library = app.store.create_library(grant["id"])
+                libraries = []
+                for index in range(3):
+                    library_source = source if index == 0 else root / f"source-{index}"
+                    library_source.mkdir(exist_ok=True)
+                    grant = app.store.create_grant(library_source, "READ_ONLY_SOURCE")
+                    library = app.store.create_library(grant["id"])
+                    scan = app.store.begin_scan(library["id"], "FULL")
+                    app.store.finish_scan(scan["id"], "SUCCEEDED", {"videos": 0})
+                    libraries.append(app.store.library(library["id"]))
                 original_check = app._raise_if_job_stopping
 
                 def hold(job_id):
@@ -333,10 +448,10 @@ class WorkerBackpressureTests(unittest.TestCase):
                     return original_check(job_id)
 
                 with patch.object(app, "_raise_if_job_stopping", side_effect=hold):
-                    app.start_cluster_analysis(library["id"])
-                    app.start_cluster_analysis(library["id"])
+                    app.start_cluster_analysis(libraries[0]["id"])
+                    app.start_cluster_analysis(libraries[1]["id"])
                     with self.assertRaisesRegex(DomainError, "two analysis"):
-                        app.start_cluster_analysis(library["id"])
+                        app.start_cluster_analysis(libraries[2]["id"])
                     release.set()
                     for thread in list(app.analysis_threads.values()):
                         thread.join(timeout=2)

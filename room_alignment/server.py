@@ -446,80 +446,52 @@ class App:
             raise
         return job
 
-    def start_cluster_analysis(self, library_id: str) -> dict[str, object]:
-        self.store.library_root(library_id)
+    def start_cluster_analysis(
+        self,
+        library_id: str,
+        catalog_revision: int | None = None,
+        event_gap_us: int | None = None,
+        session_gap_us: int | None = None,
+    ) -> dict[str, object]:
+        library = self.store.library(library_id)
+        catalog_revision = int(
+            library["catalogRevision"] if catalog_revision is None else catalog_revision
+        )
+        event_gap_us = int(library["eventGapUs"] if event_gap_us is None else event_gap_us)
+        session_gap_us = int(
+            library["sessionGapUs"] if session_gap_us is None else session_gap_us
+        )
         with self.lock:
             if len(self.analysis_reserved) >= 2:
                 raise DomainError("JOB_STATE_CONFLICT", "At most two analysis jobs may run concurrently")
-            job = self.store.create_job("CLUSTER_ANALYSIS", library_id=library_id, message="Clustering queued")
+            job = self.store.begin_cluster_generation(
+                library_id,
+                catalog_revision,
+                event_gap_us,
+                session_gap_us,
+            )
             self.analysis_reserved.add(job["id"])
+        generation_id = str(job["clusterGenerationId"])
 
         def run() -> None:
             try:
                 self._raise_if_job_stopping(job["id"])
-                self.store.transition_job(job["id"], "RUNNING", 0.05, "Grouping timestamp evidence")
-                records = self.store.clustering_media(library_id)
-                groups: list[list[dict[str, object]]] = []
-                current: list[dict[str, object]] = []
-                start_us: int | None = None
-                for record in records:
-                    captured_us = _timestamp_us(record.get("captured_at"))
-                    if captured_us is None:
-                        continue
-                    if start_us is None or captured_us - start_us <= 120_000_000:
-                        current.append(record)
-                        start_us = captured_us if start_us is None else start_us
-                    else:
-                        groups.append(current)
-                        current = [record]
-                        start_us = captured_us
-                if current:
-                    groups.append(current)
-
-                created: list[str] = []
-                for group in groups:
-                    self._raise_if_job_stopping(job["id"])
-                    source_ids = sorted(
-                        {
-                            str(record.get("sourceCandidateId"))
-                            for record in group
-                            if record.get("sourceCandidateId")
-                        }
-                    )
-                    if len(source_ids) < 2:
-                        continue
-                    inputs = [
-                        {"assetId": record["id"], "fingerprint": record.get("fingerprint", {})}
-                        for record in group
-                    ]
-                    suggestion = self.store.save_suggestion(
-                        {
-                            "libraryId": library_id,
-                            "kind": "CLUSTER",
-                            "inputDigest": digest_json(inputs),
-                            "algorithm": "timestamp-window",
-                            "algorithmVersion": "1",
-                            "config": {"windowUs": 120_000_000},
-                            "confidence": 0.4,
-                            "assetIds": [str(record["id"]) for record in group],
-                            "sourceCandidateIds": source_ids,
-                            "evidence": ["captured timestamp evidence within a two-minute window"],
-                            "limitations": [
-                                "Camera clocks may differ",
-                                "The group is only a project-membership suggestion",
-                            ],
-                        }
-                    )
-                    created.append(suggestion["id"])
-                self._raise_if_job_stopping(job["id"])
-                self.store.transition_job(
-                    job["id"],
-                    "SUCCEEDED",
-                    1,
-                    f"Created {len(created)} non-mutating cluster suggestions",
-                    result={"suggestionIds": created},
+                self.store.build_cluster_generation(
+                    generation_id,
+                    canceled=lambda: self._raise_if_job_stopping(job["id"]),
                 )
             except Exception as error:
+                try:
+                    state = self.store.job(job["id"])
+                    terminal = (
+                        "CANCELED"
+                        if state["status"] == "CANCEL_REQUESTED"
+                        and state.get("errorCode") != "GRANT_REQUIRED"
+                        else "FAILED"
+                    )
+                    self.store.abort_cluster_generation(generation_id, terminal, _safe_error(error))
+                except Exception:
+                    pass
                 self._finish_analysis_error(job["id"], error)
             finally:
                 with self.lock:
@@ -535,6 +507,9 @@ class App:
             with self.lock:
                 self.analysis_threads.pop(job["id"], None)
                 self.analysis_reserved.discard(job["id"])
+            self.store.abort_cluster_generation(
+                generation_id, "FAILED", "Analysis worker could not start"
+            )
             self.store.transition_job(job["id"], "FAILED", 0, "Analysis worker could not start")
             raise
         return job
@@ -809,6 +784,71 @@ class Handler(BaseHTTPRequestHandler):
             )
         if len(parts) == 5 and parts[2] == "libraries" and parts[4] == "roots":
             return self.respond(APP.store.library_roots(parts[3]))
+        if len(parts) == 5 and parts[2] == "libraries" and parts[4] == "cluster-generations":
+            return self.respond(
+                APP.store.cluster_generations_page(
+                    parts[3],
+                    _int_input(query.get("limit", ["50"])[0], "limit"),
+                    query.get("cursor", [None])[0],
+                )
+            )
+        if len(parts) == 4 and parts[2] == "cluster-generations":
+            return self.respond(APP.store.cluster_generation(parts[3]))
+        if (
+            len(parts) == 5
+            and parts[2] == "cluster-generations"
+            and parts[4] in {"sessions", "events"}
+        ):
+            kind = "SESSION" if parts[4] == "sessions" else "EVENT"
+            return self.respond(
+                APP.store.cluster_summaries_page(
+                    parts[3],
+                    kind,
+                    _int_input(query.get("limit", ["100"])[0], "limit"),
+                    query.get("cursor", [None])[0],
+                    query.get("sessionId", [None])[0],
+                    query.get("rootId", [None])[0],
+                    query.get("sourceCandidateId", [None])[0],
+                    query.get("warning", ["false"])[0].lower() == "true",
+                    _int_input(query["startUs"][0], "startUs")
+                    if query.get("startUs")
+                    else None,
+                    _int_input(query["endUs"][0], "endUs")
+                    if query.get("endUs")
+                    else None,
+                )
+            )
+        if (
+            len(parts) == 5
+            and parts[2] == "cluster-generations"
+            and parts[4] == "facets"
+        ):
+            return self.respond(APP.store.cluster_facets(parts[3]))
+        if (
+            len(parts) == 5
+            and parts[2] == "cluster-generations"
+            and parts[4] == "unclustered"
+        ):
+            return self.respond(
+                APP.store.unclustered_memberships_page(
+                    parts[3],
+                    _int_input(query.get("limit", ["200"])[0], "limit"),
+                    query.get("cursor", [None])[0],
+                )
+            )
+        if (
+            len(parts) == 5
+            and parts[2] in {"session-clusters", "event-clusters"}
+            and parts[4] == "memberships"
+        ):
+            return self.respond(
+                APP.store.cluster_memberships_page(
+                    parts[3],
+                    "SESSION" if parts[2] == "session-clusters" else "EVENT",
+                    _int_input(query.get("limit", ["200"])[0], "limit"),
+                    query.get("cursor", [None])[0],
+                )
+            )
         if len(parts) == 5 and parts[2] == "libraries" and parts[4] == "cluster-suggestions":
             return self.respond(APP.store.library_suggestions(parts[3]))
         if len(parts) == 4 and parts[2] == "media":
@@ -968,6 +1008,36 @@ class Handler(BaseHTTPRequestHandler):
                 )
             return self.respond(library, HTTPStatus.CREATED)
         if path == "/api/v1/projects":
+            cluster_generation_id = body.get("clusterGenerationId")
+            if cluster_generation_id is not None:
+                return self.respond(
+                    APP.store.create_project_from_selection(
+                        str(body.get("name", "Untitled alignment")),
+                        str(_required(body, "libraryId")),
+                        str(cluster_generation_id),
+                        [
+                            str(item)
+                            for item in _list_input(body.get("sessionIds", []), "sessionIds")
+                        ],
+                        [
+                            str(item)
+                            for item in _list_input(body.get("eventIds", []), "eventIds")
+                        ],
+                        [
+                            str(item)
+                            for item in _list_input(
+                                body.get("includeAssetIds", []), "includeAssetIds"
+                            )
+                        ],
+                        [
+                            str(item)
+                            for item in _list_input(
+                                body.get("excludeAssetIds", []), "excludeAssetIds"
+                            )
+                        ],
+                    ),
+                    HTTPStatus.CREATED,
+                )
             source_groups = body.get("sourceGroups")
             if source_groups is not None and not isinstance(source_groups, list):
                 raise DomainError("VALIDATION_FAILED", "sourceGroups must be an array")
@@ -1042,7 +1112,51 @@ class Handler(BaseHTTPRequestHandler):
                 )
             )
         if len(parts) == 5 and parts[2] == "libraries" and parts[4] == "cluster-jobs":
-            return self.respond(APP.start_cluster_analysis(parts[3]), HTTPStatus.ACCEPTED)
+            return self.respond(
+                APP.start_cluster_analysis(
+                    parts[3],
+                    _int_input(_required(body, "catalogRevision"), "catalogRevision"),
+                    _int_input(body["eventGapUs"], "eventGapUs")
+                    if body.get("eventGapUs") is not None
+                    else None,
+                    _int_input(body["sessionGapUs"], "sessionGapUs")
+                    if body.get("sessionGapUs") is not None
+                    else None,
+                ),
+                HTTPStatus.ACCEPTED,
+            )
+        if (
+            len(parts) == 5
+            and parts[2] == "cluster-generations"
+            and parts[4] == "selection-preview"
+        ):
+            generation = APP.store.cluster_generation(parts[3])
+            return self.respond(
+                APP.store.project_selection_preview(
+                    str(generation["libraryId"]),
+                    parts[3],
+                    [
+                        str(item)
+                        for item in _list_input(body.get("sessionIds", []), "sessionIds")
+                    ],
+                    [
+                        str(item)
+                        for item in _list_input(body.get("eventIds", []), "eventIds")
+                    ],
+                    [
+                        str(item)
+                        for item in _list_input(
+                            body.get("includeAssetIds", []), "includeAssetIds"
+                        )
+                    ],
+                    [
+                        str(item)
+                        for item in _list_input(
+                            body.get("excludeAssetIds", []), "excludeAssetIds"
+                        )
+                    ],
+                )
+            )
         if len(parts) == 5 and parts[2] == "scans" and parts[4] == "cancel":
             return self.respond(APP.store.cancel_scan(parts[3]))
         if len(parts) == 6 and parts[2] == "media" and parts[4:] == ["provenance", "resolutions"]:

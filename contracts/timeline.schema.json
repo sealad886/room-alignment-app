@@ -42,20 +42,48 @@
         "sessionGapUs": {"type": "integer", "minimum": 0, "default": 120000000}
       }
     },
+    "ClusterFacet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "clipCount"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Id"},
+        "label": {"type": "string", "minLength": 1, "maxLength": 200},
+        "clipCount": {"type": "integer", "minimum": 1}
+      }
+    },
+    "ClusterFacets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generationId", "roots", "sourceCandidates"],
+      "properties": {
+        "generationId": {"$ref": "#/$defs/Id"},
+        "roots": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/ClusterFacet"}},
+        "sourceCandidates": {"type": "array", "items": {"$ref": "#/$defs/ClusterFacet"}}
+      }
+    },
     "ClusterGeneration": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "libraryId", "catalogRevisionId", "algorithm", "algorithmVersion", "config", "configDigest", "status", "createdAt"],
+      "required": ["id", "libraryId", "catalogRevisionId", "catalogRevision", "jobId", "algorithm", "algorithmVersion", "config", "configDigest", "status", "sessionCount", "eventCount", "clusteredAssetCount", "unclusteredAssetCount", "message", "createdAt", "updatedAt"],
       "properties": {
         "id": {"$ref": "#/$defs/Id"},
         "libraryId": {"$ref": "#/$defs/Id"},
         "catalogRevisionId": {"$ref": "#/$defs/Id"},
+        "catalogRevision": {"type": "integer", "minimum": 1},
+        "jobId": {"$ref": "#/$defs/Id"},
         "algorithm": {"const": "coverage-gap-hierarchy"},
         "algorithmVersion": {"type": "string"},
         "config": {"$ref": "#/$defs/ClusterConfig"},
         "configDigest": {"type": "string"},
         "status": {"enum": ["QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELED"]},
-        "createdAt": {"type": "string", "format": "date-time"}
+        "sessionCount": {"type": "integer", "minimum": 0},
+        "eventCount": {"type": "integer", "minimum": 0},
+        "clusteredAssetCount": {"type": "integer", "minimum": 0},
+        "unclusteredAssetCount": {"type": "integer", "minimum": 0},
+        "message": {"type": ["string", "null"]},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "updatedAt": {"type": "string", "format": "date-time"}
       }
     },
     "ClusterSummary": {
@@ -74,6 +102,70 @@
         "sourceCount": {"type": "integer", "minimum": 0},
         "rootCount": {"type": "integer", "minimum": 1},
         "warnings": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "ClusterMembership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assetId", "startUs", "endUs", "rootId", "sourceCandidateId", "warnings", "media"],
+      "properties": {
+        "assetId": {"$ref": "#/$defs/Id"},
+        "startUs": {"$ref": "#/$defs/Us"},
+        "endUs": {"$ref": "#/$defs/Us"},
+        "rootId": {"type": ["string", "null"]},
+        "sourceCandidateId": {"type": ["string", "null"]},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "media": {"$ref": "./domain.schema.json#/$defs/MediaAsset"}
+      }
+    },
+    "UnclusteredMembership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assetId", "warnings", "media"],
+      "properties": {
+        "assetId": {"$ref": "#/$defs/Id"},
+        "warnings": {"type": "array", "items": {"type": "string"}},
+        "media": {"$ref": "./domain.schema.json#/$defs/MediaAsset"}
+      }
+    },
+    "ClusterGenerationPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["items", "nextCursor"],
+      "properties": {
+        "items": {"type": "array", "items": {"$ref": "#/$defs/ClusterGeneration"}},
+        "nextCursor": {"type": ["string", "null"]}
+      }
+    },
+    "ClusterSummaryPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generationId", "items", "nextCursor"],
+      "properties": {
+        "generationId": {"$ref": "#/$defs/Id"},
+        "items": {"type": "array", "items": {"$ref": "#/$defs/ClusterSummary"}},
+        "nextCursor": {"type": ["string", "null"]}
+      }
+    },
+    "ClusterMembershipPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generationId", "clusterId", "items", "nextCursor"],
+      "properties": {
+        "generationId": {"$ref": "#/$defs/Id"},
+        "clusterId": {"$ref": "#/$defs/Id"},
+        "items": {"type": "array", "items": {"$ref": "#/$defs/ClusterMembership"}},
+        "nextCursor": {"type": ["string", "null"]}
+      }
+    },
+    "UnclusteredMembershipPage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generationId", "items", "nextCursor"],
+      "properties": {
+        "generationId": {"$ref": "#/$defs/Id"},
+        "items": {"type": "array", "items": {"$ref": "#/$defs/UnclusteredMembership"}},
+        "nextCursor": {"type": ["string", "null"]}
       }
     },
     "ProjectSelectionSnapshot": {

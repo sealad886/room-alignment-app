@@ -23,8 +23,14 @@ class ContractTests(unittest.TestCase):
             "/libraries/{libraryId}/time-policy",
             "/libraries/{libraryId}/cluster-jobs",
             "/libraries/{libraryId}/cluster-generations",
+            "/cluster-generations/{clusterGenerationId}",
             "/cluster-generations/{clusterGenerationId}/sessions",
             "/cluster-generations/{clusterGenerationId}/events",
+            "/cluster-generations/{clusterGenerationId}/facets",
+            "/cluster-generations/{clusterGenerationId}/unclustered",
+            "/cluster-generations/{clusterGenerationId}/selection-preview",
+            "/session-clusters/{clusterId}/memberships",
+            "/event-clusters/{clusterId}/memberships",
             "/libraries/{libraryId}/cluster-suggestions",
             "/projects/{projectId}/commands",
             "/projects/{projectId}/commands/delta",
@@ -95,6 +101,17 @@ class ContractTests(unittest.TestCase):
         api_schema = json.loads((ROOT / "contracts" / "api.schema.json").read_text(encoding="utf-8"))
         frame_rate = api_schema["$defs"]["RenderPlanCreate"]["properties"]["frameRate"]
         self.assertEqual(frame_rate, {"type": "number", "minimum": 1, "maximum": 240})
+        timeline_schema = json.loads(
+            (ROOT / "contracts" / "timeline.schema.json").read_text(encoding="utf-8")
+        )
+        self.assertIn("ClusterFacets", timeline_schema["$defs"])
+        facets_response = contract["paths"][
+            "/cluster-generations/{clusterGenerationId}/facets"
+        ]["get"]["responses"]["200"]
+        self.assertEqual(
+            facets_response["content"]["application/json"]["schema"]["$ref"],
+            "https://room-alignment.local/contracts/timeline.schema.json#/$defs/ClusterFacets",
+        )
 
     def test_generated_browser_client_is_current(self):
         result = subprocess.run(

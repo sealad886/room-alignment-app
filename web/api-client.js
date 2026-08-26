@@ -123,6 +123,24 @@
     ],
     "queryParameters": {}
   },
+  "getClusterFacets": {
+    "binary": false,
+    "method": "GET",
+    "path": "/cluster-generations/{clusterGenerationId}/facets",
+    "pathParameters": [
+      "clusterGenerationId"
+    ],
+    "queryParameters": {}
+  },
+  "getClusterGeneration": {
+    "binary": false,
+    "method": "GET",
+    "path": "/cluster-generations/{clusterGenerationId}",
+    "pathParameters": [
+      "clusterGenerationId"
+    ],
+    "queryParameters": {}
+  },
   "getCompiledProgram": {
     "binary": false,
     "method": "GET",
@@ -299,6 +317,24 @@
     ],
     "queryParameters": {
       "cursor": false,
+      "endUs": false,
+      "limit": false,
+      "rootId": false,
+      "sessionId": false,
+      "sourceCandidateId": false,
+      "startUs": false,
+      "warning": false
+    }
+  },
+  "listEventMemberships": {
+    "binary": false,
+    "method": "GET",
+    "path": "/event-clusters/{clusterId}/memberships",
+    "pathParameters": [
+      "clusterId"
+    ],
+    "queryParameters": {
+      "cursor": false,
       "limit": false
     }
   },
@@ -365,6 +401,23 @@
     ],
     "queryParameters": {
       "cursor": false,
+      "endUs": false,
+      "limit": false,
+      "rootId": false,
+      "sourceCandidateId": false,
+      "startUs": false,
+      "warning": false
+    }
+  },
+  "listSessionMemberships": {
+    "binary": false,
+    "method": "GET",
+    "path": "/session-clusters/{clusterId}/memberships",
+    "pathParameters": [
+      "clusterId"
+    ],
+    "queryParameters": {
+      "cursor": false,
       "limit": false
     }
   },
@@ -374,6 +427,27 @@
     "path": "/projects/{projectId}/suggestions",
     "pathParameters": [
       "projectId"
+    ],
+    "queryParameters": {}
+  },
+  "listUnclusteredMemberships": {
+    "binary": false,
+    "method": "GET",
+    "path": "/cluster-generations/{clusterGenerationId}/unclustered",
+    "pathParameters": [
+      "clusterGenerationId"
+    ],
+    "queryParameters": {
+      "cursor": false,
+      "limit": false
+    }
+  },
+  "previewProjectSelection": {
+    "binary": false,
+    "method": "POST",
+    "path": "/cluster-generations/{clusterGenerationId}/selection-preview",
+    "pathParameters": [
+      "clusterGenerationId"
     ],
     "queryParameters": {}
   },

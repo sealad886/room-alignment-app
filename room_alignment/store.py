@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import copy
+import hashlib
 import json
 import os
 import sqlite3
@@ -30,7 +32,7 @@ from .provenance import normalize_timestamp
 from .scanner import media_record_from_dict, quick_fingerprint
 
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 MAX_JOB_EVENTS = 100_000
 MAX_CACHE_ENTRIES = 10_000
 MAX_CACHE_BYTES = 2 * 1024 * 1024 * 1024
@@ -152,7 +154,100 @@ CREATE TABLE IF NOT EXISTS media (
 CREATE INDEX IF NOT EXISTS media_library_path ON media(library_id, relative_path, id);
 CREATE INDEX IF NOT EXISTS media_root_path ON media(root_id, relative_path, id);
 CREATE INDEX IF NOT EXISTS media_library_time ON media(library_id, captured_at);
+CREATE INDEX IF NOT EXISTS media_library_time_id ON media(library_id, captured_at, id);
 CREATE INDEX IF NOT EXISTS media_library_camera ON media(library_id, camera);
+CREATE TABLE IF NOT EXISTS catalog_revisions (
+  id TEXT PRIMARY KEY,
+  library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL,
+  scan_id TEXT REFERENCES scan_generations(id),
+  digest TEXT NOT NULL,
+  asset_count INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(library_id, revision)
+);
+CREATE TABLE IF NOT EXISTS cluster_generations (
+  id TEXT PRIMARY KEY,
+  library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+  catalog_revision_id TEXT NOT NULL REFERENCES catalog_revisions(id),
+  catalog_revision INTEGER NOT NULL,
+  job_id TEXT NOT NULL UNIQUE,
+  algorithm TEXT NOT NULL,
+  algorithm_version TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  config_digest TEXT NOT NULL,
+  status TEXT NOT NULL,
+  session_count INTEGER NOT NULL DEFAULT 0,
+  event_count INTEGER NOT NULL DEFAULT 0,
+  clustered_asset_count INTEGER NOT NULL DEFAULT 0,
+  unclustered_asset_count INTEGER NOT NULL DEFAULT 0,
+  message TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS cluster_generations_library_created
+  ON cluster_generations(library_id,created_at DESC,id);
+CREATE TABLE IF NOT EXISTS session_clusters (
+  id TEXT PRIMARY KEY,
+  generation_id TEXT NOT NULL REFERENCES cluster_generations(id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL,
+  start_us INTEGER NOT NULL,
+  end_us INTEGER NOT NULL,
+  event_count INTEGER NOT NULL DEFAULT 0,
+  clip_count INTEGER NOT NULL DEFAULT 0,
+  source_count INTEGER NOT NULL DEFAULT 0,
+  root_count INTEGER NOT NULL DEFAULT 0,
+  warnings_json TEXT NOT NULL DEFAULT '[]',
+  UNIQUE(generation_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS session_clusters_generation_time
+  ON session_clusters(generation_id,start_us,id);
+CREATE TABLE IF NOT EXISTS event_clusters (
+  id TEXT PRIMARY KEY,
+  generation_id TEXT NOT NULL REFERENCES cluster_generations(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL REFERENCES session_clusters(id) ON DELETE CASCADE,
+  ordinal INTEGER NOT NULL,
+  session_ordinal INTEGER NOT NULL,
+  start_us INTEGER NOT NULL,
+  end_us INTEGER NOT NULL,
+  clip_count INTEGER NOT NULL DEFAULT 0,
+  source_count INTEGER NOT NULL DEFAULT 0,
+  root_count INTEGER NOT NULL DEFAULT 0,
+  warnings_json TEXT NOT NULL DEFAULT '[]',
+  UNIQUE(generation_id, ordinal)
+);
+CREATE INDEX IF NOT EXISTS event_clusters_generation_time
+  ON event_clusters(generation_id,start_us,id);
+CREATE INDEX IF NOT EXISTS event_clusters_session_time
+  ON event_clusters(session_id,start_us,id);
+CREATE TABLE IF NOT EXISTS cluster_memberships (
+  generation_id TEXT NOT NULL REFERENCES cluster_generations(id) ON DELETE CASCADE,
+  session_id TEXT NOT NULL REFERENCES session_clusters(id) ON DELETE CASCADE,
+  event_id TEXT NOT NULL REFERENCES event_clusters(id) ON DELETE CASCADE,
+  asset_id TEXT NOT NULL REFERENCES media(id),
+  start_us INTEGER NOT NULL,
+  end_us INTEGER NOT NULL,
+  root_id TEXT,
+  source_candidate_id TEXT,
+  warnings_json TEXT NOT NULL DEFAULT '[]',
+  PRIMARY KEY(generation_id, asset_id)
+);
+CREATE INDEX IF NOT EXISTS cluster_memberships_event_time
+  ON cluster_memberships(event_id,start_us,asset_id);
+CREATE INDEX IF NOT EXISTS cluster_memberships_session_time
+  ON cluster_memberships(session_id,start_us,asset_id);
+CREATE INDEX IF NOT EXISTS cluster_memberships_generation_root
+  ON cluster_memberships(generation_id,root_id,asset_id);
+CREATE INDEX IF NOT EXISTS cluster_memberships_generation_source
+  ON cluster_memberships(generation_id,source_candidate_id,asset_id);
+CREATE TABLE IF NOT EXISTS unclustered_memberships (
+  generation_id TEXT NOT NULL REFERENCES cluster_generations(id) ON DELETE CASCADE,
+  asset_id TEXT NOT NULL REFERENCES media(id),
+  warnings_json TEXT NOT NULL DEFAULT '["TIMESTAMP_UNRESOLVED"]',
+  PRIMARY KEY(generation_id, asset_id)
+);
+CREATE INDEX IF NOT EXISTS unclustered_memberships_generation_asset
+  ON unclustered_memberships(generation_id,asset_id);
 CREATE TABLE IF NOT EXISTS media_identity_keys (
   asset_id TEXT PRIMARY KEY REFERENCES media(id) ON DELETE CASCADE,
   library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
@@ -318,6 +413,7 @@ class Store:
             self._ensure_legacy_columns(db)
             self._backfill_directory_grant_identities(db)
             self._backfill_library_roots(db)
+            self._backfill_catalog_revisions(db)
             db.execute(
                 "INSERT OR IGNORE INTO project_revisions(project_id,revision,document_json,created_at) "
                 "SELECT id,revision,document_json,updated_at FROM projects"
@@ -359,6 +455,7 @@ class Store:
             self._ensure_legacy_columns(destination)
             self._backfill_directory_grant_identities(destination)
             self._backfill_library_roots(destination)
+            self._backfill_catalog_revisions(destination)
             destination.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             destination.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version,applied_at,details_json) VALUES(?,?,?)",
@@ -462,6 +559,91 @@ class Store:
                     "UPDATE media SET root_id=?,relative_path=?,record_json=? WHERE id=?",
                     (root_id, _storage_relative_path(root_id, relative), json.dumps(payload), row["id"]),
                 )
+
+    def _backfill_catalog_revisions(self, db: sqlite3.Connection) -> None:
+        for library in db.execute(
+            "SELECT id,current_generation,catalog_revision FROM libraries ORDER BY id"
+        ):
+            revision = int(library["catalog_revision"])
+            if revision == 0 and int(library["current_generation"]) > 0:
+                revision = 1
+                db.execute(
+                    "UPDATE libraries SET catalog_revision=1 WHERE id=?", (library["id"],)
+                )
+            if revision <= 0:
+                continue
+            exists = db.execute(
+                "SELECT 1 FROM catalog_revisions WHERE library_id=? AND revision=?",
+                (library["id"], revision),
+            ).fetchone()
+            if exists:
+                continue
+            digest, asset_count = self._catalog_digest_db(db, library["id"])
+            revision_id = _stable_migration_id(
+                "catalog", library["id"], revision, digest
+            )
+            db.execute(
+                "INSERT INTO catalog_revisions(id,library_id,revision,digest,asset_count,created_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (revision_id, library["id"], revision, digest, asset_count, now_iso()),
+            )
+
+    @staticmethod
+    def _catalog_digest_db(db: sqlite3.Connection, library_id: str) -> tuple[str, int]:
+        digest = hashlib.sha256()
+        count = 0
+        cursor = db.execute(
+            "SELECT id,root_id,relative_path,captured_at,duration,missing,fingerprint_json "
+            "FROM media WHERE library_id=? ORDER BY id",
+            (library_id,),
+        )
+        while rows := cursor.fetchmany(1000):
+            for row in rows:
+                digest.update(
+                    json.dumps(
+                        [
+                            row["id"],
+                            row["root_id"],
+                            row["relative_path"],
+                            row["captured_at"],
+                            row["duration"],
+                            int(row["missing"]),
+                            json.loads(row["fingerprint_json"] or "{}"),
+                        ],
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                )
+                digest.update(b"\n")
+                count += 1
+        return digest.hexdigest(), count
+
+    def _advance_catalog_revision_db(
+        self, db: sqlite3.Connection, library_id: str, scan_id: str | None = None
+    ) -> int:
+        db.execute(
+            "UPDATE libraries SET catalog_revision=catalog_revision+1 WHERE id=?", (library_id,)
+        )
+        revision = int(
+            db.execute(
+                "SELECT catalog_revision FROM libraries WHERE id=?", (library_id,)
+            ).fetchone()[0]
+        )
+        catalog_digest, asset_count = self._catalog_digest_db(db, library_id)
+        db.execute(
+            "INSERT INTO catalog_revisions(id,library_id,revision,scan_id,digest,asset_count,created_at) "
+            "VALUES(?,?,?,?,?,?,?)",
+            (
+                opaque_id("catalog"),
+                library_id,
+                revision,
+                scan_id,
+                catalog_digest,
+                asset_count,
+                now_iso(),
+            ),
+        )
+        return revision
 
     def connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(
@@ -800,6 +982,8 @@ class Store:
             ).fetchone()
             if not row:
                 raise DomainError("NOT_FOUND", "Library root not found")
+            if not row["active"]:
+                return self._public_library_root(row)
             timestamp = now_iso()
             db.execute(
                 "UPDATE library_roots SET active=0,revoked_at=? WHERE id=?",
@@ -818,6 +1002,7 @@ class Store:
                     library_id,
                 ),
             )
+            self._advance_catalog_revision_db(db, library_id)
         self.revoke_grant(row["grant_id"])
         with self.connect() as db:
             return self._public_library_root(
@@ -855,6 +1040,7 @@ class Store:
                     (library_id,),
                     "Library timestamp policy changed",
                 )
+                self._advance_catalog_revision_db(db, library_id)
         return self.library(library_id)
 
     def library(self, library_id: str) -> dict[str, Any]:
@@ -971,6 +1157,14 @@ class Store:
             ).fetchone()
             if active:
                 raise DomainError("JOB_STATE_CONFLICT", "A scan is already active for this library")
+            clustering = db.execute(
+                "SELECT id FROM cluster_generations WHERE library_id=? AND status IN ('QUEUED','RUNNING')",
+                (library_id,),
+            ).fetchone()
+            if clustering:
+                raise DomainError(
+                    "JOB_STATE_CONFLICT", "A cluster generation is active for this library"
+                )
             generation = int(
                 db.execute(
                     "SELECT MAX(l.current_generation,COALESCE(MAX(s.generation),0))+1 "
@@ -1405,10 +1599,10 @@ class Store:
             )
             if status == "SUCCEEDED":
                 db.execute(
-                    "UPDATE libraries SET current_generation=?,catalog_revision=catalog_revision+1,"
-                    "last_scan=?,summary_json=? WHERE id=?",
+                    "UPDATE libraries SET current_generation=?,last_scan=?,summary_json=? WHERE id=?",
                     (scan["generation"], now_iso(), json.dumps(summary), scan["library_id"]),
                 )
+                self._advance_catalog_revision_db(db, scan["library_id"], scan_id)
                 db.execute(
                     "UPDATE library_roots SET last_scan_at=? WHERE id IN "
                     "(SELECT root_id FROM scan_roots WHERE scan_id=? AND status='SUCCEEDED')",
@@ -1529,14 +1723,25 @@ class Store:
         ids = list(dict.fromkeys(media_ids))
         if not ids:
             return {}
-        placeholders = ",".join("?" for _ in ids)
         with self.connect() as db:
-            result: dict[str, dict[str, Any]] = {}
-            for row in db.execute(f"SELECT id,record_json,missing FROM media WHERE id IN ({placeholders})", ids):
+            return self._media_records_db(db, ids)
+
+    @staticmethod
+    def _media_records_db(
+        db: sqlite3.Connection, media_ids: Iterable[str]
+    ) -> dict[str, dict[str, Any]]:
+        ids = list(dict.fromkeys(media_ids))
+        result: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(ids), 400):
+            batch = ids[start : start + 400]
+            placeholders = ",".join("?" for _ in batch)
+            for row in db.execute(
+                f"SELECT id,record_json,missing FROM media WHERE id IN ({placeholders})", batch
+            ):
                 item = json.loads(row["record_json"])
                 item["missing"] = bool(row["missing"])
                 result[row["id"]] = item
-            return result
+        return result
 
     def save_scan(self, summary: ScanSummary, records: list[MediaRecord]) -> None:
         """Compatibility seam for legacy tests and imports."""
@@ -1609,6 +1814,229 @@ class Store:
                 (project["id"], project["revision"], json.dumps(project), project["createdAt"]),
             )
         return self.project(project["id"])
+
+    def create_project_from_selection(
+        self,
+        name: str,
+        library_id: str,
+        cluster_generation_id: str,
+        session_ids: list[str],
+        event_ids: list[str],
+        include_asset_ids: list[str],
+        exclude_asset_ids: list[str],
+    ) -> dict[str, Any]:
+        with self._lock, self.connect() as db:
+            selected_ids, selection_snapshot = self._resolve_project_selection_db(
+                db,
+                library_id,
+                cluster_generation_id,
+                session_ids,
+                event_ids,
+                include_asset_ids,
+                exclude_asset_ids,
+            )
+            assets = self._media_records_db(db, selected_ids)
+            if len(assets) != len(selected_ids):
+                raise DomainError("SOURCE_MISSING", "Selected cluster membership is no longer available")
+            project = new_project(
+                name,
+                library_id,
+                [assets[item] for item in selected_ids],
+                selection_snapshot=selection_snapshot,
+                initialize_legacy_program=False,
+            )
+            db.execute(
+                "INSERT INTO projects(id,name,library_id,revision,archived,created_at,updated_at,document_json) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (
+                    project["id"],
+                    project["name"],
+                    project["libraryId"],
+                    project["revision"],
+                    0,
+                    project["createdAt"],
+                    project["updatedAt"],
+                    json.dumps(project),
+                ),
+            )
+            db.execute(
+                "INSERT INTO project_revisions(project_id,revision,document_json,created_at) "
+                "VALUES(?,?,?,?)",
+                (project["id"], project["revision"], json.dumps(project), project["createdAt"]),
+            )
+        return self.project(project["id"])
+
+    def project_selection_preview(
+        self,
+        library_id: str,
+        cluster_generation_id: str,
+        session_ids: list[str],
+        event_ids: list[str],
+        include_asset_ids: list[str],
+        exclude_asset_ids: list[str],
+    ) -> dict[str, Any]:
+        with self._lock, self.connect() as db:
+            selected_ids, snapshot = self._resolve_project_selection_db(
+                db,
+                library_id,
+                cluster_generation_id,
+                session_ids,
+                event_ids,
+                include_asset_ids,
+                exclude_asset_ids,
+            )
+            summary = db.execute(
+                "SELECT COUNT(*) AS asset_count,"
+                "SUM(CASE WHEN media.missing=1 THEN 1 ELSE 0 END) AS unavailable_count,"
+                "SUM(CASE WHEN media.captured_at IS NULL THEN 1 ELSE 0 END) AS unresolved_count,"
+                "COUNT(DISTINCT media.root_id) AS root_count,"
+                "COUNT(DISTINCT COALESCE(members.source_candidate_id,"
+                "json_extract(media.record_json,'$.sourceCandidateId'))) AS source_count,"
+                "MIN(members.start_us) AS start_us,MAX(members.end_us) AS end_us,"
+                "SUM(CASE WHEN members.warnings_json IS NOT NULL AND members.warnings_json!='[]' "
+                "THEN 1 ELSE 0 END) AS warning_count "
+                "FROM selected_asset_ids selected JOIN media ON media.id=selected.asset_id "
+                "LEFT JOIN cluster_memberships members ON members.generation_id=? "
+                "AND members.asset_id=selected.asset_id",
+                (cluster_generation_id,),
+            ).fetchone()
+            roots = [
+                row[0]
+                for row in db.execute(
+                    "SELECT DISTINCT media.root_id FROM selected_asset_ids selected "
+                    "JOIN media ON media.id=selected.asset_id WHERE media.root_id IS NOT NULL "
+                    "ORDER BY media.root_id"
+                )
+            ]
+        start_us = int(summary["start_us"]) if summary["start_us"] is not None else None
+        end_us = int(summary["end_us"]) if summary["end_us"] is not None else None
+        span_us = max(0, end_us - start_us) if start_us is not None and end_us is not None else 0
+        return {
+            "clusterGenerationId": cluster_generation_id,
+            "selectionDigest": snapshot["digest"],
+            "exactAssetCount": len(selected_ids),
+            "evidenceStartUs": start_us,
+            "evidenceEndUs": end_us,
+            "evidenceSpanUs": span_us,
+            "estimatedOutputSpanUs": span_us,
+            "rootIds": roots,
+            "rootCount": int(summary["root_count"] or 0),
+            "sourceCandidateCount": int(summary["source_count"] or 0),
+            "unresolvedTimestampCount": int(summary["unresolved_count"] or 0),
+            "unavailableAssetCount": int(summary["unavailable_count"] or 0),
+            "warningAssetCount": int(summary["warning_count"] or 0),
+        }
+
+    def _resolve_project_selection_db(
+        self,
+        db: sqlite3.Connection,
+        library_id: str,
+        cluster_generation_id: str,
+        session_ids: list[str],
+        event_ids: list[str],
+        include_asset_ids: list[str],
+        exclude_asset_ids: list[str],
+    ) -> tuple[list[str], dict[str, Any]]:
+        sessions = list(dict.fromkeys(session_ids))
+        events = list(dict.fromkeys(event_ids))
+        includes = list(dict.fromkeys(include_asset_ids))
+        excludes = list(dict.fromkeys(exclude_asset_ids))
+        if set(includes) & set(excludes):
+            raise DomainError(
+                "VALIDATION_FAILED", "The same asset cannot be both manually included and excluded"
+            )
+        generation = db.execute(
+            "SELECT * FROM cluster_generations WHERE id=? AND library_id=?",
+            (cluster_generation_id, library_id),
+        ).fetchone()
+        if not generation:
+            raise DomainError("NOT_FOUND", "Cluster generation not found for library")
+        if generation["status"] != "SUCCEEDED":
+            raise DomainError("JOB_STATE_CONFLICT", "Cluster generation is not complete")
+        db.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS selected_cluster_ids("
+            "kind TEXT NOT NULL,id TEXT NOT NULL,PRIMARY KEY(kind,id))"
+        )
+        db.execute("DELETE FROM selected_cluster_ids")
+        db.executemany(
+            "INSERT INTO selected_cluster_ids(kind,id) VALUES('SESSION',?)",
+            ((item,) for item in sessions),
+        )
+        db.executemany(
+            "INSERT INTO selected_cluster_ids(kind,id) VALUES('EVENT',?)",
+            ((item,) for item in events),
+        )
+        known_sessions = int(
+            db.execute(
+                "SELECT COUNT(*) FROM session_clusters clusters "
+                "JOIN selected_cluster_ids selected ON selected.kind='SESSION' "
+                "AND selected.id=clusters.id WHERE clusters.generation_id=?",
+                (cluster_generation_id,),
+            ).fetchone()[0]
+        )
+        known_events = int(
+            db.execute(
+                "SELECT COUNT(*) FROM event_clusters clusters "
+                "JOIN selected_cluster_ids selected ON selected.kind='EVENT' "
+                "AND selected.id=clusters.id WHERE clusters.generation_id=?",
+                (cluster_generation_id,),
+            ).fetchone()[0]
+        )
+        if known_sessions != len(sessions) or known_events != len(events):
+            raise DomainError(
+                "VALIDATION_FAILED", "Every selected session and event must belong to the generation"
+            )
+        membership_rows = list(
+            db.execute(
+                "SELECT members.asset_id,MIN(members.start_us) AS start_us "
+                "FROM cluster_memberships members WHERE members.generation_id=? AND ("
+                "EXISTS(SELECT 1 FROM selected_cluster_ids selected WHERE selected.kind='SESSION' "
+                "AND selected.id=members.session_id) OR "
+                "EXISTS(SELECT 1 FROM selected_cluster_ids selected WHERE selected.kind='EVENT' "
+                "AND selected.id=members.event_id)) GROUP BY members.asset_id "
+                "ORDER BY start_us,members.asset_id",
+                (cluster_generation_id,),
+            )
+        )
+        cluster_asset_ids = [row["asset_id"] for row in membership_rows]
+        adjustments = self._media_records_db(db, [*includes, *excludes])
+        if len(adjustments) != len(set([*includes, *excludes])):
+            raise DomainError("NOT_FOUND", "One or more manual media adjustments are unavailable")
+        if any(item.get("library_id") != library_id for item in adjustments.values()):
+            raise DomainError(
+                "VALIDATION_FAILED", "Every manual media adjustment must belong to the library"
+            )
+        selected_ids = list(dict.fromkeys([*cluster_asset_ids, *includes]))
+        excluded = set(excludes)
+        selected_ids = [asset_id for asset_id in selected_ids if asset_id not in excluded]
+        if not selected_ids:
+            raise DomainError("VALIDATION_FAILED", "Project selection contains no media assets")
+        assets = self._media_records_db(db, selected_ids)
+        if len(assets) != len(selected_ids):
+            raise DomainError("SOURCE_MISSING", "Selected cluster membership is no longer available")
+        if any(item.get("library_id") != library_id for item in assets.values()):
+            raise DomainError(
+                "VALIDATION_FAILED", "Every selected media asset must belong to the project library"
+            )
+        db.execute(
+            "CREATE TEMP TABLE IF NOT EXISTS selected_asset_ids("
+            "position INTEGER NOT NULL,asset_id TEXT PRIMARY KEY)"
+        )
+        db.execute("DELETE FROM selected_asset_ids")
+        db.executemany(
+            "INSERT INTO selected_asset_ids(position,asset_id) VALUES(?,?)",
+            enumerate(selected_ids),
+        )
+        selection_snapshot = {
+            "clusterGenerationId": cluster_generation_id,
+            "selectedSessionIds": sessions,
+            "selectedEventIds": events,
+            "assetIds": selected_ids,
+            "manualIncludeAssetIds": includes,
+            "manualExcludeAssetIds": excludes,
+        }
+        selection_snapshot["digest"] = digest_json(selection_snapshot)
+        return selected_ids, selection_snapshot
 
     def save_project(self, project: dict[str, Any]) -> None:
         canonical = self._migrate_legacy_project(project)
@@ -2122,6 +2550,669 @@ class Store:
                 )
             ]
 
+    def begin_cluster_generation(
+        self,
+        library_id: str,
+        catalog_revision: int,
+        event_gap_us: int,
+        session_gap_us: int,
+    ) -> dict[str, Any]:
+        if event_gap_us < 0 or session_gap_us < event_gap_us:
+            raise DomainError(
+                "VALIDATION_FAILED", "sessionGapUs must be greater than or equal to eventGapUs"
+            )
+        self.active_library_root_paths(library_id)
+        config = {"eventGapUs": int(event_gap_us), "sessionGapUs": int(session_gap_us)}
+        config_digest = digest_json(config)
+        with self._lock, self.connect() as db:
+            library = db.execute(
+                "SELECT catalog_revision FROM libraries WHERE id=?", (library_id,)
+            ).fetchone()
+            if not library:
+                raise DomainError("NOT_FOUND", "Library not found")
+            if int(library["catalog_revision"]) != int(catalog_revision):
+                raise DomainError(
+                    "PLAN_STALE", "Catalog changed; refresh the library before clustering"
+                )
+            active_scan = db.execute(
+                "SELECT 1 FROM scan_generations WHERE library_id=? "
+                "AND status IN ('QUEUED','RUNNING','CANCEL_REQUESTED')",
+                (library_id,),
+            ).fetchone()
+            if active_scan:
+                raise DomainError("JOB_STATE_CONFLICT", "A library scan is still active")
+            active_generation = db.execute(
+                "SELECT 1 FROM cluster_generations WHERE library_id=? "
+                "AND status IN ('QUEUED','RUNNING')",
+                (library_id,),
+            ).fetchone()
+            if active_generation:
+                raise DomainError(
+                    "JOB_STATE_CONFLICT", "A cluster generation is already active"
+                )
+            catalog = db.execute(
+                "SELECT * FROM catalog_revisions WHERE library_id=? AND revision=?",
+                (library_id, int(catalog_revision)),
+            ).fetchone()
+            if not catalog:
+                raise DomainError("PLAN_STALE", "Catalog revision is unavailable")
+            generation_id = opaque_id("clusters")
+            job_id = opaque_id("job")
+            timestamp = now_iso()
+            self._create_job_db(
+                db, job_id, "CLUSTER_ANALYSIS", library_id=library_id, message="Clustering queued"
+            )
+            db.execute(
+                "INSERT INTO cluster_generations(id,library_id,catalog_revision_id,catalog_revision,job_id,"
+                "algorithm,algorithm_version,config_json,config_digest,status,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    generation_id,
+                    library_id,
+                    catalog["id"],
+                    int(catalog_revision),
+                    job_id,
+                    "coverage-gap-hierarchy",
+                    "1",
+                    json.dumps(config),
+                    config_digest,
+                    "QUEUED",
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            job = self.job(job_id, db)
+            job["clusterGenerationId"] = generation_id
+            return job
+
+    def build_cluster_generation(
+        self, generation_id: str, canceled: Any | None = None
+    ) -> dict[str, Any]:
+        with self.connect() as metadata:
+            generation = metadata.execute(
+                "SELECT * FROM cluster_generations WHERE id=?", (generation_id,)
+            ).fetchone()
+            if not generation:
+                raise DomainError("NOT_FOUND", "Cluster generation not found")
+            generation = dict(generation)
+        config = json.loads(generation["config_json"])
+        event_gap_us = int(config["eventGapUs"])
+        session_gap_us = int(config["sessionGapUs"])
+        job_id = str(generation["job_id"])
+        library_id = str(generation["library_id"])
+        writer = self.connect()
+        reader = self.connect()
+        try:
+            writer.execute("DELETE FROM unclustered_memberships WHERE generation_id=?", (generation_id,))
+            writer.execute("DELETE FROM cluster_memberships WHERE generation_id=?", (generation_id,))
+            writer.execute("DELETE FROM event_clusters WHERE generation_id=?", (generation_id,))
+            writer.execute("DELETE FROM session_clusters WHERE generation_id=?", (generation_id,))
+            writer.execute(
+                "UPDATE cluster_generations SET status='RUNNING',message=?,updated_at=? WHERE id=?",
+                ("Building sessions and events", now_iso(), generation_id),
+            )
+            self._transition_job_db(
+                writer, job_id, "RUNNING", 0.02, "Building sessions and events"
+            )
+            writer.commit()
+            total = int(
+                reader.execute(
+                    "SELECT COUNT(*) FROM media WHERE library_id=? AND missing=0", (library_id,)
+                ).fetchone()[0]
+            )
+            processed = 0
+            unclustered_count = 0
+            last_unknown_id = ""
+            while True:
+                unknown_rows = list(
+                    reader.execute(
+                        "SELECT id FROM media WHERE library_id=? AND missing=0 "
+                        "AND captured_at IS NULL AND id>? ORDER BY id LIMIT 1000",
+                        (library_id, last_unknown_id),
+                    )
+                )
+                if not unknown_rows:
+                    break
+                unknown_batch = [
+                    (generation_id, row["id"], json.dumps(["TIMESTAMP_UNRESOLVED"]))
+                    for row in unknown_rows
+                ]
+                writer.executemany(
+                    "INSERT INTO unclustered_memberships(generation_id,asset_id,warnings_json) VALUES(?,?,?)",
+                    unknown_batch,
+                )
+                processed += len(unknown_batch)
+                unclustered_count += len(unknown_batch)
+                last_unknown_id = str(unknown_rows[-1]["id"])
+                self._cluster_progress_db(writer, job_id, processed, total, canceled)
+
+            session_state: dict[str, Any] | None = None
+            event_state: dict[str, Any] | None = None
+            membership_batch: list[tuple[Any, ...]] = []
+            session_count = 0
+            event_count = 0
+            clustered_count = 0
+
+            def finish_event() -> None:
+                nonlocal event_state
+                if event_state is None:
+                    return
+                writer.execute(
+                    "UPDATE event_clusters SET end_us=?,clip_count=?,source_count=?,root_count=?,warnings_json=? "
+                    "WHERE id=?",
+                    (
+                        event_state["endUs"],
+                        event_state["clipCount"],
+                        len(event_state["sources"]),
+                        len(event_state["roots"]),
+                        json.dumps(sorted(event_state["warnings"])),
+                        event_state["id"],
+                    ),
+                )
+                event_state = None
+
+            def finish_session() -> None:
+                nonlocal session_state
+                finish_event()
+                if session_state is None:
+                    return
+                writer.execute(
+                    "UPDATE session_clusters SET end_us=?,event_count=?,clip_count=?,source_count=?,"
+                    "root_count=?,warnings_json=? WHERE id=?",
+                    (
+                        session_state["endUs"],
+                        session_state["eventCount"],
+                        session_state["clipCount"],
+                        len(session_state["sources"]),
+                        len(session_state["roots"]),
+                        json.dumps(sorted(session_state["warnings"])),
+                        session_state["id"],
+                    ),
+                )
+                session_state = None
+
+            def start_session(start_us: int, end_us: int) -> None:
+                nonlocal session_state, session_count
+                session_count += 1
+                session_id = _stable_migration_id("session", generation_id, session_count)
+                session_state = {
+                    "id": session_id,
+                    "startUs": start_us,
+                    "endUs": end_us,
+                    "eventCount": 0,
+                    "clipCount": 0,
+                    "sources": set(),
+                    "roots": set(),
+                    "warnings": set(),
+                }
+                writer.execute(
+                    "INSERT INTO session_clusters(id,generation_id,ordinal,start_us,end_us) VALUES(?,?,?,?,?)",
+                    (session_id, generation_id, session_count, start_us, end_us),
+                )
+
+            def start_event(start_us: int, end_us: int) -> None:
+                nonlocal event_state, event_count
+                if session_state is None:
+                    raise DomainError("INTERNAL_ERROR", "Event cannot exist without a session")
+                event_count += 1
+                session_state["eventCount"] += 1
+                event_id = _stable_migration_id("event", generation_id, event_count)
+                event_state = {
+                    "id": event_id,
+                    "startUs": start_us,
+                    "endUs": end_us,
+                    "clipCount": 0,
+                    "sources": set(),
+                    "roots": set(),
+                    "warnings": set(),
+                }
+                writer.execute(
+                    "INSERT INTO event_clusters(id,generation_id,session_id,ordinal,session_ordinal,"
+                    "start_us,end_us) VALUES(?,?,?,?,?,?,?)",
+                    (
+                        event_id,
+                        generation_id,
+                        session_state["id"],
+                        event_count,
+                        session_state["eventCount"],
+                        start_us,
+                        end_us,
+                    ),
+                )
+
+            last_captured_at = ""
+            last_timed_id = ""
+            while True:
+                timed_rows = list(
+                    reader.execute(
+                        "SELECT id,root_id,captured_at,record_json FROM media "
+                        "WHERE library_id=? AND missing=0 AND captured_at IS NOT NULL "
+                        "AND (captured_at>? OR (captured_at=? AND id>?)) "
+                        "ORDER BY captured_at,id LIMIT 1000",
+                        (library_id, last_captured_at, last_captured_at, last_timed_id),
+                    )
+                )
+                if not timed_rows:
+                    break
+                for row in timed_rows:
+                    payload = json.loads(row["record_json"])
+                    start_us = _timestamp_to_us(row["captured_at"])
+                    if start_us is None:
+                        writer.execute(
+                            "INSERT INTO unclustered_memberships(generation_id,asset_id,warnings_json) "
+                            "VALUES(?,?,?)",
+                            (generation_id, row["id"], json.dumps(["TIMESTAMP_UNRESOLVED"])),
+                        )
+                        processed += 1
+                        unclustered_count += 1
+                        continue
+                    end_us = start_us + max(1, int(payload.get("durationUs") or 0))
+                    if session_state is None or start_us > session_state["endUs"] + session_gap_us:
+                        finish_session()
+                        start_session(start_us, end_us)
+                        start_event(start_us, end_us)
+                    elif event_state is None or start_us > event_state["endUs"] + event_gap_us:
+                        finish_event()
+                        start_event(start_us, end_us)
+                    if session_state is None or event_state is None:
+                        raise DomainError("INTERNAL_ERROR", "Cluster state was not initialized")
+                    warnings = _cluster_timing_warnings(payload)
+                    root_id = row["root_id"]
+                    source_candidate_id = payload.get("sourceCandidateId")
+                    session_state["endUs"] = max(session_state["endUs"], end_us)
+                    session_state["clipCount"] += 1
+                    event_state["endUs"] = max(event_state["endUs"], end_us)
+                    event_state["clipCount"] += 1
+                    if root_id:
+                        session_state["roots"].add(root_id)
+                        event_state["roots"].add(root_id)
+                    if source_candidate_id:
+                        session_state["sources"].add(source_candidate_id)
+                        event_state["sources"].add(source_candidate_id)
+                    session_state["warnings"].update(warnings)
+                    event_state["warnings"].update(warnings)
+                    membership_batch.append(
+                        (
+                            generation_id,
+                            session_state["id"],
+                            event_state["id"],
+                            row["id"],
+                            start_us,
+                            end_us,
+                            root_id,
+                            source_candidate_id,
+                            json.dumps(warnings),
+                        )
+                    )
+                    clustered_count += 1
+                    processed += 1
+                if membership_batch:
+                    writer.executemany(
+                        "INSERT INTO cluster_memberships(generation_id,session_id,event_id,asset_id,start_us,"
+                        "end_us,root_id,source_candidate_id,warnings_json) VALUES(?,?,?,?,?,?,?,?,?)",
+                        membership_batch,
+                    )
+                    membership_batch.clear()
+                last_captured_at = str(timed_rows[-1]["captured_at"])
+                last_timed_id = str(timed_rows[-1]["id"])
+                self._cluster_progress_db(writer, job_id, processed, total, canceled)
+            finish_session()
+            if canceled:
+                canceled()
+            current_revision = int(
+                writer.execute(
+                    "SELECT catalog_revision FROM libraries WHERE id=?", (library_id,)
+                ).fetchone()[0]
+            )
+            if current_revision != int(generation["catalog_revision"]):
+                raise DomainError("PLAN_STALE", "Catalog changed while clustering")
+            writer.execute(
+                "UPDATE cluster_generations SET status='SUCCEEDED',session_count=?,event_count=?,"
+                "clustered_asset_count=?,unclustered_asset_count=?,message=?,updated_at=? WHERE id=?",
+                (
+                    session_count,
+                    event_count,
+                    clustered_count,
+                    unclustered_count,
+                    "Cluster generation complete",
+                    now_iso(),
+                    generation_id,
+                ),
+            )
+            self._transition_job_db(
+                writer,
+                job_id,
+                "SUCCEEDED",
+                1,
+                f"Created {session_count} sessions and {event_count} events",
+                result={
+                    "clusterGenerationId": generation_id,
+                    "sessionCount": session_count,
+                    "eventCount": event_count,
+                    "clusteredAssetCount": clustered_count,
+                    "unclusteredAssetCount": unclustered_count,
+                },
+            )
+            writer.commit()
+            return self.cluster_generation(generation_id)
+        except Exception:
+            writer.rollback()
+            raise
+        finally:
+            reader.close()
+            writer.close()
+
+    def _cluster_progress_db(
+        self,
+        db: sqlite3.Connection,
+        job_id: str,
+        processed: int,
+        total: int,
+        canceled: Any | None,
+    ) -> None:
+        db.commit()
+        if canceled:
+            canceled()
+        self._transition_job_db(
+            db,
+            job_id,
+            "RUNNING",
+            min(0.98, 0.05 + 0.9 * (processed / max(1, total))),
+            f"Grouped {processed:,} of {total:,} assets",
+        )
+        db.commit()
+
+    def abort_cluster_generation(self, generation_id: str, status: str, message: str) -> None:
+        if status not in {"FAILED", "CANCELED"}:
+            raise DomainError("VALIDATION_FAILED", "Invalid cluster terminal state")
+        with self._lock, self.connect() as db:
+            db.execute("DELETE FROM unclustered_memberships WHERE generation_id=?", (generation_id,))
+            db.execute("DELETE FROM cluster_memberships WHERE generation_id=?", (generation_id,))
+            db.execute("DELETE FROM event_clusters WHERE generation_id=?", (generation_id,))
+            db.execute("DELETE FROM session_clusters WHERE generation_id=?", (generation_id,))
+            db.execute(
+                "UPDATE cluster_generations SET status=?,message=?,updated_at=? WHERE id=?",
+                (status, message, now_iso(), generation_id),
+            )
+
+    def cluster_generation(self, generation_id: str) -> dict[str, Any]:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM cluster_generations WHERE id=?", (generation_id,)
+            ).fetchone()
+            if not row:
+                raise DomainError("NOT_FOUND", "Cluster generation not found")
+            return self._public_cluster_generation(row)
+
+    @staticmethod
+    def _public_cluster_generation(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "libraryId": row["library_id"],
+            "catalogRevisionId": row["catalog_revision_id"],
+            "catalogRevision": int(row["catalog_revision"]),
+            "jobId": row["job_id"],
+            "algorithm": row["algorithm"],
+            "algorithmVersion": row["algorithm_version"],
+            "config": json.loads(row["config_json"]),
+            "configDigest": row["config_digest"],
+            "status": row["status"],
+            "sessionCount": int(row["session_count"]),
+            "eventCount": int(row["event_count"]),
+            "clusteredAssetCount": int(row["clustered_asset_count"]),
+            "unclusteredAssetCount": int(row["unclustered_asset_count"]),
+            "message": row["message"],
+            "createdAt": row["created_at"],
+            "updatedAt": row["updated_at"],
+        }
+
+    def cluster_generations_page(
+        self, library_id: str, limit: int = 50, cursor: str | None = None
+    ) -> dict[str, Any]:
+        limit = max(1, min(int(limit), 200))
+        after_created, after_id = _decode_page_cursor(cursor, "createdAt", "id")
+        with self.connect() as db:
+            params: list[Any] = [library_id]
+            where = "library_id=?"
+            if after_created is not None:
+                where += " AND (created_at<? OR (created_at=? AND id<?))"
+                params.extend([after_created, after_created, after_id])
+            rows = list(
+                db.execute(
+                    f"SELECT * FROM cluster_generations WHERE {where} "
+                    "ORDER BY created_at DESC,id DESC LIMIT ?",
+                    (*params, limit + 1),
+                )
+            )
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        next_cursor = (
+            _encode_page_cursor(createdAt=rows[-1]["created_at"], id=rows[-1]["id"])
+            if has_more and rows
+            else None
+        )
+        return {
+            "items": [self._public_cluster_generation(row) for row in rows],
+            "nextCursor": next_cursor,
+        }
+
+    def cluster_summaries_page(
+        self,
+        generation_id: str,
+        kind: str,
+        limit: int = 100,
+        cursor: str | None = None,
+        session_id: str | None = None,
+        root_id: str | None = None,
+        source_candidate_id: str | None = None,
+        warning_only: bool = False,
+        start_us: int | None = None,
+        end_us: int | None = None,
+    ) -> dict[str, Any]:
+        generation = self.cluster_generation(generation_id)
+        if generation["status"] != "SUCCEEDED":
+            raise DomainError("JOB_STATE_CONFLICT", "Cluster generation is not complete")
+        limit = max(1, min(int(limit), 500))
+        after_start, after_id = _decode_page_cursor(cursor, "startUs", "id")
+        table = "session_clusters" if kind == "SESSION" else "event_clusters"
+        where = "generation_id=?"
+        params: list[Any] = [generation_id]
+        if kind == "EVENT" and session_id is not None:
+            where += " AND session_id=?"
+            params.append(session_id)
+        membership_column = "session_id" if kind == "SESSION" else "event_id"
+        if root_id is not None:
+            where += (
+                f" AND EXISTS(SELECT 1 FROM cluster_memberships members WHERE "
+                f"members.{membership_column}={table}.id AND members.root_id=?)"
+            )
+            params.append(root_id)
+        if source_candidate_id is not None:
+            where += (
+                f" AND EXISTS(SELECT 1 FROM cluster_memberships members WHERE "
+                f"members.{membership_column}={table}.id AND members.source_candidate_id=?)"
+            )
+            params.append(source_candidate_id)
+        if warning_only:
+            where += " AND warnings_json!='[]'"
+        if start_us is not None:
+            where += " AND end_us>?"
+            params.append(int(start_us))
+        if end_us is not None:
+            where += " AND start_us<?"
+            params.append(int(end_us))
+        if after_start is not None:
+            where += " AND (start_us>? OR (start_us=? AND id>?))"
+            params.extend([int(after_start), int(after_start), after_id])
+        with self.connect() as db:
+            rows = list(
+                db.execute(
+                    f"SELECT * FROM {table} WHERE {where} ORDER BY start_us,id LIMIT ?",
+                    (*params, limit + 1),
+                )
+            )
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        items = []
+        for row in rows:
+            items.append(
+                {
+                    "id": row["id"],
+                    "generationId": generation_id,
+                    "parentSessionId": row["session_id"] if kind == "EVENT" else None,
+                    "kind": kind,
+                    "startUs": int(row["start_us"]),
+                    "endUs": int(row["end_us"]),
+                    "eventCount": int(row["event_count"]) if kind == "SESSION" else 0,
+                    "clipCount": int(row["clip_count"]),
+                    "sourceCount": int(row["source_count"]),
+                    "rootCount": int(row["root_count"]),
+                    "warnings": json.loads(row["warnings_json"]),
+                }
+            )
+        next_cursor = (
+            _encode_page_cursor(startUs=int(rows[-1]["start_us"]), id=rows[-1]["id"])
+            if has_more and rows
+            else None
+        )
+        return {"generationId": generation_id, "items": items, "nextCursor": next_cursor}
+
+    def cluster_facets(self, generation_id: str) -> dict[str, Any]:
+        generation = self.cluster_generation(generation_id)
+        if generation["status"] != "SUCCEEDED":
+            raise DomainError("JOB_STATE_CONFLICT", "Cluster generation is not complete")
+        with self.connect() as db:
+            roots = [
+                {
+                    "id": row["root_id"],
+                    "label": row["label"],
+                    "clipCount": int(row["clip_count"]),
+                }
+                for row in db.execute(
+                    "SELECT members.root_id,roots.label,COUNT(*) AS clip_count "
+                    "FROM cluster_memberships members JOIN library_roots roots ON roots.id=members.root_id "
+                    "WHERE members.generation_id=? GROUP BY members.root_id,roots.label "
+                    "ORDER BY roots.label,members.root_id",
+                    (generation_id,),
+                )
+            ]
+            sources = [
+                {
+                    "id": row["source_candidate_id"],
+                    "label": row["label"] or "Unlabelled source candidate",
+                    "clipCount": int(row["clip_count"]),
+                }
+                for row in db.execute(
+                    "SELECT members.source_candidate_id,MIN(media.camera) AS label,COUNT(*) AS clip_count "
+                    "FROM cluster_memberships members JOIN media ON media.id=members.asset_id "
+                    "WHERE members.generation_id=? AND members.source_candidate_id IS NOT NULL "
+                    "GROUP BY members.source_candidate_id ORDER BY label,members.source_candidate_id",
+                    (generation_id,),
+                )
+            ]
+        return {"generationId": generation_id, "roots": roots, "sourceCandidates": sources}
+
+    def cluster_memberships_page(
+        self,
+        cluster_id: str,
+        kind: str,
+        limit: int = 200,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        limit = max(1, min(int(limit), 500))
+        column = "session_id" if kind == "SESSION" else "event_id"
+        cluster_table = "session_clusters" if kind == "SESSION" else "event_clusters"
+        after_start, after_id = _decode_page_cursor(cursor, "startUs", "assetId")
+        where = f"members.{column}=?"
+        params: list[Any] = [cluster_id]
+        if after_start is not None:
+            where += " AND (members.start_us>? OR (members.start_us=? AND members.asset_id>?))"
+            params.extend([int(after_start), int(after_start), after_id])
+        with self.connect() as db:
+            cluster = db.execute(
+                f"SELECT clusters.generation_id,generations.status FROM {cluster_table} clusters "
+                "JOIN cluster_generations generations ON generations.id=clusters.generation_id "
+                "WHERE clusters.id=?",
+                (cluster_id,),
+            ).fetchone()
+            if not cluster:
+                raise DomainError("NOT_FOUND", "Cluster not found")
+            if cluster["status"] != "SUCCEEDED":
+                raise DomainError("JOB_STATE_CONFLICT", "Cluster generation is not complete")
+            rows = list(
+                db.execute(
+                    "SELECT members.*,media.record_json,media.missing FROM cluster_memberships members "
+                    f"JOIN media ON media.id=members.asset_id WHERE {where} "
+                    "ORDER BY members.start_us,members.asset_id LIMIT ?",
+                    (*params, limit + 1),
+                )
+            )
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        items = []
+        for row in rows:
+            media = json.loads(row["record_json"])
+            media["missing"] = bool(row["missing"])
+            items.append(
+                {
+                    "assetId": row["asset_id"],
+                    "startUs": int(row["start_us"]),
+                    "endUs": int(row["end_us"]),
+                    "rootId": row["root_id"],
+                    "sourceCandidateId": row["source_candidate_id"],
+                    "warnings": json.loads(row["warnings_json"]),
+                    "media": media,
+                }
+            )
+        next_cursor = (
+            _encode_page_cursor(startUs=int(rows[-1]["start_us"]), assetId=rows[-1]["asset_id"])
+            if has_more and rows
+            else None
+        )
+        return {
+            "generationId": cluster["generation_id"],
+            "clusterId": cluster_id,
+            "items": items,
+            "nextCursor": next_cursor,
+        }
+
+    def unclustered_memberships_page(
+        self, generation_id: str, limit: int = 200, cursor: str | None = None
+    ) -> dict[str, Any]:
+        generation = self.cluster_generation(generation_id)
+        if generation["status"] != "SUCCEEDED":
+            raise DomainError("JOB_STATE_CONFLICT", "Cluster generation is not complete")
+        limit = max(1, min(int(limit), 500))
+        after_id, _unused = _decode_page_cursor(cursor, "assetId", "unused")
+        with self.connect() as db:
+            rows = list(
+                db.execute(
+                    "SELECT unknown.asset_id,unknown.warnings_json,media.record_json,media.missing "
+                    "FROM unclustered_memberships unknown JOIN media ON media.id=unknown.asset_id "
+                    "WHERE unknown.generation_id=? AND unknown.asset_id>? ORDER BY unknown.asset_id LIMIT ?",
+                    (generation_id, str(after_id or ""), limit + 1),
+                )
+            )
+        has_more = len(rows) > limit
+        rows = rows[:limit]
+        items = []
+        for row in rows:
+            media = json.loads(row["record_json"])
+            media["missing"] = bool(row["missing"])
+            items.append(
+                {
+                    "assetId": row["asset_id"],
+                    "warnings": json.loads(row["warnings_json"]),
+                    "media": media,
+                }
+            )
+        next_cursor = (
+            _encode_page_cursor(assetId=rows[-1]["asset_id"], unused="")
+            if has_more and rows
+            else None
+        )
+        return {"generationId": generation_id, "items": items, "nextCursor": next_cursor}
+
     def clustering_media(self, library_id: str) -> list[dict[str, Any]]:
         self.library(library_id)
         with self.connect() as db:
@@ -2477,6 +3568,31 @@ class Store:
                         "AND status IN ('QUEUED','RUNNING','CANCEL_REQUESTED')",
                         (message, now_iso(), row["id"]),
                     )
+                elif row["kind"] == "CLUSTER_ANALYSIS":
+                    generation = db.execute(
+                        "SELECT id FROM cluster_generations WHERE job_id=?", (row["id"],)
+                    ).fetchone()
+                    if generation:
+                        db.execute(
+                            "DELETE FROM unclustered_memberships WHERE generation_id=?",
+                            (generation["id"],),
+                        )
+                        db.execute(
+                            "DELETE FROM cluster_memberships WHERE generation_id=?",
+                            (generation["id"],),
+                        )
+                        db.execute(
+                            "DELETE FROM event_clusters WHERE generation_id=?",
+                            (generation["id"],),
+                        )
+                        db.execute(
+                            "DELETE FROM session_clusters WHERE generation_id=?",
+                            (generation["id"],),
+                        )
+                        db.execute(
+                            "UPDATE cluster_generations SET status='FAILED',message=?,updated_at=? WHERE id=?",
+                            (message, now_iso(), generation["id"]),
+                        )
                 elif row["kind"] == "RENDER":
                     db.execute(
                         "UPDATE artifacts SET status='FAILED_RECOVERABLE',details_json=?,updated_at=? "
@@ -2828,6 +3944,59 @@ def _stable_migration_id(prefix: str, *parts: object) -> str:
 
 def _storage_relative_path(root_id: str, relative_path: str) -> str:
     return f"{root_id}::{relative_path}"
+
+
+def _encode_page_cursor(**values: Any) -> str:
+    raw = json.dumps(values, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_page_cursor(
+    cursor: str | None, first_key: str, second_key: str
+) -> tuple[Any | None, Any | None]:
+    if cursor is None:
+        return None, None
+    try:
+        padding = "=" * (-len(cursor) % 4)
+        value = json.loads(base64.urlsafe_b64decode(cursor + padding).decode("utf-8"))
+        return value[first_key], value[second_key]
+    except (
+        binascii.Error,
+        ValueError,
+        KeyError,
+        TypeError,
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+    ) as error:
+        raise DomainError("VALIDATION_FAILED", "Invalid pagination cursor") from error
+
+
+def _timestamp_to_us(value: Any) -> int | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        return None
+    delta = parsed.astimezone(UTC) - datetime(1970, 1, 1, tzinfo=UTC)
+    return (
+        delta.days * 86_400_000_000
+        + delta.seconds * 1_000_000
+        + delta.microseconds
+    )
+
+
+def _cluster_timing_warnings(media: dict[str, Any]) -> list[str]:
+    warnings: set[str] = set()
+    policy = media.get("custom", {}).get("timestampPolicy", {})
+    ambiguity = policy.get("ambiguity")
+    if ambiguity not in {"EXPLICIT_OFFSET", "UNAMBIGUOUS_LOCAL_TIME"}:
+        warnings.add("TIMING_UNCERTAIN")
+    if media.get("warning"):
+        warnings.add("MEDIA_WARNING")
+    if not media.get("sourceCandidateId"):
+        warnings.add("SOURCE_CANDIDATE_UNKNOWN")
+    return sorted(warnings)
 
 
 def _identity_key_from_fingerprint(fingerprint: dict[str, Any]) -> str | None:
