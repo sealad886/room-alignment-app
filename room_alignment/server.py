@@ -28,7 +28,7 @@ from .alignment import (
     analyze_project_alignment,
 )
 from .domain import DomainError, program_at
-from .lifecycle import write_owner
+from .lifecycle import clear_owner, write_owner
 from .render import CanonicalRenderManager, RenderManager, build_render_plan
 from .scanner import iter_scan_records
 from .store import Store, TERMINAL_JOB_STATES
@@ -180,9 +180,12 @@ class App:
             except DomainError:
                 pass
         try:
-            fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+            clear_owner(self._lock_file)
         finally:
-            self._lock_file.close()
+            try:
+                fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._lock_file.close()
 
     def start_scan(
         self,

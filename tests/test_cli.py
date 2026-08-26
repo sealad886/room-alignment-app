@@ -78,6 +78,7 @@ class InstallableCliTests(unittest.TestCase):
                     serve(args)
             reopened = App(data_dir)
             reopened.close()
+            self.assertEqual((data_dir / "application.lock").read_text(), "")
 
     def test_stop_is_idempotent_without_a_running_application(self):
         with TemporaryDirectory() as temporary:
@@ -120,6 +121,7 @@ class InstallableCliTests(unittest.TestCase):
 
                 reopened = App(state)
                 reopened.close()
+                self.assertEqual((state / "application.lock").read_text(), "")
             finally:
                 if process.poll() is None:
                     process.kill()

@@ -29,6 +29,15 @@ def write_owner(lock_file: TextIO) -> None:
     os.fsync(lock_file.fileno())
 
 
+def clear_owner(lock_file: TextIO) -> None:
+    """Clear process identity while caller still owns the state lock."""
+
+    lock_file.seek(0)
+    lock_file.truncate()
+    lock_file.flush()
+    os.fsync(lock_file.fileno())
+
+
 def _owner_pid(lock_file: TextIO) -> int:
     lock_file.seek(0)
     try:

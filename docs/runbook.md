@@ -9,7 +9,7 @@ room-alignment stop --data-dir /path/to/state
 
 Health is intentionally non-sensitive at `/api/health`. A second process using the same state directory fails before scheduling work. Graceful shutdown rejects new work, requests scan cancellation, terminates owned render process trees, persists job transitions, and releases ownership. On restart, in-flight analyses/scans are `INTERRUPTED`; renders are never blindly reattached and become `FAILED_RECOVERABLE` where appropriate.
 
-`room-alignment stop` reads process identity only from the contended state lock; it does not search or signal processes by name. It is idempotent when no process owns that directory. Use `--timeout SECONDS --force` only when graceful shutdown cannot complete; force mode sends `SIGKILL` to the still-validated lock owner after the timeout.
+`room-alignment stop` reads process identity only from the contended state lock; it does not search or signal processes by name. Graceful shutdown clears that identity while still holding the lock, then unlocks and closes the file. It is idempotent when no process owns that directory. Use `--timeout SECONDS --force` only when graceful shutdown cannot complete; force mode sends `SIGKILL` to the still-validated lock owner after the timeout.
 
 Run `room-alignment doctor` before first use or after changing Python/FFmpeg. It checks installed frontend/schema resources and FFmpeg/FFprobe availability without exposing absolute paths.
 
