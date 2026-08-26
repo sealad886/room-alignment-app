@@ -769,21 +769,32 @@ async function generateClusters() {
   }
 }
 
-async function ensureProjectMedia(project) {
-  const missingDetails = [...new Set(
-    project.clips.map(clip => clip.assetId).filter(assetId => {
-      const media = state.mediaById.get(assetId);
-      return !media || !Array.isArray(media.resolutions);
-    })
-  )];
-  for (let index = 0; index < missingDetails.length; index += 8) {
-    const results = await Promise.allSettled(
-      missingDetails.slice(index, index + 8).map(mediaId => client.getMedia({mediaId}))
-    );
-    for (const result of results) {
-      if (result.status === "fulfilled") state.mediaById.set(result.value.id, result.value);
-    }
+async function ensureMediaDetails(assetIds) {
+  const missing = [...new Set(assetIds)].filter(assetId => {
+    const media = state.mediaById.get(assetId);
+    return !media || !Array.isArray(media.resolutions);
+  });
+  const results = await Promise.allSettled(missing.map(mediaId => client.getMedia({mediaId})));
+  for (const result of results) {
+    if (result.status === "fulfilled") state.mediaById.set(result.value.id, result.value);
   }
+}
+
+async function ensureClipMedia(clip) {
+  if (!clip) return null;
+  await ensureMediaDetails([clip.assetId]);
+  return state.mediaById.get(clip.assetId) || null;
+}
+
+function initialProjectMediaIds(project) {
+  const activeSources = project.logicalSources
+    .filter(source => !source.archived)
+    .sort((left, right) => Number(right.reference) - Number(left.reference))
+    .slice(0, 6);
+  return activeSources.flatMap(source => {
+    const clip = project.clips.find(item => item.logicalSourceId === source.id);
+    return clip ? [clip.assetId] : [];
+  });
 }
 
 async function createProjectFromSelection() {
@@ -814,7 +825,7 @@ async function openProject(projectSummary) {
     state.library = projectLibrary;
     syncLibraryControls();
     if (libraryChanged) await loadMediaPage(true);
-    await ensureProjectMedia(project);
+    await ensureMediaDetails(initialProjectMediaIds(project));
     state.project = project;
     await refreshPreparationState();
     state.selectedSource = 0;
@@ -879,11 +890,12 @@ function renderSources() {
   const fixedClipOptions = state.sources.flatMap(source => source.clips.map((clip, index) => `<option value="clip:${safe(clip.id)}">Clip ${index + 1} · ${safe(source.label)}</option>`)).join("");
   $("#audio-source").innerHTML = `<option value="follow">Follow Program Video</option><option value="silence">Intentional silence</option>${state.sources.map(source => `<option value="source:${safe(source.id)}">Fixed source · ${safe(source.label)}</option>`).join("")}${fixedClipOptions}`;
   $$('[data-source]').forEach(button => {
-    button.onclick = () => {
+    button.onclick = async () => {
       const nextSource = Number(button.dataset.source);
       if (nextSource !== state.selectedSource) state.selectedClipId = null;
       state.selectedSource = nextSource;
       renderSources();
+      await ensureClipMedia(selectedAlignmentClip());
       renderSourceInspector();
       renderProgram();
     };
@@ -954,8 +966,9 @@ function renderClipSelector(source) {
   $("#manage-clip").innerHTML = clipOptions || '<option value="">No clips assigned</option>';
   const selectedClip = selectedAlignmentClip(source);
   $("#manage-clip").value = selectedClip?.id || "";
-  $("#manage-clip").onchange = event => {
+  $("#manage-clip").onchange = async event => {
     state.selectedClipId = event.target.value || null;
+    await ensureClipMedia(selectedAlignmentClip(source));
     renderSourceInspector();
   };
 }
@@ -1066,6 +1079,7 @@ function renderSuggestions() {
 async function focusClipInTimeline(clipId, proposalSet = null) {
   const clip = clipById(clipId);
   if (!clip) return toast("This clip is no longer part of the project");
+  await ensureClipMedia(clip);
   const proposal = proposalSet?.proposals?.find(item => item.clipId === clipId);
   const alignment = proposal?.proposedAlignment || clipAlignment(clip);
   const media = state.mediaById.get(clip.assetId);
