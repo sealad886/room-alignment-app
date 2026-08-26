@@ -7,11 +7,35 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from room_alignment.models import MediaRecord
+from room_alignment.models import MediaRecord, ProvenanceEvidence
 from room_alignment.scanner import iter_scan_records, quick_fingerprint
 
 
 class ScannerSafetyTests(unittest.TestCase):
+    def test_source_candidate_uses_normalized_camera_evidence_not_per_file_origin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "one" / "clip-a.mp4"
+            second = root / "two" / "clip-b.mp4"
+            first.parent.mkdir()
+            second.parent.mkdir()
+            first.write_bytes(b"media-a")
+            second.write_bytes(b"media-b")
+
+            def inferred(_path, relative):
+                return (
+                    {"camera": "Front Door"},
+                    [ProvenanceEvidence("filename", "camera", "Front Door", 0.7, relative.as_posix())],
+                )
+
+            with patch("room_alignment.scanner.infer_from_path", side_effect=inferred), patch(
+                "room_alignment.scanner.read_sidecar", return_value=({}, [])
+            ), patch("room_alignment.scanner.probe", return_value=({}, [], None)):
+                records = list(iter_scan_records(root, "library", probe_workers=1))
+
+            self.assertEqual(len(records), 2)
+            self.assertEqual(records[0].source_candidate_id, records[1].source_candidate_id)
+
     def test_unknown_extension_with_media_signature_is_admitted_for_probe(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -107,6 +131,45 @@ class ScannerSafetyTests(unittest.TestCase):
                 )
             probe.assert_not_called()
             self.assertEqual([record.id for record in records], ["asset"])
+
+    def test_incremental_scan_bulk_loads_unchanged_assets_without_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            existing = {}
+            for name in ("one.mp4", "two.mp4"):
+                media = root / name
+                media.write_bytes(name.encode())
+                existing[name] = {
+                    "id": f"asset-{name}",
+                    "library_id": "library",
+                    "rootId": "root-a",
+                    "relative_path": name,
+                    "size": media.stat().st_size,
+                    "modified_ns": media.stat().st_mtime_ns,
+                    "fingerprint": quick_fingerprint(media),
+                    "evidence": [],
+                }
+            batch_calls = []
+
+            def lookup(paths):
+                batch_calls.append(list(paths))
+                return {path: existing[path] for path in paths}
+
+            with patch("room_alignment.scanner.probe") as probe:
+                records = list(
+                    iter_scan_records(
+                        root,
+                        "library",
+                        root_id="root-a",
+                        mode="INCREMENTAL",
+                        existing_batch_lookup=lookup,
+                        probe_workers=2,
+                    )
+                )
+            probe.assert_not_called()
+            self.assertEqual({record.id for record in records}, {"asset-one.mp4", "asset-two.mp4"})
+            self.assertTrue(all(record.root_id == "root-a" for record in records))
+            self.assertEqual(sum(len(paths) for paths in batch_calls), 2)
 
     def test_closing_scan_generator_stops_owned_probe_work_promptly(self):
         with tempfile.TemporaryDirectory() as directory:

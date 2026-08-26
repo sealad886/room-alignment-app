@@ -82,6 +82,7 @@
       "properties": {
         "id": {"$ref": "#/$defs/OpaqueId"},
         "library_id": {"$ref": "#/$defs/OpaqueId"},
+        "rootId": {"type": ["string", "null"], "description": "Opaque identity of the independently granted library root containing this asset."},
         "relative_path": {"type": "string", "minLength": 1},
         "size": {"type": "integer", "minimum": 0},
         "modified_ns": {"type": "integer", "minimum": 0},
@@ -102,24 +103,43 @@
     "LogicalSource": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["id", "label", "reference", "archived"],
+      "required": ["id", "label", "reference", "archived", "identityState"],
       "properties": {
         "id": {"$ref": "#/$defs/OpaqueId"},
         "label": {"type": "string", "minLength": 1, "maxLength": 200},
         "reference": {"type": "boolean"},
-        "archived": {"type": "boolean"}
+        "archived": {"type": "boolean"},
+        "identityState": {"enum": ["PROVISIONAL", "USER_CONFIRMED"]},
+        "candidateKey": {"type": "string"},
+        "candidateEvidence": {
+          "type": "object",
+          "additionalProperties": true,
+          "properties": {
+            "candidateKeys": {"type": "array", "items": {"type": "string"}},
+            "assetCount": {"type": "integer", "minimum": 1}
+          }
+        },
+        "confirmedAt": {"type": "string", "format": "date-time"}
       }
     },
     "ProjectClip": {
       "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "assetId", "logicalSourceId", "sync"],
+      "additionalProperties": true,
+      "required": ["id", "assetId", "logicalSourceId"],
       "properties": {
         "id": {"$ref": "#/$defs/OpaqueId"},
         "assetId": {"$ref": "#/$defs/OpaqueId"},
         "logicalSourceId": {"$ref": "#/$defs/OpaqueId"},
-        "sync": {"$ref": "#/$defs/SyncTransform"}
-      }
+        "alignment": {"$ref": "./timeline.schema.json#/$defs/ClipAlignmentTransform"},
+        "alignmentState": {"enum": ["PROVISIONAL", "ACCEPTED", "REVIEW_REQUIRED", "UNRESOLVED"]},
+        "alignmentConfidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "alignmentEvidence": {"type": "array", "items": {"type": "string"}},
+        "sync": {"$ref": "#/$defs/SyncTransform", "deprecated": true}
+      },
+      "anyOf": [
+        {"required": ["alignment", "alignmentState", "alignmentConfidence", "alignmentEvidence"]},
+        {"required": ["sync"]}
+      ]
     },
     "VideoBlock": {
       "allOf": [
@@ -129,8 +149,13 @@
           "required": ["id", "logicalSourceId", "pinnedClipId"],
           "properties": {
             "id": {"$ref": "#/$defs/OpaqueId"},
-            "logicalSourceId": {"$ref": "#/$defs/OpaqueId"},
-            "pinnedClipId": {"type": ["string", "null"]}
+            "logicalSourceId": {"type": ["string", "null"]},
+            "pinnedClipId": {"type": ["string", "null"]},
+            "syntheticSlateId": {"type": ["string", "null"]},
+            "sectionId": {"type": "string"},
+            "startAlignedUs": {"type": "integer"},
+            "endAlignedUs": {"type": "integer"},
+            "decisionReason": {"type": "string"}
           }
         }
       ]
@@ -220,6 +245,29 @@
         }
       ]
     },
+    "CompiledVideoSlice": {
+      "oneOf": [
+        {"$ref": "#/$defs/CompiledSourceSlice"},
+        {
+          "allOf": [
+            {"$ref": "#/$defs/Interval"},
+            {
+              "type": "object",
+              "required": ["id", "blockId", "synthetic", "slateId", "slateText", "transforms", "provenance"],
+              "properties": {
+                "id": {"$ref": "#/$defs/OpaqueId"},
+                "blockId": {"$ref": "#/$defs/OpaqueId"},
+                "synthetic": {"const": true},
+                "slateId": {"$ref": "#/$defs/OpaqueId"},
+                "slateText": {"type": "string"},
+                "transforms": {"type": "array", "items": {"type": "string"}},
+                "provenance": {"type": "object"}
+              }
+            }
+          ]
+        }
+      ]
+    },
     "CompiledProgram": {
       "type": "object",
       "required": ["projectId", "revision", "durationUs", "videoSlices", "audioSlices", "issues", "valid"],
@@ -227,7 +275,7 @@
         "projectId": {"$ref": "#/$defs/OpaqueId"},
         "revision": {"type": "integer", "minimum": 1},
         "durationUs": {"$ref": "#/$defs/Us"},
-        "videoSlices": {"type": "array", "items": {"$ref": "#/$defs/CompiledSourceSlice"}},
+        "videoSlices": {"type": "array", "items": {"$ref": "#/$defs/CompiledVideoSlice"}},
         "audioSlices": {"type": "array", "items": {"$ref": "#/$defs/CompiledAudioSlice"}},
         "issues": {"type": "array", "items": {"$ref": "#/$defs/ProgramIssue"}},
         "valid": {"type": "boolean"}
@@ -235,7 +283,7 @@
     },
     "Project": {
       "type": "object",
-      "required": ["id", "name", "libraryId", "revision", "provenanceRevision", "archived", "anchorMode", "logicalSources", "clips", "videoBlocks", "audioBlocks", "renderSettings", "review", "createdAt", "updatedAt"],
+      "required": ["id", "name", "libraryId", "revision", "provenanceRevision", "archived", "anchorMode", "logicalSources", "clips", "selectionSnapshot", "alignmentDigest", "timelineSections", "programDraft", "syntheticSlates", "videoBlocks", "audioBlocks", "renderSettings", "review", "createdAt", "updatedAt"],
       "properties": {
         "id": {"$ref": "#/$defs/OpaqueId"},
         "name": {"type": "string", "minLength": 1, "maxLength": 200},
@@ -246,6 +294,11 @@
         "anchorMode": {"enum": ["PROGRAM_TIME", "SOURCE_TIME"]},
         "logicalSources": {"type": "array", "items": {"$ref": "#/$defs/LogicalSource"}},
         "clips": {"type": "array", "items": {"$ref": "#/$defs/ProjectClip"}},
+        "selectionSnapshot": {"$ref": "./timeline.schema.json#/$defs/ProjectSelectionSnapshot"},
+        "alignmentDigest": {"type": "string"},
+        "timelineSections": {"type": "array", "items": {"$ref": "./timeline.schema.json#/$defs/TimelineSection"}},
+        "programDraft": {"type": ["object", "null"]},
+        "syntheticSlates": {"type": "array", "items": {"$ref": "./timeline.schema.json#/$defs/SyntheticSlate"}},
         "videoBlocks": {"type": "array", "items": {"$ref": "#/$defs/VideoBlock"}},
         "audioBlocks": {"type": "array", "items": {"$ref": "#/$defs/AudioBlock"}},
         "renderSettings": {"type": "object"},

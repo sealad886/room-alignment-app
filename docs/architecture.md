@@ -12,13 +12,24 @@ flowchart LR
 
 The backend is the only business-rule authority. It owns grants, scan generations, evidence/resolution ledgers, logical-source identity, project revisions, synchronization math, video/audio compilation, issues, immutable plans, review binding, source hashes, rendering, artifacts, events, migrations, and recovery. The frontend presents provisional interaction feedback and submits named commands; it reloads canonical results after every mutation.
 
+Project preparation uses two backend-owned editorial clocks. Clip alignment maps
+source-relative time to `alignedTimeUs`, the complete selected-evidence timeline.
+Explicit keep/exclude/slate sections then map aligned time to `programTimeUs`.
+Program Video and Audio do not exist until alignment review authorizes a bound
+program-draft command. Libraries contain independently granted roots; immutable
+catalog and cluster generations feed exact project selection snapshots. See ADRs
+0004 through 0006.
+
+Distribution is one Python wheel. Hatchling maps `web/` and `contracts/` into the `room_alignment` package at build time, so installed runtime never depends on repository-relative files. `room-alignment` and `python -m room_alignment` share one CLI dispatcher for service launch, dependency/resource diagnosis, and canonical-state administration. Source-checkout resource fallback exists only for development compatibility.
+
 ## Fixed semantics
 
-- `MediaAsset` is one file; `LogicalSource` is a user-confirmed viewpoint containing one or more `ProjectClip` records. Candidate labels never silently merge sources.
+- `MediaAsset` is one file; `LogicalSource` is a user-confirmed viewpoint containing one or more `ProjectClip` records. Candidate/label evidence is proposed in event-sized groups and becomes source identity only after explicit confirmation; every grouping remains reversible through split/reassign/merge commands.
 - Native stream timing, source-relative time, and project-output time are distinct. Persisted editorial time is integer microseconds; intervals are half-open.
 - Each clip has a deterministic bounded affine transform. Rate correction is limited to ±2,000 ppm, never silently clamped, and explicitly confirmed/disclosed.
 - Logical video/audio blocks compile to exact asset/stream/source ranges. Renderability requires exactly one video and one audio decision (or explicit synthetic silence) per output interval.
 - Suggestions are evidence-bearing, revision-bound records and cannot mutate a project until accepted as a project command.
+- Align previews are authenticated range reads beneath the current source grant. Up to six visible videos seek from the same canonical output clock; only the selected source is audible.
 - Render plans are immutable and full-hash selected sources. Review binds plan/project/provenance/source-set/warnings. Relevant changes stale review.
 - Artifact completion means both final video and final manifest exist and recorded digests were persisted; startup reconciles partial/pair crashes as recoverable failures.
 

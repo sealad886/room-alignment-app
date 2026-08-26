@@ -58,6 +58,13 @@ class StoreV1Tests(unittest.TestCase):
         output = self.store.create_grant(self.output, "WRITE_OUTPUT")
         self.assertEqual(output["role"], "WRITE_OUTPUT")
 
+    def test_grant_identity_change_fails_closed(self):
+        moved = Path(self.temp.name) / "moved-source"
+        self.root.rename(moved)
+        self.root.mkdir()
+        with self.assertRaisesRegex(DomainError, "identity changed"):
+            self.store.library_root(self.library["id"])
+
     def test_only_successful_full_scan_marks_unseen_assets_missing(self):
         one = self.record("one", "one.mp4")
         two = self.record("two", "two.mp4")
@@ -66,6 +73,122 @@ class StoreV1Tests(unittest.TestCase):
         self.assertFalse(self.store.media_record("two")["missing"])
         self.scan("FULL", [one])
         self.assertTrue(self.store.media_record("two")["missing"])
+
+    def test_multi_root_paths_are_distinct_and_missing_is_root_scoped(self):
+        second_root = Path(self.temp.name) / "second-source"
+        second_root.mkdir()
+        second_grant = self.store.create_grant(second_root, "READ_ONLY_SOURCE")
+        second = self.store.add_library_root(self.library["id"], second_grant["id"])
+        first = self.store.library(self.library["id"])["roots"][0]
+        (self.root / "same.mp4").write_bytes(b"first")
+        (second_root / "same.mp4").write_bytes(b"second")
+        first_record = MediaRecord(
+            "asset-first",
+            self.library["id"],
+            "same.mp4",
+            5,
+            1,
+            root_id=first["id"],
+            fingerprint={"size": 5, "modifiedNs": 1},
+        )
+        second_record = MediaRecord(
+            "asset-second",
+            self.library["id"],
+            "same.mp4",
+            6,
+            1,
+            root_id=second["id"],
+            fingerprint={"size": 6, "modifiedNs": 1},
+        )
+        scan = self.store.begin_scan(
+            self.library["id"], "FULL", root_ids=[first["id"], second["id"]]
+        )
+        self.store.save_media_batch(scan["id"], [first_record, second_record])
+        self.store.scan_progress(scan["id"], processed=1, root_id=first["id"])
+        self.store.scan_progress(scan["id"], processed=1, root_id=second["id"])
+        self.store.finish_scan_root(
+            scan["id"], first["id"], "SUCCEEDED", full_traversal_completed=True
+        )
+        self.store.finish_scan_root(
+            scan["id"], second["id"], "SUCCEEDED", full_traversal_completed=True
+        )
+        self.store.finish_scan(scan["id"], "SUCCEEDED", {"videos": 2})
+
+        page = self.store.media_page(self.library["id"])
+        self.assertEqual({item["id"] for item in page["items"]}, {"asset-first", "asset-second"})
+        self.assertEqual({item["rootId"] for item in page["items"]}, {first["id"], second["id"]})
+
+        root_only = self.store.begin_scan(self.library["id"], "FULL", root_ids=[first["id"]])
+        self.store.finish_scan_root(
+            root_only["id"], first["id"], "SUCCEEDED", full_traversal_completed=True
+        )
+        self.store.finish_scan(root_only["id"], "SUCCEEDED", {"videos": 0})
+        self.assertTrue(self.store.media_record("asset-first")["missing"])
+        self.assertFalse(self.store.media_record("asset-second")["missing"])
+
+    def test_library_rejects_duplicate_nested_and_overlapping_roots(self):
+        nested = self.root / "nested"
+        nested.mkdir()
+        nested_grant = self.store.create_grant(nested, "READ_ONLY_SOURCE")
+        with self.assertRaisesRegex(DomainError, "nested"):
+            self.store.add_library_root(self.library["id"], nested_grant["id"])
+
+    def test_revoking_one_library_root_preserves_other_root(self):
+        second_root = Path(self.temp.name) / "second-source"
+        second_root.mkdir()
+        second_grant = self.store.create_grant(second_root, "READ_ONLY_SOURCE")
+        second = self.store.add_library_root(self.library["id"], second_grant["id"])
+        first = self.store.library(self.library["id"])["roots"][0]
+        before_revision = self.store.library(self.library["id"])["catalogRevision"]
+        self.store.revoke_library_root(self.library["id"], first["id"])
+        active = self.store.active_library_root_paths(self.library["id"])
+        self.assertEqual([item[0] for item in active], [second["id"]])
+        self.assertFalse(self.store.library_roots(self.library["id"])[0]["active"])
+        after_revision = self.store.library(self.library["id"])["catalogRevision"]
+        self.assertEqual(after_revision, before_revision + 1)
+        self.store.revoke_library_root(self.library["id"], first["id"])
+        self.assertEqual(self.store.library(self.library["id"])["catalogRevision"], after_revision)
+
+    def test_disconnected_root_reconnects_with_stable_root_identity(self):
+        root = self.store.library(self.library["id"])["roots"][0]
+        self.store.revoke_library_root(self.library["id"], root["id"])
+        replacement_grant = self.store.create_grant(self.root, "READ_ONLY_SOURCE")
+        reconnected = self.store.add_library_root(self.library["id"], replacement_grant["id"])
+        self.assertEqual(reconnected["id"], root["id"])
+        self.assertTrue(reconnected["active"])
+        self.assertEqual(self.store.active_library_root_paths(self.library["id"])[0][0], root["id"])
+
+    def test_root_time_policy_override_is_explicit_and_survives_library_policy_change(self):
+        second_root = Path(self.temp.name) / "second-source"
+        second_root.mkdir()
+        second_grant = self.store.create_grant(second_root, "READ_ONLY_SOURCE")
+        second = self.store.add_library_root(
+            self.library["id"],
+            second_grant["id"],
+            time_policy_override={
+                "timeZone": "America/New_York",
+                "dstFold": 0,
+                "nonexistentPolicy": "REJECT",
+            },
+        )
+        (second_root / "local.mp4").write_bytes(b"media")
+        record = MediaRecord(
+            "local-time",
+            self.library["id"],
+            "local.mp4",
+            5,
+            1,
+            root_id=second["id"],
+            captured_at="2025-10-15T12:00:00",
+        )
+        scan = self.store.begin_scan(self.library["id"], "FULL", root_ids=[second["id"]])
+        self.store.save_media_batch(scan["id"], [record])
+        self.store.finish_scan(scan["id"], "SUCCEEDED", {"videos": 1})
+        self.assertEqual(self.store.media_record("local-time")["captured_at"], "2025-10-15T16:00:00Z")
+        self.store.update_library_time_policy(self.library["id"], "Asia/Tokyo")
+        resolved = self.store.media_record("local-time")
+        self.assertEqual(resolved["captured_at"], "2025-10-15T16:00:00Z")
+        self.assertEqual(resolved["custom"]["timestampPolicy"]["timeZone"], "America/New_York")
 
     def test_canceled_full_scan_cannot_commit_success_or_reuse_generation(self):
         one = self.record("one", "one.mp4")
@@ -105,6 +228,9 @@ class StoreV1Tests(unittest.TestCase):
         media = self.record("one", "one.mp4")
         self.scan("FULL", [media])
         project = self.store.create_project("Event", self.library["id"], ["one"])
+        self.assertEqual(project["videoBlocks"], [])
+        self.assertEqual(project["audioBlocks"], [])
+        self.assertIsNone(project["programDraft"])
         other_project = self.store.create_project("Other event", self.library["id"], ["one"])
         envelope = {
             "commandId": "command-1",
@@ -119,6 +245,28 @@ class StoreV1Tests(unittest.TestCase):
         self.assertIn("affectedIntervals", first)
         self.assertEqual(self.store.project_revision(project["id"], 1)["name"], "Event")
         self.assertEqual(self.store.project_revision(project["id"], 2)["name"], "Renamed")
+        with self.store.connect() as db:
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM project_revisions WHERE project_id=?",
+                    (project["id"],),
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM project_revision_deltas WHERE project_id=?",
+                    (project["id"],),
+                ).fetchone()[0],
+                1,
+            )
+            self.assertGreater(
+                db.execute(
+                    "SELECT COUNT(*) FROM project_components WHERE project_id=?",
+                    (project["id"],),
+                ).fetchone()[0],
+                0,
+            )
         with self.assertRaisesRegex(DomainError, "already used"):
             self.store.apply_project_command(other_project["id"], envelope)
         self.assertEqual(self.store.project(other_project["id"])["name"], "Other event")
@@ -137,6 +285,24 @@ class StoreV1Tests(unittest.TestCase):
                     "payload": {"name": "Stale"},
                 },
             )
+
+    def test_delta_command_returns_only_changed_project_fields(self):
+        self.scan("FULL", [self.record("delta", "delta.mp4")])
+        project = self.store.create_project("Delta", self.library["id"], ["delta"])
+        result = self.store.apply_project_delta_command(
+            project["id"],
+            {
+                "commandId": "delta-command",
+                "expectedRevision": project["revision"],
+                "commandType": "UpdateProjectMetadata",
+                "payload": {"name": "Delta renamed"},
+            },
+        )
+        self.assertNotIn("project", result)
+        self.assertEqual(result["changedEntities"]["set"]["name"], "Delta renamed")
+        self.assertNotIn("clips", result["changedEntities"]["set"])
+        self.assertEqual(result["projectSummary"]["revision"], 2)
+        self.assertIn("current", result["issueDelta"])
 
     def test_restart_marks_running_render_recoverable(self):
         job = self.store.create_job("RENDER")
@@ -324,6 +490,18 @@ class StoreV1Tests(unittest.TestCase):
                 if sidecar.exists():
                     self.assertNotEqual(sidecar.read_bytes(), stale)
 
+    def test_staged_migration_uses_named_rows_for_existing_canonical_state(self):
+        state = Path(self.temp.name) / "state.sqlite3"
+        connection = sqlite3.connect(state)
+        connection.execute("PRAGMA user_version=6")
+        connection.commit()
+        connection.close()
+
+        reopened = Store(state)
+
+        self.assertEqual(reopened.library(self.library["id"])["id"], self.library["id"])
+        self.assertTrue(list(Path(self.temp.name).glob("state.sqlite3.backup-v6-*")))
+
     def test_legacy_project_migration_preserves_unknowns_and_requires_explicit_silence(self):
         first = self.record("first", "first.mp4")
         second = self.record("second", "second.mp4")
@@ -422,6 +600,41 @@ class StoreV1Tests(unittest.TestCase):
         self.assertEqual(suggestion["status"], "STALE")
         self.assertIn("revision changed", suggestion["invalidationReason"])
         self.assertEqual(self.store.suggestions(project["id"])[0]["status"], "STALE")
+
+    def test_alignment_acceptance_rejects_client_tampering(self):
+        self.scan("FULL", [self.record("suggestion-media", "suggestion.mp4")])
+        project = self.store.create_project("Suggestion", self.library["id"], ["suggestion-media"])
+        clip = project["clips"][0]
+        suggestion = self.store.save_suggestion(
+            {
+                "projectId": project["id"],
+                "libraryId": self.library["id"],
+                "kind": "ALIGNMENT",
+                "inputDigest": "current-project-input",
+                "algorithm": "test-alignment",
+                "projectRevision": project["revision"],
+                "confidence": 0.5,
+                "clipId": clip["id"],
+                "sync": {"anchorSourceUs": 0, "anchorOutputUs": 100_000, "ratePpm": 0},
+                "evidence": [],
+                "limitations": [],
+            }
+        )
+        with self.assertRaisesRegex(DomainError, "canonical evidence"):
+            self.store.apply_project_command(
+                project["id"],
+                {
+                    "commandId": "tampered-suggestion",
+                    "expectedRevision": project["revision"],
+                    "commandType": "AcceptAlignmentSuggestion",
+                    "payload": {
+                        "suggestionId": suggestion["id"],
+                        "clipId": clip["id"],
+                        "sync": {"anchorSourceUs": 0, "anchorOutputUs": 999_000, "ratePpm": 0},
+                        "confirmDrift": False,
+                    },
+                },
+            )
 
 
 if __name__ == "__main__":

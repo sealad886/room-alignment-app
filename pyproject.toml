@@ -1,12 +1,58 @@
+[build-system]
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
+
 [project]
 name = "room-alignment"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local-first multi-camera video alignment and single-view editing"
+readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{name = "Andrew M. Cox"}]
+keywords = ["video", "alignment", "security-camera", "provenance", "local-first"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Environment :: Console",
+  "Intended Audience :: End Users/Desktop",
+  "Operating System :: MacOS",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Multimedia :: Video",
+]
+
+[project.urls]
+Homepage = "https://github.com/sealad886/room-alignment-app"
+Issues = "https://github.com/sealad886/room-alignment-app/issues"
 
 [project.scripts]
-room-alignment = "room_alignment.server:main"
+room-alignment = "room_alignment.cli:main"
+
+[tool.hatch.build]
+skip-excluded-dirs = true
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/CHANGELOG.md",
+  "/LICENSE",
+  "/NOTICE",
+  "/README.md",
+  "/contracts",
+  "/docs",
+  "/pyproject.toml",
+  "/room_alignment",
+  "/scripts",
+  "/tests",
+  "/web",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["room_alignment"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"contracts" = "room_alignment/contracts"
+"web" = "room_alignment/web"
 
 [tool.ruff]
 line-length = 100

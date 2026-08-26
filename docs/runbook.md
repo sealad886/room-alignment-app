@@ -3,10 +3,21 @@
 ## Start and stop
 
 ```bash
-python3 -m room_alignment.server --no-open --data-dir /path/to/state
+room-alignment serve --no-open --data-dir /path/to/state
 ```
 
 Health is intentionally non-sensitive at `/api/health`. A second process using the same state directory fails before scheduling work. Graceful shutdown rejects new work, requests scan cancellation, terminates owned render process trees, persists job transitions, and releases ownership. On restart, in-flight analyses/scans are `INTERRUPTED`; renders are never blindly reattached and become `FAILED_RECOVERABLE` where appropriate.
+
+Run `room-alignment doctor` before first use or after changing Python/FFmpeg. It checks installed frontend/schema resources and FFmpeg/FFprobe availability without exposing absolute paths.
+
+Build/install validation uses a temporary virtual environment and state directory:
+
+```bash
+uv build
+python3 scripts/verify_package.py dist/room_alignment-0.3.0-py3-none-any.whl
+```
+
+The verifier installs without network access, starts on an ephemeral loopback port, validates authenticated resources, sends SIGTERM, and reuses the same state directory. It never scans a media library.
 
 ## Scan diagnosis
 
@@ -21,15 +32,15 @@ Resolve canonical blocker codes in Review. Existing output/manifest, insufficien
 Application backup is canonical SQLite state only; source libraries and rendered outputs remain separate.
 
 ```bash
-python3 scripts/state_admin.py backup STATE.sqlite3 BACKUP.sqlite3
-python3 scripts/state_admin.py verify BACKUP.sqlite3
-python3 scripts/state_admin.py dry-run-migrate BACKUP.sqlite3
+room-alignment admin backup STATE.sqlite3 BACKUP.sqlite3
+room-alignment admin verify BACKUP.sqlite3
+room-alignment admin dry-run-migrate BACKUP.sqlite3
 ```
 
 Stop the application before restore. Restore verifies the input, refuses without `--replace`, takes the state lock, creates a verified `*.pre-restore-*` rollback copy, stages the replacement, and atomically replaces the DB.
 
 ```bash
-python3 scripts/state_admin.py restore STATE.sqlite3 BACKUP.sqlite3 --replace
+room-alignment admin restore STATE.sqlite3 BACKUP.sqlite3 --replace
 ```
 
 After restore, start normally, inspect projects/jobs/grants, and regrant unavailable source/output directories as needed. Restore never assumes media was included.

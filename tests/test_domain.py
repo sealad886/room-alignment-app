@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from room_alignment.domain import (
+    ClipAlignmentTransform,
     DomainError,
     SyncTransform,
     apply_command,
@@ -40,6 +41,13 @@ class TimeTransformTests(unittest.TestCase):
     def test_rate_bounds_reject_instead_of_clamp(self):
         with self.assertRaisesRegex(DomainError, "ratePpm"):
             SyncTransform(rate_ppm=2_001)
+
+    def test_alignment_transform_names_the_evidence_clock_and_round_trips(self):
+        transform = ClipAlignmentTransform(250_000, 900_000, 731)
+        self.assertEqual(transform.to_dict()["anchorAlignedUs"], 900_000)
+        for source_us in (-5_000_000, 0, 250_000, 90_000_000):
+            round_trip = transform.aligned_to_source(transform.source_to_aligned(source_us))
+            self.assertLessEqual(abs(round_trip - source_us), 1)
 
 
 class ProgramCompilerTests(unittest.TestCase):
@@ -116,12 +124,56 @@ class ProgramCompilerTests(unittest.TestCase):
         resolved = compile_program(project, by_id)
         self.assertTrue(resolved["valid"], resolved["issues"])
 
-    def test_source_candidates_never_silently_become_one_logical_source(self):
+    def test_source_candidates_form_one_provisional_track_without_becoming_confirmed(self):
         assets = [asset("a", "Same label", 5_000_000), asset("b", "Same label", 5_000_000)]
         assets[0]["sourceCandidateId"] = assets[1]["sourceCandidateId"] = "candidate-same"
         project = new_project("Event", "lib", assets, "project")
-        self.assertEqual(len(project["logicalSources"]), 2)
-        self.assertNotEqual(project["clips"][0]["logicalSourceId"], project["clips"][1]["logicalSourceId"])
+        self.assertEqual(len(project["logicalSources"]), 1)
+        self.assertEqual(project["logicalSources"][0]["identityState"], "PROVISIONAL")
+        self.assertEqual(
+            {project["clips"][0]["logicalSourceId"], project["clips"][1]["logicalSourceId"]},
+            {project["logicalSources"][0]["id"]},
+        )
+
+    def test_source_identity_requires_an_explicit_confirmation_command(self):
+        media = asset("a", "Door", 5_000_000)
+        media["sourceCandidateId"] = "candidate-door"
+        project = new_project(
+            "Event", "lib", [media], "project", initialize_legacy_program=False
+        )
+        source_id = project["logicalSources"][0]["id"]
+        confirmed = apply_command(
+            project,
+            "ConfirmSourceIdentities",
+            {"sourceIds": [source_id]},
+            {"a": media},
+        )
+        self.assertEqual(confirmed["logicalSources"][0]["identityState"], "USER_CONFIRMED")
+        self.assertIn("confirmedAt", confirmed["logicalSources"][0])
+
+    def test_explicit_source_groups_create_one_confirmed_logical_source(self):
+        assets = [asset("a", "Door", 5_000_000), asset("b", "Door", 5_000_000)]
+        assets[0]["sourceCandidateId"] = assets[1]["sourceCandidateId"] = "candidate-door"
+        project = new_project(
+            "Event",
+            "lib",
+            assets,
+            "project",
+            source_groups=[{"label": "Door", "assetIds": ["a", "b"]}],
+        )
+        self.assertEqual(len(project["logicalSources"]), 1)
+        self.assertEqual(project["logicalSources"][0]["identityState"], "USER_CONFIRMED")
+        self.assertEqual({clip["logicalSourceId"] for clip in project["clips"]}, {project["logicalSources"][0]["id"]})
+
+    def test_source_groups_must_partition_selected_assets_exactly_once(self):
+        assets = [asset("a", "Door", 5_000_000), asset("b", "Entry", 5_000_000)]
+        with self.assertRaisesRegex(DomainError, "exactly once"):
+            new_project(
+                "Event",
+                "lib",
+                assets,
+                source_groups=[{"label": "Door", "assetIds": ["a"]}],
+            )
 
     def test_follow_video_without_audio_blocks_instead_of_inventing_silence(self):
         media = asset("a", "Door", 5_000_000, audio=False)
@@ -161,6 +213,34 @@ class ProgramCompilerTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    def test_legacy_program_initialization_command_is_rejected(self):
+        media = asset("a", "Door", 5_000_000)
+        project = new_project(
+            "Event", "lib", [media], "project", initialize_legacy_program=False
+        )
+        with self.assertRaisesRegex(DomainError, "Unsupported commandType"):
+            apply_command(project, "InitializeProgram", {}, {"a": media})
+
+    def test_new_evidence_project_accepts_manual_alignment_before_program_generation(self):
+        media = asset("a", "Door", 5_000_000)
+        media["captured_at"] = "2025-10-15T12:00:00+00:00"
+        project = new_project(
+            "Event", "lib", [media], "project", initialize_legacy_program=False
+        )
+        self.assertEqual(project["videoBlocks"], [])
+        self.assertEqual(project["clips"][0]["alignmentState"], "PROVISIONAL")
+        changed = apply_command(
+            project,
+            "SetClipAlignment",
+            {
+                "clipId": project["clips"][0]["id"],
+                "alignment": {"anchorSourceUs": 0, "anchorAlignedUs": 250_000, "ratePpm": 0},
+                "confirmDrift": False,
+            },
+            {"a": media},
+        )
+        self.assertEqual(changed["clips"][0]["alignmentState"], "ACCEPTED")
+        self.assertEqual(changed["videoBlocks"], [])
     def test_malformed_payload_is_a_stable_validation_error(self):
         media = asset("a", "Door", 5_000_000)
         project = new_project("Event", "lib", [media], "project")
@@ -412,6 +492,32 @@ class CommandTests(unittest.TestCase):
             (changed["audioBlocks"][0]["startUs"], changed["audioBlocks"][0]["endUs"]),
             (125_000, 5_125_000),
         )
+
+    def test_batch_alignment_suggestions_apply_as_one_project_change(self):
+        assets = [asset("a", "Door", 5_000_000), asset("b", "Entry", 5_000_000)]
+        project = new_project("Event", "lib", assets, "project")
+        changed = apply_command(
+            project,
+            "AcceptAlignmentSuggestions",
+            {
+                "suggestions": [
+                    {
+                        "suggestionId": "suggestion-a",
+                        "clipId": project["clips"][0]["id"],
+                        "sync": {"anchorSourceUs": 0, "anchorOutputUs": 0, "ratePpm": 0},
+                        "confirmDrift": False,
+                    },
+                    {
+                        "suggestionId": "suggestion-b",
+                        "clipId": project["clips"][1]["id"],
+                        "sync": {"anchorSourceUs": 0, "anchorOutputUs": 750_000, "ratePpm": 0},
+                        "confirmDrift": False,
+                    },
+                ]
+            },
+            {item["id"]: item for item in assets},
+        )
+        self.assertEqual(changed["clips"][1]["sync"]["anchorOutputUs"], 750_000)
 
     def test_nonzero_drift_requires_explicit_confirmation(self):
         media = asset("a", "Door", 5_000_000)

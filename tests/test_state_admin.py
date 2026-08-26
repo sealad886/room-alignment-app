@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from room_alignment.state_admin import backup, dry_run_migration, restore
 from room_alignment.store import Store
-from scripts.state_admin import backup, dry_run_migration, restore
 
 
 class StateAdministrationTests(unittest.TestCase):
@@ -57,7 +57,7 @@ class StateAdministrationTests(unittest.TestCase):
                 Path(f"{destination}-wal").write_bytes(b"stale wal")
                 Path(f"{destination}-shm").write_bytes(b"stale shm")
 
-            with patch("scripts.state_admin.os.replace", side_effect=replace_then_create_stale_sidecars):
+            with patch("room_alignment.state_admin.os.replace", side_effect=replace_then_create_stale_sidecars):
                 restore(state, backup_file, replace=True)
             for suffix, stale in (("-wal", b"stale wal"), ("-shm", b"stale shm")):
                 sidecar = Path(f"{state}{suffix}")
@@ -92,6 +92,35 @@ class StateAdministrationTests(unittest.TestCase):
                 preserved.close()
             self.assertFalse(list(state.parent.glob(".state.sqlite3.migration-*")))
             self.assertTrue(list(state.parent.glob("state.sqlite3.backup-v0-*")))
+
+    def test_dry_run_adds_legacy_columns_before_creating_new_indexes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state.sqlite3"
+            connection = sqlite3.connect(state)
+            connection.executescript(
+                """
+                CREATE TABLE media (
+                  id TEXT PRIMARY KEY,
+                  library_id TEXT NOT NULL,
+                  relative_path TEXT NOT NULL,
+                  captured_at TEXT,
+                  camera TEXT,
+                  duration REAL,
+                  first_generation INTEGER NOT NULL DEFAULT 0,
+                  last_generation INTEGER NOT NULL DEFAULT 0,
+                  missing INTEGER NOT NULL DEFAULT 0,
+                  fingerprint_json TEXT NOT NULL DEFAULT '{}',
+                  record_json TEXT NOT NULL
+                );
+                PRAGMA user_version=3;
+                """
+            )
+            connection.close()
+
+            result = dry_run_migration(state)
+
+            self.assertEqual(result["integrity"], "ok")
+            self.assertEqual(result["schemaVersion"], 7)
 
 
 if __name__ == "__main__":

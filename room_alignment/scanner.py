@@ -21,8 +21,8 @@ from .provenance import infer_from_path, merge_evidence, read_sidecar
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".mkv", ".m4v", ".avi", ".webm", ".mts", ".m2ts", ".ts"}
 
 
-def stable_media_id(library_id: str, relative_path: str) -> str:
-    return hashlib.sha256(f"{library_id}\0{relative_path}".encode()).hexdigest()[:24]
+def stable_media_id(library_id: str, relative_path: str, root_id: str | None = None) -> str:
+    return hashlib.sha256(f"{library_id}\0{root_id or 'legacy'}\0{relative_path}".encode()).hexdigest()[:24]
 
 
 def quick_fingerprint(path: Path) -> dict[str, Any]:
@@ -52,7 +52,7 @@ def quick_fingerprint(path: Path) -> dict[str, Any]:
             if sidecar and sidecar_stat
             else None
         ),
-        "probeVersion": 2,
+        "probeVersion": 3,
     }
 
 
@@ -75,7 +75,7 @@ def cheap_fingerprint(path: Path) -> dict[str, Any]:
             if sidecar and sidecar_stat
             else None
         ),
-        "probeVersion": 2,
+        "probeVersion": 3,
     }
 
 
@@ -262,8 +262,10 @@ def iter_scan_records(
     root: Path,
     library_id: str,
     *,
+    root_id: str | None = None,
     mode: str = "FULL",
     existing_lookup: Callable[[str], dict[str, Any] | None] | None = None,
+    existing_batch_lookup: Callable[[list[str]], dict[str, dict[str, Any]]] | None = None,
     canceled: Callable[[], bool] | None = None,
     max_files: int | None = None,
     probe_workers: int = 4,
@@ -281,7 +283,9 @@ def iter_scan_records(
     executor = ThreadPoolExecutor(max_workers=worker_count, thread_name_prefix="media-probe")
     try:
         while pending or not exhausted:
-            while not exhausted and len(pending) < worker_count * 2:
+            capacity = worker_count * 2 - len(pending)
+            candidates: list[tuple[Path, str, dict[str, Any]]] = []
+            while not exhausted and len(candidates) < capacity:
                 if should_stop():
                     exhausted = True
                     break
@@ -300,11 +304,27 @@ def iter_scan_records(
                     cheap = cheap_fingerprint(path)
                 except OSError:
                     cheap = {}
-                existing = existing_lookup(relative_text) if existing_lookup else None
+                candidates.append((path, relative_text, cheap))
+            existing_by_path = (
+                existing_batch_lookup([item[1] for item in candidates])
+                if existing_batch_lookup and candidates
+                else {}
+            )
+            for path, relative_text, cheap in candidates:
+                existing = existing_by_path.get(relative_text)
+                if existing is None and existing_lookup:
+                    existing = existing_lookup(relative_text)
                 if mode == "INCREMENTAL" and existing and _fingerprint_matches(existing.get("fingerprint", {}), cheap):
-                    yield media_record_from_dict(existing, library_id)
+                    cached = media_record_from_dict(existing, library_id)
+                    cached.root_id = root_id
+                    yield cached
                     continue
-                pending.add(executor.submit(_scan_path, resolved, path, library_id, should_stop))
+                if root_id is None:
+                    pending.add(executor.submit(_scan_path, resolved, path, library_id, should_stop))
+                else:
+                    pending.add(
+                        executor.submit(_scan_path, resolved, path, library_id, should_stop, root_id)
+                    )
             if not pending:
                 continue
             completed, pending = wait(pending, return_when=FIRST_COMPLETED)
@@ -326,6 +346,7 @@ def _scan_path(
     path: Path,
     library_id: str,
     canceled: Callable[[], bool] | None,
+    root_id: str | None = None,
 ) -> MediaRecord:
     relative = path.relative_to(root)
     relative_text = relative.as_posix()
@@ -334,8 +355,9 @@ def _scan_path(
         if not resolved_path.is_relative_to(root) or not resolved_path.is_file():
             stat = path.lstat()
             return MediaRecord(
-                id=stable_media_id(library_id, relative_text),
+                id=stable_media_id(library_id, relative_text, root_id),
                 library_id=library_id,
+                root_id=root_id,
                 relative_path=relative_text,
                 size=stat.st_size,
                 modified_ns=stat.st_mtime_ns,
@@ -347,18 +369,23 @@ def _scan_path(
         sidecar = read_sidecar(resolved_path, relative)
         probed_values, probed_evidence, warning = probe(resolved_path, canceled=canceled)
         values, evidence = merge_evidence(inferred, (probed_values, probed_evidence), sidecar)
-        candidate_material = {
-            "cameraEvidence": [
-                {"kind": item.kind, "value": item.value, "origin": item.origin}
+        camera_evidence = sorted(
+            {
+                (item.kind, str(item.normalized_value if item.normalized_value is not None else item.value).strip().casefold())
                 for item in evidence
-                if item.field == "camera"
-            ],
-            "parent": relative.parent.as_posix(),
-        }
+                if item.field == "camera" and (item.normalized_value is not None or item.value is not None)
+            }
+        )
+        candidate_material = (
+            {"cameraEvidence": camera_evidence}
+            if camera_evidence
+            else {"parent": relative.parent.as_posix().casefold()}
+        )
         stat = resolved_path.stat()
         return MediaRecord(
-            id=stable_media_id(library_id, relative_text),
+            id=stable_media_id(library_id, relative_text, root_id),
             library_id=library_id,
+            root_id=root_id,
             relative_path=relative_text,
             size=stat.st_size,
             modified_ns=stat.st_mtime_ns,
@@ -375,8 +402,9 @@ def _scan_path(
         except OSError:
             size, modified_ns = 0, 0
         return MediaRecord(
-            id=stable_media_id(library_id, relative_text),
+            id=stable_media_id(library_id, relative_text, root_id),
             library_id=library_id,
+            root_id=root_id,
             relative_path=relative_text,
             size=size,
             modified_ns=modified_ns,
@@ -395,6 +423,7 @@ def media_record_from_dict(value: dict[str, Any], library_id: str | None = None)
     data["library_id"] = library_id or data.pop("libraryId", data.get("library_id"))
     data["duration_us"] = data.pop("durationUs", data.get("duration_us"))
     data["source_candidate_id"] = data.pop("sourceCandidateId", data.get("source_candidate_id"))
+    data["root_id"] = data.pop("rootId", data.get("root_id"))
     evidence = []
     for item in data.get("evidence", []):
         evidence.append(item if isinstance(item, ProvenanceEvidence) else ProvenanceEvidence(**_evidence_kwargs(item)))

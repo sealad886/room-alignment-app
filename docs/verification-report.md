@@ -1,17 +1,81 @@
-# Local release-candidate verification report
+# Verification report
 
-Date: 2026-08-25 (Europe/Dublin)
+Date: 2026-08-26 (Europe/Dublin)
 
-Scope: local source release candidate in the isolated `codex/technology-agnostic-backend` worktree. Evidence does not claim packaging, installation, publication, deployment, or production operation.
+## Comprehensive timeline source candidate
+
+Scope: isolated `codex/comprehensive-timeline` worktree. This evidence covers
+source implementation and local runtime validation for multi-root libraries,
+hierarchical sessions/events, exact multi-cluster selection, evidence-first
+alignment, explicit composition sections, optimized single-view first cuts,
+independent audio, immutable render provenance, and large-project operation.
+It does not claim a rebuilt package, installation, push, PR, merge, publication,
+deployment, or production observation.
+
+- Six milestone commits isolate contracts, multi-root scanning, hierarchical
+  selection, evidence-first alignment, large-project compilation, and render
+  provenance.
+- A connected synthetic run selected two non-adjacent events containing four
+  exact clips across two sources. Evidence span was 65 seconds; explicit
+  downtime exclusion produced a 9.083-second output with three optimized source
+  transitions. Cut and Review became available only after accepted alignment.
+- Program Video and Program Audio remained independent in Cut. Browser console
+  reported no warnings or errors through Review.
+- A fresh read-only reference-day scan indexed 726 videos and one non-video
+  file with zero warnings. Hierarchical clustering produced 21 sessions and
+  151 events with zero timed assets left unclustered. First session contained
+  116 clips, 12 events, and three source candidates across about 76 minutes.
+- Source-tree metadata digest remained unchanged before and after validation;
+  no identifying filename or absolute source path is committed.
+- `scripts/benchmark_large_project.py` compiled 10,000 contiguous clips into
+  10,000 video and 10,000 audio slices in under 0.5 seconds with under 100 MiB
+  tracked Python peak memory on reference hardware.
+- Existing schema-v6 UAT state migrated and reopened successfully. A Cut audio
+  decision changed to intentional silence through the delta endpoint, advanced
+  canonical revision, and remained Review-ready with zero browser warnings or
+  errors.
+- Production schema-v3 state passed copy-only migration validation with
+  `integrity=ok schemaVersion=7 tables=29`; canonical source state was not
+  modified.
+- `python3 -m unittest discover -s tests` passed 154 tests. Generated-client
+  parity, Python byte-compilation, JavaScript syntax, and diff checks passed.
+
+Scope: version 0.3.0 package candidate in isolated `codex/installable-package` worktree, based on merged PR #2 commit `c27bca3`. Evidence covers local package build and temporary isolated installation. It does not claim signing, notarization, publication, distribution, system-wide installation, deployment, or production operation.
+
+## Unreleased alignment usability correction on `main`
+
+On 2026-08-26, the live loopback app was restarted from the current `main` working tree against its existing local state and inspected in the user-selected Brave browser with the indexed reference corpus. Evidence for this unreleased correction is separate from the 0.3.0 package artifact evidence below.
+
+- `python -m unittest discover -s tests` — **115 tests passed**, including explicit source-partition validation, atomic multi-suggestion application, canonical suggestion-tampering rejection, stable source candidates across per-file evidence origins, authenticated source-preview range reads, and source-byte preservation.
+- `python scripts/generate_api_client.py --check`, `python -m compileall -q room_alignment scripts tests`, `node --check web/app.js`, `node --check web/api-client.js`, and `git diff --check` passed.
+- Brave displayed loaded-media event windows: the first observed window contained 10 clips and 3 proposed logical sources instead of a whole-day 500-clip project.
+- Project creation remained disabled until the proposed source grouping was explicitly confirmed.
+- Six real source videos loaded through authenticated `/api/v1/media/{mediaId}/preview` requests with no media errors. Seeking the shared playhead to 50% placed all six previews at 30.550 seconds; only the selected source was audible.
+- The final Brave trace showed successful preview metadata probes (`HEAD 200`) and byte-range playback (`GET 206`) with no preview 5xx responses; disconnected range clients are handled without false server errors.
+- Existing legacy projects are not rewritten automatically. The previously created 500-source project remains available exactly as saved; creating a new project through the corrected Library flow applies the explicit grouped-source contract.
+- A wheel and source archive were built from committed alignment revision `341631c` into a temporary directory. Clean-wheel verification reported frontend loaded, health/OpenAPI/state administration ready, clean SIGTERM, reusable state lock, checkout-independent resources, and wheel SHA-256 `23a5abeb5d11f1ef0d72eee9680b41b4e0d190a69d04d3fa514dfeb04d321f02`. They were not installed system-wide or published.
+- Pinned Ruff 0.16.3 reports 52 non-blocking findings and pinned Pyright 1.1.411 reports the same 21 baseline type findings. Per the P2 policy these remain deferred under issue #7; this milestone did not auto-fix or accept them.
 
 ## Automated and contract verification
 
-- `PYTHONWARNINGS=error::ResourceWarning python3 -m unittest discover -v` — **56 tests passed**, 0 failed, 0 skipped outside the sandbox; includes loopback security/session tests and native FFmpeg renders.
+- `PYTHONWARNINGS=error::ResourceWarning python3 -m unittest discover -v` — **109 tests passed**, 0 failed, 0 skipped; includes package CLI/resource/port-lock cases, loopback security/session tests, and native FFmpeg renders.
 - `python3 scripts/generate_api_client.py --check` — generated browser client matches normative OpenAPI.
 - `python3 -m compileall -q room_alignment scripts tests` — passed.
 - `node --check web/api-client.js` and `node --check web/app.js` — passed.
 - `git diff --check` — passed.
 - Contract tests parse every normative JSON schema, enumerate required route families/error codes/commands, and verify generated-client currency.
+
+## Package build and clean-install evidence
+
+- `uv build --clear` produced `room_alignment-0.3.0-py3-none-any.whl` and `room_alignment-0.3.0.tar.gz` through pinned Hatchling 1.27.0 in an isolated PEP 517 environment.
+- Repeated independent builds were byte-for-byte identical for both wheel and source archive.
+- Wheel SHA-256: `0b91084db5a064703dcb702ca48553978ef8940e958621e32b1b828fc9ee574e`.
+- `scripts/verify_package.py` inspected required wheel members and license/entry-point metadata, created a fresh temporary virtual environment, installed with `--no-index --no-deps`, and launched from outside the repository.
+- Installed runtime loaded frontend, health, authenticated system/OpenAPI resources, and reported version 0.3.0 through both console and `python -m room_alignment` entry points. Installed state-administration command returned `integrity=ok`. `room-alignment doctor` confirmed packaged resources plus FFmpeg/FFprobe 9.0.1 against minimum major 6.
+- SIGTERM exited cleanly and immediate relaunch against the same state directory succeeded, proving application-lock release. Port-bind failure has a separate lock-release regression test.
+- Verifier never granted or scanned a media directory; no source media or private path entered either artifact.
+
+Pinned Ruff 0.16.3 reports 51 non-blocking style/modernization findings and pinned Pyright 1.1.411 reports 21 basic-mode findings, predominantly inherited from the merged baseline. No behavioral failure was reproduced; per P2 policy they are deferred to [issue #7](https://github.com/sealad886/room-alignment-app/issues/7), not silently accepted or expanded into this package milestone.
 
 ## Connected browser and accessibility evidence
 
@@ -60,4 +124,4 @@ The runtime path and identifying filenames are intentionally absent from this re
 
 ## Delivery-state boundary
 
-Implementation, local verification, browser observation, and representative-corpus observation are complete. The branch is pushed to `origin` and pull request #2 is open for automated review. Packaging, installation, merge, signing, notarization, publication, deployment, distribution, and production observation were not authorized or performed.
+Core implementation and PR #2 merge are complete. Local package build plus temporary clean installation/runtime verification are complete. Artifact files remain local and ignored by Git. No push/PR for package changes, signing, notarization, publication, deployment, distribution, system-wide installation, or production observation was authorized or performed.

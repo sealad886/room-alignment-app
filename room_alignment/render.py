@@ -16,7 +16,15 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from .domain import DomainError, compile_program, digest_json, now_iso, opaque_id
+from . import __version__
+from .domain import (
+    DomainError,
+    alignment_digest,
+    compile_program,
+    digest_json,
+    now_iso,
+    opaque_id,
+)
 from .scanner import full_digest
 from .store import Store
 
@@ -35,7 +43,6 @@ def _safe_source(root: Path, relative: str) -> Path:
 
 
 def preflight(store: Store, project: dict[str, Any]) -> dict[str, Any]:
-    root = store.library_root(project["libraryId"])
     video = sorted(project.get("videoSegments", []), key=lambda item: item["start"])
     audio = sorted(project.get("audioSegments", []), key=lambda item: item["start"])
     issues: list[dict[str, str]] = []
@@ -51,7 +58,7 @@ def preflight(store: Store, project: dict[str, Any]) -> dict[str, Any]:
         cursor = max(cursor, end)
         try:
             media = store.media_record(segment["mediaId"])
-            _safe_source(root, media["relative_path"])
+            store.media_source_path(media["id"])
             required_duration = float(segment.get("sourceIn", 0)) + end - start
             if media.get("duration") is not None and required_duration > float(media["duration"]) + 0.05:
                 issues.append({"kind": "missing-coverage", "message": f"{segment.get('id', 'segment')} exceeds source duration by {required_duration - float(media['duration']):.3f}s"})
@@ -65,7 +72,7 @@ def preflight(store: Store, project: dict[str, Any]) -> dict[str, Any]:
             continue
         try:
             media = store.media_record(segment["mediaId"])
-            _safe_source(root, media["relative_path"])
+            store.media_source_path(media["id"])
             if not media.get("audio_codec"):
                 issues.append({"kind": "missing-audio", "message": f"{segment.get('id', 'audio segment')} selects a source without an audio stream"})
         except (KeyError, OSError, PreflightError) as error:
@@ -132,7 +139,6 @@ def build_ffmpeg_command(store: Store, project: dict[str, Any], output: Path, lo
     check = preflight(store, project)
     if not check["valid"]:
         raise PreflightError("Render blocked: " + "; ".join(item["message"] for item in check["issues"]))
-    root = store.library_root(project["libraryId"])
     video = sorted(project["videoSegments"], key=lambda item: item["start"])
     audio = sorted(project.get("audioSegments", []), key=lambda item: item["start"])
     command = ["ffmpeg", "-hide_banner", "-nostdin", "-y"]
@@ -143,7 +149,7 @@ def build_ffmpeg_command(store: Store, project: dict[str, Any], output: Path, lo
     target_fps = float(first_media.get("frame_rate") or 30)
     for index, segment in enumerate(video):
         media = store.media_record(segment["mediaId"])
-        source = _safe_source(root, media["relative_path"])
+        source = store.media_source_path(media["id"])
         duration = float(segment["end"]) - float(segment["start"])
         command += ["-ss", str(float(segment.get("sourceIn", 0))), "-t", str(duration), "-i", str(source)]
         filters.append(
@@ -162,7 +168,7 @@ def build_ffmpeg_command(store: Store, project: dict[str, Any], output: Path, lo
                 command += ["-f", "lavfi", "-t", str(duration), "-i", "anullsrc=r=48000:cl=stereo"]
             else:
                 media = store.media_record(segment["mediaId"])
-                source = _safe_source(root, media["relative_path"])
+                source = store.media_source_path(media["id"])
                 source_in = float(segment.get("sourceIn", 0)) + float(segment.get("offsetMs", 0)) / 1000
                 command += ["-ss", str(max(0, source_in)), "-t", str(duration), "-i", str(source)]
             filters.append(f"[{audio_base + index}:a:0]asetpts=PTS-STARTPTS,aresample=48000[a{index}]")
@@ -271,6 +277,23 @@ def build_render_plan(
     if output.suffix.lower() != expected_suffix:
         raise DomainError("VALIDATION_FAILED", f"{profile} output filename must end with {expected_suffix}")
     issues = list(compiled["issues"])
+    current_alignment_digest = alignment_digest(project)
+    current_selection_digest = str((project.get("selectionSnapshot") or {}).get("digest", ""))
+    current_sections_digest = digest_json(project.get("timelineSections", []))
+    program_draft = project.get("programDraft")
+    if program_draft and (
+        str(program_draft.get("selectionDigest", "")) != current_selection_digest
+        or str(program_draft.get("alignmentDigest", "")) != current_alignment_digest
+        or str(program_draft.get("timelineSectionsDigest", "")) != current_sections_digest
+    ):
+        issues.append(
+            {
+                "id": "issue_program_dependencies_stale",
+                "code": "PLAN_STALE",
+                "severity": "BLOCKING",
+                "message": "Program decisions are stale relative to selection, alignment, or composition",
+            }
+        )
     if output.exists() or output.with_name(output.name + ".manifest.json").exists():
         issues.append(
             {
@@ -287,15 +310,15 @@ def build_render_plan(
             if item.get("assetId")
         }
     )
-    root = store.library_root(project["libraryId"])
     sources: list[dict[str, Any]] = []
     for media_id in selected_ids:
         media = assets[media_id]
-        source = _safe_source(root, media["relative_path"])
+        source = store.media_source_path(media_id)
         digest = full_digest(source)
         sources.append(
             {
                 "assetId": media_id,
+                "rootId": media.get("rootId"),
                 "libraryRelativePath": media["relative_path"],
                 "size": source.stat().st_size,
                 "modifiedNs": source.stat().st_mtime_ns,
@@ -315,7 +338,11 @@ def build_render_plan(
                     "message": "Selected source stream identity is unresolved",
                 }
             )
-    first_video = assets.get(compiled["videoSlices"][0]["assetId"]) if compiled["videoSlices"] else {}
+    first_recorded_video = next(
+        (item for item in compiled["videoSlices"] if not item.get("synthetic")),
+        None,
+    )
+    first_video = assets.get(first_recorded_video["assetId"], {}) if first_recorded_video else {}
     width = settings.get("width", first_video.get("width") or 1920)
     height = settings.get("height", first_video.get("height") or 1080)
     frame_rate = settings.get("frameRate", first_video.get("frame_rate") or 30)
@@ -347,6 +374,8 @@ def build_render_plan(
     }
     warning_codes: list[str] = []
     for source_slice in compiled["videoSlices"]:
+        if source_slice.get("synthetic"):
+            continue
         media = assets[source_slice["assetId"]]
         for stream in media.get("streams", []):
             if stream.get("codecType") != "video":
@@ -378,6 +407,27 @@ def build_render_plan(
         "projectId": project["id"],
         "projectRevision": project["revision"],
         "provenanceRevision": project.get("provenanceRevision", 0),
+        "selectionSnapshot": project.get("selectionSnapshot", {}),
+        "selectionDigest": current_selection_digest,
+        "alignmentDigest": current_alignment_digest,
+        "clipAlignments": [
+            {
+                "clipId": item["id"],
+                "assetId": item["assetId"],
+                "logicalSourceId": item["logicalSourceId"],
+                "alignment": item.get("alignment") or item.get("sync"),
+                "alignmentState": item.get(
+                    "alignmentState", "ACCEPTED" if item.get("sync") else "UNRESOLVED"
+                ),
+                "alignmentConfidence": item.get("alignmentConfidence"),
+                "alignmentEvidence": item.get("alignmentEvidence", []),
+            }
+            for item in project.get("clips", [])
+        ],
+        "timelineSections": project.get("timelineSections", []),
+        "timelineSectionsDigest": current_sections_digest,
+        "programDraft": program_draft,
+        "syntheticSlates": project.get("syntheticSlates", []),
         "compiledProgram": compiled,
         "sources": sources,
         "sourceSetDigest": digest_json(sources),
@@ -391,7 +441,7 @@ def build_render_plan(
         "estimatedBytes": estimate,
         "warningCodes": sorted(set(warning_codes)),
         "toolVersions": {
-            "application": "room-alignment/0.2.0",
+            "application": f"room-alignment/{__version__}",
             "ffmpeg": _tool_version("ffmpeg"),
             "ffprobe": _tool_version("ffprobe"),
         },
@@ -419,13 +469,28 @@ def build_v1_manifest(plan: dict[str, Any], artifact: dict[str, Any] | None = No
             "id": plan["projectId"],
             "revision": plan["projectRevision"],
             "provenanceRevision": plan["provenanceRevision"],
+            "selectionDigest": plan.get("selectionDigest", ""),
+            "alignmentDigest": plan.get("alignmentDigest", ""),
+            "timelineSectionsDigest": plan.get("timelineSectionsDigest", ""),
         },
         "renderPlan": {"id": plan["id"], "digest": plan["planDigest"]},
         "sourceSetDigest": plan["sourceSetDigest"],
         "provenanceResolutions": plan.get("provenanceResolutions", []),
+        "selectionSnapshot": plan.get("selectionSnapshot", {}),
+        "alignment": {
+            "digest": plan.get("alignmentDigest", ""),
+            "clipTransforms": plan.get("clipAlignments", []),
+        },
+        "composition": {
+            "timelineSections": plan.get("timelineSections", []),
+            "timelineSectionsDigest": plan.get("timelineSectionsDigest", ""),
+            "programDraft": plan.get("programDraft"),
+            "syntheticSlates": plan.get("syntheticSlates", []),
+        },
         "sources": [
             {
                 "assetId": item["assetId"],
+                "rootId": item.get("rootId"),
                 "libraryRelativePath": item["libraryRelativePath"],
                 "size": item["size"],
                 "sha256": item["sha256"],
@@ -451,6 +516,7 @@ def build_v1_manifest(plan: dict[str, Any], artifact: dict[str, Any] | None = No
             "claim": "lossless-encode-after-processing" if plan["profile"] == "ARCHIVAL_LOSSLESS" else "compatible-reencode",
             "sourceFilesModified": False,
             "generatedSilenceDisclosed": any(item.get("synthetic") for item in program["audioSlices"]),
+            "generatedSlateDisclosed": any(item.get("synthetic") for item in program["videoSlices"]),
         },
     }
     manifest["manifestCanonicalContentSha256"] = digest_json(manifest)
@@ -460,38 +526,62 @@ def build_v1_manifest(plan: dict[str, Any], artifact: dict[str, Any] | None = No
 def build_v1_ffmpeg_command(store: Store, plan: dict[str, Any], output: Path) -> list[str]:
     if plan["status"] != "READY":
         raise DomainError("COVERAGE_INVALID", "Render plan has blocking issues")
-    project = store.project(plan["projectId"])
-    root = store.library_root(project["libraryId"])
-    planned_paths = {item["assetId"]: item["libraryRelativePath"] for item in plan["sources"]}
+    planned_sources = {item["assetId"]: item for item in plan["sources"]}
     video = plan["compiledProgram"]["videoSlices"]
     audio = plan["compiledProgram"]["audioSlices"]
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
     filters: list[str] = []
+    norm = plan["normalization"]
     for item in video:
-        source = _planned_source(root, planned_paths, item["assetId"])
-        source_duration = (item["sourceEndUs"] - item["sourceStartUs"]) / 1_000_000
-        command += ["-ss", _seconds(item["sourceStartUs"]), "-t", f"{source_duration:.6f}", "-i", str(source)]
+        if item.get("synthetic"):
+            output_duration = (item["endUs"] - item["startUs"]) / 1_000_000
+            command += [
+                "-f",
+                "lavfi",
+                "-t",
+                f"{output_duration:.6f}",
+                "-i",
+                (
+                    f"color=c=0x141922:s={norm['width']}x{norm['height']}:"
+                    f"r={norm['frameRate']:.6f}"
+                ),
+            ]
+        else:
+            source = _planned_source(store, planned_sources, item["assetId"])
+            source_duration = (item["sourceEndUs"] - item["sourceStartUs"]) / 1_000_000
+            command += ["-ss", _seconds(item["sourceStartUs"]), "-t", f"{source_duration:.6f}", "-i", str(source)]
     audio_base = len(video)
     for item in audio:
         output_duration = (item["endUs"] - item["startUs"]) / 1_000_000
         if item.get("synthetic"):
             command += ["-f", "lavfi", "-t", f"{output_duration:.6f}", "-i", "anullsrc=r=48000:cl=stereo"]
         else:
-            source = _planned_source(root, planned_paths, item["assetId"])
+            source = _planned_source(store, planned_sources, item["assetId"])
             source_start = int(item["sourceStartUs"])
             source_duration = (item["sourceEndUs"] - item["sourceStartUs"]) / 1_000_000
             command += ["-ss", _seconds(source_start), "-t", f"{source_duration:.6f}", "-i", str(source)]
-    norm = plan["normalization"]
     for index, item in enumerate(video):
         output_duration = (item["endUs"] - item["startUs"]) / 1_000_000
-        source_duration = (item["sourceEndUs"] - item["sourceStartUs"]) / 1_000_000
-        speed = output_duration / source_duration if source_duration else 1
-        filters.append(
-            f"[{index}:v:0]setpts=(PTS-STARTPTS)*{speed:.12f},"
-            f"scale={norm['width']}:{norm['height']}:force_original_aspect_ratio=decrease,"
-            f"pad={norm['width']}:{norm['height']}:(ow-iw)/2:(oh-ih)/2,"
-            f"fps={norm['frameRate']:.6f},setsar=1[v{index}]"
-        )
+        if item.get("synthetic"):
+            slate_card = _slate_drawbox_chain(
+                str(item.get("slateText") or "No recorded footage"),
+                int(norm["width"]),
+                int(norm["height"]),
+            )
+            filters.append(
+                f"[{index}:v:0]setpts=PTS-STARTPTS,"
+                f"{slate_card},"
+                f"fps={norm['frameRate']:.6f},setsar=1[v{index}]"
+            )
+        else:
+            source_duration = (item["sourceEndUs"] - item["sourceStartUs"]) / 1_000_000
+            speed = output_duration / source_duration if source_duration else 1
+            filters.append(
+                f"[{index}:v:0]setpts=(PTS-STARTPTS)*{speed:.12f},"
+                f"scale={norm['width']}:{norm['height']}:force_original_aspect_ratio=decrease,"
+                f"pad={norm['width']}:{norm['height']}:(ow-iw)/2:(oh-ih)/2,"
+                f"fps={norm['frameRate']:.6f},setsar=1[v{index}]"
+            )
     filters.append(f"{''.join(f'[v{i}]' for i in range(len(video)))}concat=n={len(video)}:v=1:a=0[vout]")
     for index, item in enumerate(audio):
         input_index = audio_base + index
@@ -523,11 +613,86 @@ def build_v1_ffmpeg_command(store: Store, plan: dict[str, Any], output: Path) ->
     return command
 
 
-def _planned_source(root: Path, planned_paths: dict[str, str], asset_id: str) -> Path:
-    relative = planned_paths.get(asset_id)
-    if relative is None:
+_PIXEL_FONT = {
+    "A": ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
+    "C": ("01111", "10000", "10000", "10000", "10000", "10000", "01111"),
+    "D": ("11110", "10001", "10001", "10001", "10001", "10001", "11110"),
+    "E": ("11111", "10000", "10000", "11110", "10000", "10000", "11111"),
+    "F": ("11111", "10000", "10000", "11110", "10000", "10000", "10000"),
+    "G": ("01111", "10000", "10000", "10111", "10001", "10001", "01111"),
+    "N": ("10001", "11001", "10101", "10011", "10001", "10001", "10001"),
+    "O": ("01110", "10001", "10001", "10001", "10001", "10001", "01110"),
+    "R": ("11110", "10001", "10001", "11110", "10100", "10010", "10001"),
+    "T": ("11111", "00100", "00100", "00100", "00100", "00100", "00100"),
+    "U": ("10001", "10001", "10001", "10001", "10001", "10001", "01110"),
+    "?": ("01110", "10001", "00010", "00100", "00100", "00000", "00100"),
+}
+
+
+def _slate_drawbox_chain(value: str, width: int, height: int) -> str:
+    """Render a portable two-line bitmap card with core FFmpeg filters only."""
+
+    words = [word for word in value.upper().split() if word]
+    if words == ["NO", "RECORDED", "FOOTAGE"]:
+        lines = ["NO RECORDED", "FOOTAGE"]
+    else:
+        midpoint = max(1, (len(words) + 1) // 2)
+        lines = [" ".join(words[:midpoint]), " ".join(words[midpoint:])]
+        lines = [line[:24] for line in lines if line] or ["NO FOOTAGE"]
+    columns = max((len(line) * 6 - 1 for line in lines), default=1)
+    scale = max(1, min(width // max(columns + 8, 1), height // 22))
+    line_height = 7 * scale
+    line_gap = 3 * scale
+    total_height = len(lines) * line_height + (len(lines) - 1) * line_gap
+    padding = max(4, 3 * scale)
+    widest = columns * scale
+    box_width = min(width, widest + padding * 2)
+    box_height = min(height, total_height + padding * 2)
+    box_x = max(0, (width - box_width) // 2)
+    box_y = max(0, (height - box_height) // 2)
+    filters = [
+        f"drawbox=x={box_x}:y={box_y}:w={box_width}:h={box_height}:color=black@0.62:t=fill"
+    ]
+    text_y = max(0, (height - total_height) // 2)
+    for line_index, line in enumerate(lines):
+        bits = "0".join("00000" if character == " " else _PIXEL_FONT.get(character, _PIXEL_FONT["?"])[0] for character in line)
+        line_columns = len(bits)
+        text_x = max(0, (width - line_columns * scale) // 2)
+        for row_index in range(7):
+            row_bits = "0".join(
+                "00000"
+                if character == " "
+                else _PIXEL_FONT.get(character, _PIXEL_FONT["?"])[row_index]
+                for character in line
+            )
+            run_start: int | None = None
+            for column, bit in enumerate(row_bits + "0"):
+                if bit == "1" and run_start is None:
+                    run_start = column
+                elif bit == "0" and run_start is not None:
+                    filters.append(
+                        "drawbox="
+                        f"x={text_x + run_start * scale}:"
+                        f"y={text_y + line_index * (line_height + line_gap) + row_index * scale}:"
+                        f"w={(column - run_start) * scale}:h={scale}:color=white:t=fill"
+                    )
+                    run_start = None
+    return ",".join(filters)
+
+
+def _planned_source(
+    store: Store, planned_sources: dict[str, dict[str, Any]], asset_id: str
+) -> Path:
+    expected = planned_sources.get(asset_id)
+    if expected is None:
         raise DomainError("PLAN_STALE", "Selected source is absent from the immutable render plan")
-    return _safe_source(root, relative)
+    media = store.media_record(asset_id)
+    if (
+        media.get("rootId") != expected.get("rootId")
+        or media["relative_path"] != expected["libraryRelativePath"]
+    ):
+        raise DomainError("SOURCE_CHANGED", "A selected source location changed after review")
+    return store.media_source_path(asset_id)
 
 
 class CanonicalRenderManager:
@@ -758,16 +923,17 @@ class CanonicalRenderManager:
         return False
 
     def _validate_sources(self, plan: dict[str, Any]) -> None:
-        project = self.store.project(plan["projectId"])
-        root = self.store.library_root(project["libraryId"])
         for expected in plan["sources"]:
             media = self.store.media_record(expected["assetId"])
-            if media["relative_path"] != expected["libraryRelativePath"]:
+            if (
+                media.get("rootId") != expected.get("rootId")
+                or media["relative_path"] != expected["libraryRelativePath"]
+            ):
                 raise DomainError("SOURCE_CHANGED", "A selected source path changed after review")
             try:
-                source = _safe_source(root, expected["libraryRelativePath"])
+                source = self.store.media_source_path(expected["assetId"])
                 stat = source.stat()
-            except (OSError, PreflightError) as error:
+            except (OSError, PreflightError, DomainError) as error:
                 raise DomainError("SOURCE_CHANGED", "A selected source is no longer available") from error
             if stat.st_size != expected["size"] or full_digest(source) != expected["sha256"]:
                 raise DomainError("SOURCE_CHANGED", "A selected source changed after review")

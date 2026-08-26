@@ -1,10 +1,30 @@
 // Generated from contracts/openapi.json by scripts/generate_api_client.py. Do not edit.
 (() => {
   const OPERATIONS = {
+  "addLibraryRoot": {
+    "binary": false,
+    "method": "POST",
+    "path": "/libraries/{libraryId}/roots",
+    "pathParameters": [
+      "libraryId"
+    ],
+    "queryParameters": {}
+  },
   "applyProjectCommand": {
     "binary": false,
     "method": "POST",
     "path": "/projects/{projectId}/commands",
+    "pathParameters": [
+      "projectId"
+    ],
+    "queryParameters": {
+      "preview": false
+    }
+  },
+  "applyProjectDeltaCommand": {
+    "binary": false,
+    "method": "POST",
+    "path": "/projects/{projectId}/commands/delta",
     "pathParameters": [
       "projectId"
     ],
@@ -76,6 +96,15 @@
     ],
     "queryParameters": {}
   },
+  "getAlignmentSummary": {
+    "binary": false,
+    "method": "GET",
+    "path": "/projects/{projectId}/alignment-summary",
+    "pathParameters": [
+      "projectId"
+    ],
+    "queryParameters": {}
+  },
   "getArtifact": {
     "binary": false,
     "method": "GET",
@@ -91,6 +120,37 @@
     "path": "/artifacts/{artifactId}/video",
     "pathParameters": [
       "artifactId"
+    ],
+    "queryParameters": {}
+  },
+  "getAudioWaveform": {
+    "binary": false,
+    "method": "GET",
+    "path": "/media/{mediaId}/waveform",
+    "pathParameters": [
+      "mediaId"
+    ],
+    "queryParameters": {
+      "endSourceUs": false,
+      "maxPoints": false,
+      "startSourceUs": false
+    }
+  },
+  "getClusterFacets": {
+    "binary": false,
+    "method": "GET",
+    "path": "/cluster-generations/{clusterGenerationId}/facets",
+    "pathParameters": [
+      "clusterGenerationId"
+    ],
+    "queryParameters": {}
+  },
+  "getClusterGeneration": {
+    "binary": false,
+    "method": "GET",
+    "path": "/cluster-generations/{clusterGenerationId}",
+    "pathParameters": [
+      "clusterGenerationId"
     ],
     "queryParameters": {}
   },
@@ -139,6 +199,15 @@
     ],
     "queryParameters": {}
   },
+  "getMediaPreview": {
+    "binary": true,
+    "method": "GET",
+    "path": "/media/{mediaId}/preview",
+    "pathParameters": [
+      "mediaId"
+    ],
+    "queryParameters": {}
+  },
   "getOpenApiContract": {
     "binary": false,
     "method": "GET",
@@ -161,6 +230,15 @@
     "binary": false,
     "method": "GET",
     "path": "/projects/{projectId}",
+    "pathParameters": [
+      "projectId"
+    ],
+    "queryParameters": {}
+  },
+  "getProjectPreparation": {
+    "binary": false,
+    "method": "GET",
+    "path": "/projects/{projectId}/preparation",
     "pathParameters": [
       "projectId"
     ],
@@ -208,6 +286,52 @@
     "pathParameters": [],
     "queryParameters": {}
   },
+  "getTimelineSectionProposal": {
+    "binary": false,
+    "method": "GET",
+    "path": "/projects/{projectId}/timeline-section-proposal",
+    "pathParameters": [
+      "projectId"
+    ],
+    "queryParameters": {
+      "gapMode": false
+    }
+  },
+  "getTimelineWindow": {
+    "binary": false,
+    "method": "GET",
+    "path": "/projects/{projectId}/timeline-window",
+    "pathParameters": [
+      "projectId"
+    ],
+    "queryParameters": {
+      "endAlignedUs": true,
+      "lane": false,
+      "resolutionUs": true,
+      "startAlignedUs": true
+    }
+  },
+  "listAlignmentProposalSets": {
+    "binary": false,
+    "method": "GET",
+    "path": "/projects/{projectId}/alignment-proposal-sets",
+    "pathParameters": [
+      "projectId"
+    ],
+    "queryParameters": {}
+  },
+  "listClusterGenerations": {
+    "binary": false,
+    "method": "GET",
+    "path": "/libraries/{libraryId}/cluster-generations",
+    "pathParameters": [
+      "libraryId"
+    ],
+    "queryParameters": {
+      "cursor": false,
+      "limit": false
+    }
+  },
   "listClusterSuggestions": {
     "binary": false,
     "method": "GET",
@@ -216,6 +340,36 @@
       "libraryId"
     ],
     "queryParameters": {}
+  },
+  "listEventClusters": {
+    "binary": false,
+    "method": "GET",
+    "path": "/cluster-generations/{clusterGenerationId}/events",
+    "pathParameters": [
+      "clusterGenerationId"
+    ],
+    "queryParameters": {
+      "cursor": false,
+      "endUs": false,
+      "limit": false,
+      "rootId": false,
+      "sessionId": false,
+      "sourceCandidateId": false,
+      "startUs": false,
+      "warning": false
+    }
+  },
+  "listEventMemberships": {
+    "binary": false,
+    "method": "GET",
+    "path": "/event-clusters/{clusterId}/memberships",
+    "pathParameters": [
+      "clusterId"
+    ],
+    "queryParameters": {
+      "cursor": false,
+      "limit": false
+    }
   },
   "listGrants": {
     "binary": false,
@@ -229,6 +383,15 @@
     "method": "GET",
     "path": "/libraries",
     "pathParameters": [],
+    "queryParameters": {}
+  },
+  "listLibraryRoots": {
+    "binary": false,
+    "method": "GET",
+    "path": "/libraries/{libraryId}/roots",
+    "pathParameters": [
+      "libraryId"
+    ],
     "queryParameters": {}
   },
   "listMedia": {
@@ -262,12 +425,62 @@
       "field": false
     }
   },
+  "listSessionClusters": {
+    "binary": false,
+    "method": "GET",
+    "path": "/cluster-generations/{clusterGenerationId}/sessions",
+    "pathParameters": [
+      "clusterGenerationId"
+    ],
+    "queryParameters": {
+      "cursor": false,
+      "endUs": false,
+      "limit": false,
+      "rootId": false,
+      "sourceCandidateId": false,
+      "startUs": false,
+      "warning": false
+    }
+  },
+  "listSessionMemberships": {
+    "binary": false,
+    "method": "GET",
+    "path": "/session-clusters/{clusterId}/memberships",
+    "pathParameters": [
+      "clusterId"
+    ],
+    "queryParameters": {
+      "cursor": false,
+      "limit": false
+    }
+  },
   "listSuggestions": {
     "binary": false,
     "method": "GET",
     "path": "/projects/{projectId}/suggestions",
     "pathParameters": [
       "projectId"
+    ],
+    "queryParameters": {}
+  },
+  "listUnclusteredMemberships": {
+    "binary": false,
+    "method": "GET",
+    "path": "/cluster-generations/{clusterGenerationId}/unclustered",
+    "pathParameters": [
+      "clusterGenerationId"
+    ],
+    "queryParameters": {
+      "cursor": false,
+      "limit": false
+    }
+  },
+  "previewProjectSelection": {
+    "binary": false,
+    "method": "POST",
+    "path": "/cluster-generations/{clusterGenerationId}/selection-preview",
+    "pathParameters": [
+      "clusterGenerationId"
     ],
     "queryParameters": {}
   },
@@ -286,6 +499,16 @@
     "path": "/grants/{grantId}/revoke",
     "pathParameters": [
       "grantId"
+    ],
+    "queryParameters": {}
+  },
+  "revokeLibraryRoot": {
+    "binary": false,
+    "method": "POST",
+    "path": "/libraries/{libraryId}/roots/{rootId}/revoke",
+    "pathParameters": [
+      "libraryId",
+      "rootId"
     ],
     "queryParameters": {}
   },

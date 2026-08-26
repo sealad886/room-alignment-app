@@ -11,11 +11,14 @@
     "commandType": {
       "enum": [
         "UpdateProjectMetadata", "AddLogicalSource", "RenameLogicalSource", "MergeLogicalSources",
-        "SplitLogicalSource", "ArchiveLogicalSource", "AssignClip", "SetReferenceSource",
-        "SetSyncTransform", "InitializeProgram", "AddVideoBlock", "SplitVideoBlock",
+        "SplitLogicalSource", "ArchiveLogicalSource", "AssignClip", "ConfirmSourceIdentities", "SetReferenceSource",
+        "SetSyncTransform", "SetClipAlignment", "AlignMarkedMoments",
+        "AcceptAlignmentProposalSet", "AcceptAlignmentProposal", "RejectAlignmentProposal",
+        "RejectAlignmentProposalSet", "SetTimelineSections",
+        "GenerateProgramDraft", "AddVideoBlock", "SplitVideoBlock",
         "MoveVideoBoundary", "DeleteVideoBlock", "AssignVideoSource", "PinVideoClip", "CutToSource",
         "AddAudioBlock", "SplitAudioBlock", "MoveAudioBoundary", "DeleteAudioBlock", "SetAudioMode",
-        "SetAnchoringMode", "ReconcileBoundary", "ArchiveProject", "AcceptAlignmentSuggestion",
+        "SetAnchoringMode", "ReconcileBoundary", "ArchiveProject", "AcceptAlignmentSuggestion", "AcceptAlignmentSuggestions",
         "RejectAlignmentSuggestion"
       ]
     },
@@ -31,9 +34,17 @@
         {"$ref": "#/$defs/SplitLogicalSource"},
         {"$ref": "#/$defs/ArchiveLogicalSource"},
         {"$ref": "#/$defs/AssignClip"},
+        {"$ref": "#/$defs/ConfirmSourceIdentities"},
         {"$ref": "#/$defs/SetReferenceSource"},
         {"$ref": "#/$defs/SetSyncTransform"},
-        {"$ref": "#/$defs/InitializeProgram"},
+        {"$ref": "#/$defs/SetClipAlignment"},
+        {"$ref": "#/$defs/AlignMarkedMoments"},
+        {"$ref": "#/$defs/AcceptAlignmentProposalSet"},
+        {"$ref": "#/$defs/AcceptAlignmentProposal"},
+        {"$ref": "#/$defs/RejectAlignmentProposal"},
+        {"$ref": "#/$defs/RejectAlignmentProposalSet"},
+        {"$ref": "#/$defs/SetTimelineSections"},
+        {"$ref": "#/$defs/GenerateProgramDraft"},
         {"$ref": "#/$defs/AddVideoBlock"},
         {"$ref": "#/$defs/SplitVideoBlock"},
         {"$ref": "#/$defs/MoveVideoBoundary"},
@@ -50,6 +61,7 @@
         {"$ref": "#/$defs/ReconcileBoundary"},
         {"$ref": "#/$defs/ArchiveProject"},
         {"$ref": "#/$defs/AcceptAlignmentSuggestion"},
+        {"$ref": "#/$defs/AcceptAlignmentSuggestions"},
         {"$ref": "#/$defs/RejectAlignmentSuggestion"}
       ]
     }
@@ -79,13 +91,39 @@
     "AssignClip": {
       "properties": {"commandType": {"const": "AssignClip"}, "payload": {"type": "object", "additionalProperties": false, "required": ["clipId", "logicalSourceId"], "properties": {"clipId": {"$ref": "#/$defs/Id"}, "logicalSourceId": {"$ref": "#/$defs/Id"}}}}
     },
+    "ConfirmSourceIdentities": {
+      "properties": {"commandType": {"const": "ConfirmSourceIdentities"}, "payload": {"type": "object", "additionalProperties": false, "required": ["sourceIds"], "properties": {"sourceIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}}}}}
+    },
     "SetReferenceSource": {
       "properties": {"commandType": {"const": "SetReferenceSource"}, "payload": {"type": "object", "additionalProperties": false, "required": ["sourceId"], "properties": {"sourceId": {"$ref": "#/$defs/Id"}}}}
     },
     "SetSyncTransform": {
       "properties": {"commandType": {"const": "SetSyncTransform"}, "payload": {"type": "object", "additionalProperties": false, "required": ["clipId", "sync"], "properties": {"clipId": {"$ref": "#/$defs/Id"}, "sync": {"$ref": "./domain.schema.json#/$defs/SyncTransform"}, "confirmDrift": {"type": "boolean"}}}}
     },
-    "InitializeProgram": {"properties": {"commandType": {"const": "InitializeProgram"}, "payload": {"$ref": "#/$defs/Empty"}}},
+    "SetClipAlignment": {
+      "properties": {"commandType": {"const": "SetClipAlignment"}, "payload": {"type": "object", "additionalProperties": false, "required": ["clipId", "alignment"], "properties": {"clipId": {"$ref": "#/$defs/Id"}, "alignment": {"$ref": "./timeline.schema.json#/$defs/ClipAlignmentTransform"}, "confirmDrift": {"type": "boolean"}}}}
+    },
+    "AlignMarkedMoments": {
+      "properties": {"commandType": {"const": "AlignMarkedMoments"}, "payload": {"type": "object", "additionalProperties": false, "required": ["referenceClipId", "referenceSourceUs", "targetClipId", "targetSourceUs"], "properties": {"referenceClipId": {"$ref": "#/$defs/Id"}, "referenceSourceUs": {"$ref": "#/$defs/Us"}, "targetClipId": {"$ref": "#/$defs/Id"}, "targetSourceUs": {"$ref": "#/$defs/Us"}}}}
+    },
+    "AcceptAlignmentProposalSet": {
+      "properties": {"commandType": {"const": "AcceptAlignmentProposalSet"}, "payload": {"type": "object", "additionalProperties": false, "required": ["proposalSetId", "digest", "mode"], "properties": {"proposalSetId": {"$ref": "#/$defs/Id"}, "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "mode": {"const": "HIGH_CONFIDENCE"}, "confirmDrift": {"type": "boolean"}}}}
+    },
+    "AcceptAlignmentProposal": {
+      "properties": {"commandType": {"const": "AcceptAlignmentProposal"}, "payload": {"type": "object", "additionalProperties": false, "required": ["proposalSetId", "proposalId", "digest"], "properties": {"proposalSetId": {"$ref": "#/$defs/Id"}, "proposalId": {"$ref": "#/$defs/Id"}, "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "confirmLowConfidence": {"type": "boolean"}, "confirmDrift": {"type": "boolean"}}}}
+    },
+    "RejectAlignmentProposal": {
+      "properties": {"commandType": {"const": "RejectAlignmentProposal"}, "payload": {"type": "object", "additionalProperties": false, "required": ["proposalSetId", "proposalId", "digest"], "properties": {"proposalSetId": {"$ref": "#/$defs/Id"}, "proposalId": {"$ref": "#/$defs/Id"}, "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}}
+    },
+    "RejectAlignmentProposalSet": {
+      "properties": {"commandType": {"const": "RejectAlignmentProposalSet"}, "payload": {"type": "object", "additionalProperties": false, "required": ["proposalSetId", "digest"], "properties": {"proposalSetId": {"$ref": "#/$defs/Id"}, "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}}
+    },
+    "SetTimelineSections": {
+      "properties": {"commandType": {"const": "SetTimelineSections"}, "payload": {"type": "object", "additionalProperties": false, "required": ["sections"], "properties": {"sections": {"type": "array", "minItems": 1, "items": {"$ref": "./timeline.schema.json#/$defs/TimelineSection"}}}}}
+    },
+    "GenerateProgramDraft": {
+      "properties": {"commandType": {"const": "GenerateProgramDraft"}, "payload": {"type": "object", "additionalProperties": false, "required": ["alignmentDigest", "selectionDigest", "gapMode", "sectionProposalDigest", "replaceExisting"], "properties": {"alignmentDigest": {"type": "string"}, "selectionDigest": {"type": "string"}, "gapMode": {"enum": ["EXCLUDE", "SLATE"]}, "sectionProposalDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "replaceExisting": {"type": "boolean"}}}}
+    },
     "AddVideoBlock": {
       "properties": {"commandType": {"const": "AddVideoBlock"}, "payload": {"type": "object", "additionalProperties": false, "required": ["startUs", "endUs", "logicalSourceId"], "properties": {"id": {"$ref": "#/$defs/Id"}, "startUs": {"$ref": "#/$defs/Us"}, "endUs": {"$ref": "#/$defs/Us"}, "logicalSourceId": {"$ref": "#/$defs/Id"}, "pinnedClipId": {"type": ["string", "null"]}}}}
     },
@@ -125,6 +163,9 @@
     "ArchiveProject": {"properties": {"commandType": {"const": "ArchiveProject"}, "payload": {"$ref": "#/$defs/Empty"}}},
     "AcceptAlignmentSuggestion": {
       "properties": {"commandType": {"const": "AcceptAlignmentSuggestion"}, "payload": {"type": "object", "additionalProperties": false, "required": ["suggestionId", "clipId", "sync"], "properties": {"suggestionId": {"$ref": "#/$defs/Id"}, "clipId": {"$ref": "#/$defs/Id"}, "sync": {"$ref": "./domain.schema.json#/$defs/SyncTransform"}, "confirmDrift": {"type": "boolean"}}}}
+    },
+    "AcceptAlignmentSuggestions": {
+      "properties": {"commandType": {"const": "AcceptAlignmentSuggestions"}, "payload": {"type": "object", "additionalProperties": false, "required": ["suggestions"], "properties": {"suggestions": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "object", "additionalProperties": false, "required": ["suggestionId", "clipId", "sync"], "properties": {"suggestionId": {"$ref": "#/$defs/Id"}, "clipId": {"$ref": "#/$defs/Id"}, "sync": {"$ref": "./domain.schema.json#/$defs/SyncTransform"}, "confirmDrift": {"type": "boolean"}}}}}}}
     },
     "RejectAlignmentSuggestion": {
       "properties": {"commandType": {"const": "RejectAlignmentSuggestion"}, "payload": {"type": "object", "additionalProperties": false, "required": ["suggestionId"], "properties": {"suggestionId": {"$ref": "#/$defs/Id"}}}}
