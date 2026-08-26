@@ -81,7 +81,7 @@ node --check web/app.js
 python3 scripts/benchmark_local.py
 ```
 
-GitHub Actions runs these source checks on pull requests and `main` pushes,
+GitHub Actions runs these source checks on branch pushes and pull requests,
 using both Python 3.11 and 3.13. It then builds and clean-installs the wheel on
 macOS, retains the wheel and source archive for 14 days, and applies the same
 package runtime verification described above. A `v*` tag must exactly match
