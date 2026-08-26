@@ -1,6 +1,7 @@
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const colors = ["#74c9bd", "#dda96a", "#8faed2", "#b58ccc", "#91bd7c", "#d28282"];
+const MEDIA_TABLE_LIMIT = 500;
 const {RoomAlignmentAPIClient, APIError} = window.RoomAlignmentAPI;
 const client = new RoomAlignmentAPIClient();
 
@@ -14,6 +15,7 @@ const state = {
   projects: [],
   groups: [],
   group: [],
+  presentedGroup: [],
   groupName: null,
   selectedMedia: new Set(),
   project: null,
@@ -236,8 +238,9 @@ function selectGroup(index) {
   const selected = state.groups[index];
   if (!selected) return;
   [state.groupName, state.group] = selected;
-  state.selectedMedia = new Set(state.group.map(item => item.id));
-  $("#media-table").innerHTML = state.group.slice(0, 500).map(item => `
+  state.presentedGroup = state.group.slice(0, MEDIA_TABLE_LIMIT);
+  state.selectedMedia = new Set(state.presentedGroup.map(item => item.id));
+  $("#media-table").innerHTML = state.presentedGroup.map(item => `
     <tr data-media="${safe(item.id)}">
       <td><input class="media-select" type="checkbox" value="${safe(item.id)}" checked aria-label="Include ${safe(mediaLabel(item))} clip"></td>
       <td class="mono">${safe(item.captured_at?.replace("T", " ") || "Unknown")}</td>
@@ -252,13 +255,15 @@ function selectGroup(index) {
   $$(".media-select").forEach(input => {
     input.onchange = () => {
       if (input.checked) state.selectedMedia.add(input.value); else state.selectedMedia.delete(input.value);
-      const count = state.group.filter(item => state.selectedMedia.has(item.id)).length;
-      $("#select-group").checked = count === state.group.length;
-      $("#select-group").indeterminate = count > 0 && count < state.group.length;
+      const count = state.presentedGroup.filter(item => state.selectedMedia.has(item.id)).length;
+      $("#select-group").checked = count === state.presentedGroup.length;
+      $("#select-group").indeterminate = count > 0 && count < state.presentedGroup.length;
       $("#open-event").disabled = count === 0;
     };
   });
-  $("#event-title").textContent = `${state.groupName} · source alignment`;
+  $("#event-title").textContent = state.group.length > state.presentedGroup.length
+    ? `${state.groupName} · showing ${state.presentedGroup.length} of ${state.group.length} clips; unshown clips are excluded`
+    : `${state.groupName} · ${state.group.length} clips`;
 }
 
 async function ensureProjectMedia(project) {
@@ -974,7 +979,9 @@ function setupEvents() {
     } catch (error) { handleError(error); }
   };
   $("#select-group").onchange = event => {
-    state.selectedMedia = event.target.checked ? new Set(state.group.map(item => item.id)) : new Set();
+    state.selectedMedia = event.target.checked
+      ? new Set(state.presentedGroup.map(item => item.id))
+      : new Set();
     $$(".media-select").forEach(input => { input.checked = event.target.checked; });
     event.target.indeterminate = false;
     $("#open-event").disabled = !event.target.checked;
