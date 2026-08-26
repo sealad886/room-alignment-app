@@ -422,7 +422,7 @@ def _peak_metrics(
         index = right_length - 1 - lag
         if index < 0 or index >= len(values):
             continue
-        overlap = max(0, min(left_length, lag + right_length) - max(0, lag))
+        overlap = max(0, min(left_length, right_length - lag) - max(0, -lag))
         if overlap < minimum_overlap:
             continue
         ranked.append((values[index] / max(1, overlap), lag))

@@ -75,6 +75,21 @@ class AudioAlignmentAlgorithmTests(unittest.TestCase):
         self.assertGreaterEqual(evidence.confidence, 0.75)
         self.assertLessEqual(abs(evidence.confirmation_delta_us), 5_000)
 
+    def test_correlation_normalizes_overlap_for_unequal_signatures(self) -> None:
+        base = pulse_signal(length=2400)
+        shifted = [0] * 80 + base[:-80]
+        evidence = correlate_audio(
+            AudioSignature("left", 400, tuple(base[:1800]), False),
+            AudioSignature("right", 400, tuple(shifted), False),
+            0,
+            0,
+        )
+        self.assertIsNotNone(evidence)
+        assert evidence is not None
+        self.assertLessEqual(abs(evidence.correction_us + 200_000), 5_000)
+        self.assertGreaterEqual(evidence.confidence, 0.75)
+        self.assertGreater(evidence.overlap_us, 0)
+
     def test_drift_requires_multiple_separated_consistent_anchors(self) -> None:
         self.assertIsNone(estimate_drift_ppm([(0, 0)]))
         self.assertEqual(
