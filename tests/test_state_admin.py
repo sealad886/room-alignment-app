@@ -93,6 +93,35 @@ class StateAdministrationTests(unittest.TestCase):
             self.assertFalse(list(state.parent.glob(".state.sqlite3.migration-*")))
             self.assertTrue(list(state.parent.glob("state.sqlite3.backup-v0-*")))
 
+    def test_dry_run_adds_legacy_columns_before_creating_new_indexes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state.sqlite3"
+            connection = sqlite3.connect(state)
+            connection.executescript(
+                """
+                CREATE TABLE media (
+                  id TEXT PRIMARY KEY,
+                  library_id TEXT NOT NULL,
+                  relative_path TEXT NOT NULL,
+                  captured_at TEXT,
+                  camera TEXT,
+                  duration REAL,
+                  first_generation INTEGER NOT NULL DEFAULT 0,
+                  last_generation INTEGER NOT NULL DEFAULT 0,
+                  missing INTEGER NOT NULL DEFAULT 0,
+                  fingerprint_json TEXT NOT NULL DEFAULT '{}',
+                  record_json TEXT NOT NULL
+                );
+                PRAGMA user_version=3;
+                """
+            )
+            connection.close()
+
+            result = dry_run_migration(state)
+
+            self.assertEqual(result["integrity"], "ok")
+            self.assertEqual(result["schemaVersion"], 7)
+
 
 if __name__ == "__main__":
     unittest.main()

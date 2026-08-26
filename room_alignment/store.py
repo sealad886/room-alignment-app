@@ -495,6 +495,10 @@ class Store:
         destination.row_factory = sqlite3.Row
         try:
             source.backup(destination)
+            # Existing tables keep their old shape when CREATE TABLE IF NOT
+            # EXISTS runs. Add columns referenced by new indexes before the
+            # full schema creates those indexes.
+            self._ensure_legacy_columns(destination)
             destination.executescript(SCHEMA)
             self._ensure_legacy_columns(destination)
             self._backfill_directory_grant_identities(destination)
@@ -559,6 +563,8 @@ class Store:
         }
         for table, columns in additions.items():
             existing = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
+            if not existing:
+                continue
             for name, definition in columns.items():
                 if name not in existing:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")

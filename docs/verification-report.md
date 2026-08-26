@@ -34,7 +34,10 @@ deployment, or production observation.
   decision changed to intentional silence through the delta endpoint, advanced
   canonical revision, and remained Review-ready with zero browser warnings or
   errors.
-- `python3 -m unittest discover -s tests` passed 153 tests. Generated-client
+- Production schema-v3 state passed copy-only migration validation with
+  `integrity=ok schemaVersion=7 tables=29`; canonical source state was not
+  modified.
+- `python3 -m unittest discover -s tests` passed 154 tests. Generated-client
   parity, Python byte-compilation, JavaScript syntax, and diff checks passed.
 
 Scope: version 0.3.0 package candidate in isolated `codex/installable-package` worktree, based on merged PR #2 commit `c27bca3`. Evidence covers local package build and temporary isolated installation. It does not claim signing, notarization, publication, distribution, system-wide installation, deployment, or production operation.
