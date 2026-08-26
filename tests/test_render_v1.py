@@ -6,6 +6,7 @@ import signal
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -256,15 +257,32 @@ class CanonicalRenderTests(unittest.TestCase):
     def test_render_process_stop_sends_term_once_then_kill_once(self):
         process = Mock(pid=1234)
         running = RunningJob(process)
+        manager = CanonicalRenderManager(self.store)
         with patch("room_alignment.render.time.monotonic", side_effect=[10, 11, 16]), patch(
             "room_alignment.render.os.killpg"
         ) as killpg:
-            CanonicalRenderManager._request_process_stop(running)
-            CanonicalRenderManager._request_process_stop(running)
-            CanonicalRenderManager._request_process_stop(running)
+            manager._request_process_stop(running)
+            manager._request_process_stop(running)
+            manager._request_process_stop(running)
         self.assertEqual(killpg.call_count, 2)
         self.assertEqual(killpg.call_args_list[0].args[1], signal.SIGTERM)
         self.assertEqual(killpg.call_args_list[1].args[1], signal.SIGKILL)
+
+    def test_concurrent_process_stop_sends_each_signal_once(self):
+        process = Mock(pid=1234)
+        running = RunningJob(process)
+        manager = CanonicalRenderManager(self.store)
+        with patch("room_alignment.render.os.killpg") as killpg:
+            threads = [
+                threading.Thread(target=manager._request_process_stop, args=(running, 0))
+                for _index in range(20)
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+        self.assertEqual(killpg.call_count, 2)
+        self.assertEqual({call.args[1] for call in killpg.call_args_list}, {signal.SIGTERM, signal.SIGKILL})
 
     def test_cross_filesystem_quarantine_falls_back_to_move(self):
         source = self.output / "partial"

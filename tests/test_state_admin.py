@@ -58,7 +58,7 @@ class StateAdministrationTests(unittest.TestCase):
                 Path(f"{destination}-shm").write_bytes(b"stale shm")
 
             with patch("scripts.state_admin.os.replace", side_effect=replace_then_create_stale_sidecars):
-                restore(state, backup_file, True)
+                restore(state, backup_file, replace=True)
             for suffix, stale in (("-wal", b"stale wal"), ("-shm", b"stale shm")):
                 sidecar = Path(f"{state}{suffix}")
                 if sidecar.exists():

@@ -202,6 +202,27 @@ class CommandTests(unittest.TestCase):
         )
         cut = next(item for item in project["videoBlocks"] if item["id"] == "known-cut")
         self.assertEqual(cut["startUs"], 2_500_000)
+
+    def test_split_source_rejects_clips_owned_by_another_source(self):
+        assets = [asset("a", "Door", 5_000_000), asset("b", "Yard", 5_000_000)]
+        project = new_project("Event", "lib", assets, "project")
+        first_source, second_source = project["logicalSources"]
+        second_clip = next(
+            clip for clip in project["clips"] if clip["logicalSourceId"] == second_source["id"]
+        )
+        with self.assertRaisesRegex(DomainError, "must belong"):
+            apply_command(
+                project,
+                "SplitLogicalSource",
+                {
+                    "sourceId": first_source["id"],
+                    "newSourceId": "split",
+                    "clipIds": [second_clip["id"]],
+                    "label": "Invalid split",
+                },
+                {item["id"]: item for item in assets},
+            )
+
     def test_program_time_sync_change_keeps_video_boundaries(self):
         media = asset("a", "Door", 5_000_000)
         project = new_project("Event", "lib", [media], "project")

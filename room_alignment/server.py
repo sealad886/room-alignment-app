@@ -333,9 +333,7 @@ class App:
                     result={"suggestionIds": created},
                 )
             except Exception as error:
-                self.store.transition_job(
-                    job["id"], "FAILED", 0, _safe_error(error), error_code=getattr(error, "code", "INTERNAL_ERROR")
-                )
+                self._finish_analysis_error(job["id"], error)
             finally:
                 with self.lock:
                     self.analysis_threads.pop(job["id"], None)
@@ -428,9 +426,7 @@ class App:
                     result={"suggestionIds": created},
                 )
             except Exception as error:
-                self.store.transition_job(
-                    job["id"], "FAILED", 0, _safe_error(error), error_code=getattr(error, "code", "INTERNAL_ERROR")
-                )
+                self._finish_analysis_error(job["id"], error)
             finally:
                 with self.lock:
                     self.analysis_threads.pop(job["id"], None)
@@ -455,6 +451,30 @@ class App:
             code = str(job.get("errorCode") or "JOB_STATE_CONFLICT")
             message = "Directory grant was revoked" if code == "GRANT_REQUIRED" else "Job was canceled"
             raise DomainError(code, message)
+
+    def _finish_analysis_error(self, job_id: str, error: Exception) -> None:
+        job = self.store.job(job_id)
+        if job["status"] in TERMINAL_JOB_STATES:
+            return
+        if job["status"] == "CANCEL_REQUESTED":
+            if job.get("errorCode") == "GRANT_REQUIRED":
+                self.store.transition_job(
+                    job_id,
+                    "FAILED",
+                    job["progress"],
+                    "Directory grant was revoked",
+                    error_code="GRANT_REQUIRED",
+                )
+            else:
+                self.store.transition_job(job_id, "CANCELED", job["progress"], "Analysis canceled")
+            return
+        self.store.transition_job(
+            job_id,
+            "FAILED",
+            job["progress"],
+            _safe_error(error),
+            error_code=getattr(error, "code", "INTERNAL_ERROR"),
+        )
 
 
 APP: App

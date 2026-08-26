@@ -21,7 +21,7 @@
       "properties": {
         "id": {"type": ["string", "null"]},
         "videoSha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
-        "manifestSha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$", "description": "Raw final manifest-file SHA-256 when known externally; null in the manifest file to avoid self-reference. The completed Artifact.manifestDigest is authoritative."},
+        "manifestSha256": {"const": null, "description": "Raw final manifest-file SHA-256 is stored externally in Artifact.manifestDigest to avoid self-reference."},
         "manifestFileDigestRecordedInArtifactState": {"const": true}
       }
     },

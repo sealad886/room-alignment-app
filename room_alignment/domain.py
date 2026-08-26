@@ -433,12 +433,18 @@ def _merge_sources(project: dict[str, Any], payload: dict[str, Any]) -> None:
 
 
 def _split_source(project: dict[str, Any], payload: dict[str, Any]) -> None:
+    source_id = payload["sourceId"]
+    _find(project["logicalSources"], source_id, "logical source")
+    clip_ids = set(payload.get("clipIds", []))
+    if not clip_ids:
+        raise DomainError("VALIDATION_FAILED", "Source split requires at least one clip")
+    selected = [clip for clip in project["clips"] if clip["id"] in clip_ids]
+    if len(selected) != len(clip_ids) or any(clip["logicalSourceId"] != source_id for clip in selected):
+        raise DomainError("VALIDATION_FAILED", "Every split clip must belong to the selected source")
     _add_source(project, {"id": payload.get("newSourceId"), "label": payload.get("label", "Split source")})
     new_id = project["logicalSources"][-1]["id"]
-    clip_ids = set(payload.get("clipIds", []))
-    for clip in project["clips"]:
-        if clip["id"] in clip_ids:
-            clip["logicalSourceId"] = new_id
+    for clip in selected:
+        clip["logicalSourceId"] = new_id
 
 
 def _archive_source(project: dict[str, Any], payload: dict[str, Any]) -> None:

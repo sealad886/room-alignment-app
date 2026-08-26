@@ -709,23 +709,23 @@ class CanonicalRenderManager:
                 self._request_process_stop(running)
         return self.store.job(job_id)
 
-    @staticmethod
-    def _request_process_stop(running: RunningJob, grace_seconds: float = 5) -> None:
-        running.cancel_requested = True
-        current = time.monotonic()
-        if running.term_sent_at is None:
-            running.term_sent_at = current
-            try:
-                os.killpg(running.process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            return
-        if not running.kill_sent and current - running.term_sent_at >= grace_seconds:
-            running.kill_sent = True
-            try:
-                os.killpg(running.process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+    def _request_process_stop(self, running: RunningJob, grace_seconds: float = 5) -> None:
+        with self.lock:
+            running.cancel_requested = True
+            current = time.monotonic()
+            if running.term_sent_at is None:
+                running.term_sent_at = current
+                try:
+                    os.killpg(running.process.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
+                return
+            if not running.kill_sent and current - running.term_sent_at >= grace_seconds:
+                running.kill_sent = True
+                try:
+                    os.killpg(running.process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
     def shutdown(self, timeout_seconds: float = 5) -> None:
         """Request cancellation and wait briefly for owned process trees to settle."""
@@ -749,7 +749,8 @@ class CanonicalRenderManager:
             unsettled = list(self.jobs.items())
         for job_id, running in unsettled:
             if running.process.poll() is None:
-                running.term_sent_at = running.term_sent_at or time.monotonic() - timeout_seconds
+                with self.lock:
+                    running.term_sent_at = running.term_sent_at or time.monotonic() - timeout_seconds
                 self._request_process_stop(running, grace_seconds=0)
         final_deadline = time.monotonic() + 1
         for job_id, _running in unsettled:

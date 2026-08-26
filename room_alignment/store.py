@@ -1712,7 +1712,7 @@ class Store:
         if not self.path.exists():
             return
         with self._lock, self.connect() as db:
-            rows = list(db.execute("SELECT id,kind FROM jobs WHERE status IN ('RUNNING','CANCEL_REQUESTED')"))
+            rows = list(db.execute("SELECT id,kind FROM jobs WHERE status IN ('QUEUED','RUNNING','CANCEL_REQUESTED')"))
             for row in rows:
                 status = "FAILED_RECOVERABLE" if row["kind"] == "RENDER" else "INTERRUPTED"
                 db.execute(

@@ -53,7 +53,7 @@ def run() -> dict[str, object]:
 
         read_times = []
         cursor = None
-        for _page_number in range(50):
+        while True:
             page_started = time.perf_counter()
             page = store.media_page(library["id"], 200, cursor, scan["generation"])
             read_times.append((time.perf_counter() - page_started) * 1000)

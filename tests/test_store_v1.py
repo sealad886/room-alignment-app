@@ -142,6 +142,13 @@ class StoreV1Tests(unittest.TestCase):
         events = reopened.events(job_id=job["id"])
         self.assertEqual(events[-1]["eventType"], "RECOVERY")
 
+    def test_restart_reconciles_jobs_orphaned_while_queued(self):
+        analysis = self.store.create_job("ALIGNMENT_ANALYSIS")
+        render = self.store.create_job("RENDER")
+        reopened = Store(self.store.path)
+        self.assertEqual(reopened.job(analysis["id"])["status"], "INTERRUPTED")
+        self.assertEqual(reopened.job(render["id"])["status"], "FAILED_RECOVERABLE")
+
     def test_grant_revocation_stops_dependent_scan_with_diagnostic(self):
         scan = self.store.begin_scan(self.library["id"], "FULL")
         self.store.revoke_grant(self.library["sourceGrantId"])

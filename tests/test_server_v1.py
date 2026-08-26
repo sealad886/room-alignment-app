@@ -178,6 +178,12 @@ class ServerBoundaryTests(unittest.TestCase):
         self.assertEqual(401, status)
         self.assertEqual("UNAUTHENTICATED", payload["error"]["code"])
 
+    def test_user_canceled_analysis_finishes_as_canceled(self) -> None:
+        job = self.app.store.create_job("ALIGNMENT_ANALYSIS", message="Queued")
+        self.app.store.transition_job(job["id"], "CANCEL_REQUESTED", 0, "Cancellation requested")
+        self.app._finish_analysis_error(job["id"], DomainError("JOB_STATE_CONFLICT", "Job was canceled"))
+        self.assertEqual(self.app.store.job(job["id"])["status"], "CANCELED")
+
     def test_server_enforces_session_expiry_not_only_cookie_age(self) -> None:
         cookie, _csrf = self.bootstrap()
         session_id = cookie.split("=", 1)[1]

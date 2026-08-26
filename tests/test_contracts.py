@@ -74,6 +74,7 @@ class ContractTests(unittest.TestCase):
             manifest["properties"]["manifestCanonicalization"]["const"],
             "room-alignment-canonical-json/v1",
         )
+        self.assertIsNone(manifest["properties"]["artifact"]["properties"]["manifestSha256"]["const"])
 
     def test_generated_browser_client_is_current(self):
         result = subprocess.run(

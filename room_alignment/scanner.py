@@ -92,7 +92,18 @@ def iter_videos(root: Path) -> Iterable[Path]:
         names[:] = [name for name in names if not name.startswith(".")]
         for filename in files:
             path = Path(directory, filename)
-            if path.suffix.lower() in VIDEO_EXTENSIONS or _has_media_container_signature(path):
+            if path.suffix.lower() in VIDEO_EXTENSIONS:
+                yield path
+                continue
+            try:
+                resolved = path.resolve(strict=True)
+            except OSError:
+                continue
+            if not resolved.is_relative_to(root) or not resolved.is_file():
+                if path.is_symlink():
+                    yield path
+                continue
+            if _has_media_container_signature(resolved):
                 yield path
 
 

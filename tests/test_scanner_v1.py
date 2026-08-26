@@ -34,6 +34,22 @@ class ScannerSafetyTests(unittest.TestCase):
             self.assertIn("outside", records[0].warning)
             probe.assert_not_called()
 
+    def test_unknown_extension_symlink_escape_is_not_read_for_signature(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory)
+            external = Path(outside) / "external.data"
+            external.write_bytes(b"\0\0\0\x18ftypisom" + b"\0" * 64)
+            linked = root / "linked.data"
+            linked.symlink_to(external)
+            with patch("room_alignment.scanner._has_media_container_signature") as signature, patch(
+                "room_alignment.scanner.probe"
+            ) as probe:
+                records = list(iter_scan_records(root, "library", probe_workers=1))
+            self.assertEqual([record.relative_path for record in records], [linked.name])
+            self.assertIn("outside", records[0].warning)
+            signature.assert_not_called()
+            probe.assert_not_called()
+
     def test_changed_sidecar_invalidates_incremental_probe_cache(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
