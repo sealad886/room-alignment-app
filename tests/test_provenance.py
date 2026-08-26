@@ -63,6 +63,20 @@ class ProvenanceTests(unittest.TestCase):
         self.assertEqual(outcome["ambiguity"], "INVALID_TIME_ZONE")
         self.assertIsNone(outcome["resolvedUtc"])
 
+    def test_timestamp_policy_covers_explicit_unambiguous_and_unparseable_values(self):
+        explicit = normalize_timestamp("2026-01-02T03:04:05+02:00", "Europe/Dublin")
+        self.assertEqual(explicit["ambiguity"], "EXPLICIT_OFFSET")
+        self.assertTrue(explicit["timezoneExplicit"])
+        self.assertEqual(explicit["resolvedUtc"], "2026-01-02T01:04:05Z")
+
+        unambiguous = normalize_timestamp("2026-06-01T12:00:00", "Europe/Dublin")
+        self.assertEqual(unambiguous["ambiguity"], "UNAMBIGUOUS_LOCAL_TIME")
+        self.assertIsNotNone(unambiguous["resolvedUtc"])
+
+        unparseable = normalize_timestamp("not a time", "UTC")
+        self.assertEqual(unparseable["ambiguity"], "UNPARSEABLE")
+        self.assertIsNone(unparseable["resolvedUtc"])
+
     def test_future_evidence_fields_survive_under_custom_metadata(self):
         record = media_record_from_dict(
             {

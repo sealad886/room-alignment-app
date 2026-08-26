@@ -35,6 +35,11 @@ class ContractTests(unittest.TestCase):
             "https://room-alignment.local/contracts/commands.schema.json",
         )
         self.assertEqual(contract["security"], [{"sessionCookie": []}])
+        self.assertEqual(contract["components"]["securitySchemes"]["sessionCookie"]["name"], "ra_session")
+        self.assertEqual(
+            contract["paths"]["/events"]["get"]["security"],
+            [{"sessionCookie": [], "eventToken": []}],
+        )
         for path_item in contract["paths"].values():
             if "post" in path_item:
                 self.assertEqual(

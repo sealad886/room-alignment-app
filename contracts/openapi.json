@@ -60,14 +60,14 @@
     "/jobs/{jobId}": {"parameters": [{"$ref": "#/components/parameters/JobId"}], "get": {"operationId": "getJob", "responses": {"200": {"description": "Durable job"}}}},
     "/jobs/{jobId}/cancel": {"parameters": [{"$ref": "#/components/parameters/JobId"}], "post": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "cancelJob", "responses": {"200": {"description": "Job"}}}},
     "/jobs/event-token": {"post": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "createEventToken", "responses": {"201": {"description": "Short-lived SSE token", "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/EventToken"}}}}}}},
-    "/events": {"get": {"operationId": "streamEvents", "security": [{"eventToken": []}], "parameters": [{"$ref": "#/components/parameters/EventToken"}, {"$ref": "#/components/parameters/After"}], "responses": {"200": {"description": "text/event-stream; see contracts/events.md"}}}},
+    "/events": {"get": {"operationId": "streamEvents", "security": [{"sessionCookie": [], "eventToken": []}], "parameters": [{"$ref": "#/components/parameters/EventToken"}, {"$ref": "#/components/parameters/After"}], "responses": {"200": {"description": "text/event-stream; see contracts/events.md"}}}},
     "/artifacts/{artifactId}": {"parameters": [{"$ref": "#/components/parameters/ArtifactId"}], "get": {"operationId": "getArtifact", "responses": {"200": {"description": "Artifact state"}}}},
     "/artifacts/{artifactId}/video": {"parameters": [{"$ref": "#/components/parameters/ArtifactId"}], "get": {"operationId": "getArtifactVideo", "responses": {"200": {"description": "Completed video artifact byte stream", "content": {"video/mp4": {"schema": {"type": "string", "format": "binary"}}, "video/x-matroska": {"schema": {"type": "string", "format": "binary"}}}}}}},
     "/artifacts/{artifactId}/manifest": {"parameters": [{"$ref": "#/components/parameters/ArtifactId"}], "get": {"operationId": "getManifest", "responses": {"200": {"description": "Completed manifest"}}}}
   },
   "components": {
     "securitySchemes": {
-      "sessionCookie": {"type": "apiKey", "in": "cookie", "name": "room_alignment_session"},
+      "sessionCookie": {"type": "apiKey", "in": "cookie", "name": "ra_session"},
       "csrfToken": {"type": "apiKey", "in": "header", "name": "X-CSRF-Token"},
       "eventToken": {"type": "apiKey", "in": "query", "name": "token"}
     },

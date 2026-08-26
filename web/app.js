@@ -237,15 +237,13 @@ async function ensureProjectMedia(project) {
   const missing = [...new Set(
     project.clips.map(clip => clip.assetId).filter(assetId => !state.mediaById.has(assetId))
   )];
-  for (let index = 0; index < missing.length; index += 50) {
+  for (let index = 0; index < missing.length; index += 8) {
     const results = await Promise.allSettled(
-      missing.slice(index, index + 50).map(mediaId => client.getMedia({mediaId}))
+      missing.slice(index, index + 8).map(mediaId => client.getMedia({mediaId}))
     );
     for (const result of results) {
       if (result.status === "fulfilled") state.mediaById.set(result.value.id, result.value);
     }
-    const failed = results.find(result => result.status === "rejected");
-    if (failed) throw failed.reason;
   }
 }
 
@@ -532,10 +530,11 @@ function renderAudioInspector() {
       : block.mode === "FIXED_CLIP" ? `clip:${block.clipId}`
         : `source:${block.logicalSourceId}`;
   $("#audio-source").value = value;
-  $("#audio-offset").value = Math.round(Number(block.offsetUs || 0) / 1000);
+  const offsetUs = normalizeInteger(block.offsetUs);
+  $("#audio-offset").value = Math.round(offsetUs / 1000);
   $("#link-av").classList.toggle("active", block.mode === "FOLLOW_VIDEO");
   $("#unlink-av").classList.toggle("active", block.mode !== "FOLLOW_VIDEO");
-  $("#audio-meta").innerHTML = `<strong>${safe(block.mode)}</strong><p>Independent block ${formatUs(block.startUs)}–${formatUs(block.endUs)} · ${block.offsetUs >= 0 ? "+" : ""}${Math.round(block.offsetUs / 1000)} ms · ${block.ratePpm || 0} ppm</p>`;
+  $("#audio-meta").innerHTML = `<strong>${safe(block.mode)}</strong><p>Independent block ${formatUs(block.startUs)}–${formatUs(block.endUs)} · ${offsetUs >= 0 ? "+" : ""}${Math.round(offsetUs / 1000)} ms · ${block.ratePpm || 0} ppm</p>`;
   $("#segment-provenance").innerHTML = `<p class="eyebrow">Canonical decision</p><h2>${safe(currentVideoBlock()?.id || "No video block")}</h2><div class="summary"><div class="summary-row"><span>Output interval</span><strong>${formatUs(currentVideoBlock()?.startUs || 0)}–${formatUs(currentVideoBlock()?.endUs || 0)}</strong></div><div class="summary-row"><span>Audio decision</span><strong>${safe(block.mode)}</strong></div><div class="summary-row"><span>Project revision</span><strong>${state.project.revision}</strong></div></div>`;
 }
 
