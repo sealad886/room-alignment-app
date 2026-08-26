@@ -64,6 +64,8 @@ jobs:
         run: python scripts/check_release_version.py
       - name: Build wheel and source archive
         run: uv build --out-dir dist
+      - name: Install required media tools
+        run: brew install ffmpeg
       - name: Verify clean wheel install and runtime
         shell: bash
         run: |
