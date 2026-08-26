@@ -558,8 +558,11 @@ def candidate_pairs(
             source_id = expired["clip"]["logicalSourceId"]
             if latest_reference.get(source_id) is expired:
                 latest_reference.pop(source_id, None)
-        pool = list(active)[-64:]
-        pool.extend(latest_reference.values())
+        pool_by_clip_id = {
+            str(item["clip"]["id"]): item
+            for item in [*list(active)[-64:], *latest_reference.values()]
+        }
+        pool = list(pool_by_clip_id.values())
         ranked: list[tuple[tuple[int, int, int, str], dict[str, Any]]] = []
         for other in pool:
             left_id = str(other["clip"]["id"])
@@ -686,18 +689,24 @@ def analyze_project_alignment(
     assets: dict[str, dict[str, Any]],
     signatures: AudioSignatureCache,
     *,
+    overlap_search_extension_us: int = DEFAULT_UNCERTAINTY_US,
     canceled: Callable[[], bool] | None = None,
     progress: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
+    if not 0 <= overlap_search_extension_us <= 300_000_000:
+        raise DomainError(
+            "VALIDATION_FAILED",
+            "Overlap search extension must be between 0 and 300 seconds",
+        )
     config = {
-        "uncertaintyUs": DEFAULT_UNCERTAINTY_US,
+        "overlapSearchExtensionUs": overlap_search_extension_us,
         "maxCandidatesPerClip": DEFAULT_MAX_CANDIDATES_PER_CLIP,
         "maxPairComparisons": DEFAULT_MAX_PAIR_COMPARISONS,
         "signatureSampleRate": SIGNATURE_SAMPLE_RATE,
         "signatureMaxSeconds": SIGNATURE_MAX_SECONDS,
         "visualMatching": False,
     }
-    pairs = candidate_pairs(project, assets)
+    pairs = candidate_pairs(project, assets, uncertainty_us=overlap_search_extension_us)
     needed_asset_ids = sorted(
         {
             str(item["asset"]["id"])
@@ -756,6 +765,7 @@ def analyze_project_alignment(
                 right_signature,
                 int(left["startUs"]),
                 int(right["startUs"]),
+                uncertainty_us=overlap_search_extension_us,
             )
             if evidence is not None and evidence.confidence >= 0.62:
                 edges.append(
@@ -933,7 +943,7 @@ def analyze_project_alignment(
         "selectionDigest": selection_digest,
         "inputDigest": input_digest,
         "algorithm": "bounded-audio-evidence-graph",
-        "algorithmVersion": "1",
+        "algorithmVersion": "2",
         "config": config,
         "configDigest": digest_json(config),
         "status": "PENDING",

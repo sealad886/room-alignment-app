@@ -13,6 +13,10 @@ Health is intentionally non-sensitive at `/api/health`. A second process using t
 
 Run `room-alignment doctor` before first use or after changing Python/FFmpeg. It checks installed frontend/schema resources and FFmpeg/FFprobe availability without exposing absolute paths.
 
+## Application settings
+
+Settings are available from every workflow phase and persist in `room-alignment.sqlite3`. Overlap search extends timestamp-derived clip ranges before and after each clip and applies the same bound to audio-correlation lag search. Default is 30 seconds; allowed range is 0–300 seconds. Increasing it may prepare more audio signatures and comparisons, but analysis remains limited to eight candidates per clip and 2,000 pairs per job. A changed overlap setting marks pending alignment proposal sets stale; run **Analyze overlaps** again. Text size and color scheme changes are presentation-only.
+
 Build/install validation uses a temporary virtual environment and state directory:
 
 ```bash

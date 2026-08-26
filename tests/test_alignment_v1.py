@@ -118,6 +118,21 @@ class AudioAlignmentAlgorithmTests(unittest.TestCase):
         self.assertLessEqual(max(counts.values()), 2)
         self.assertLessEqual(len(pairs), 200)
 
+    def test_candidate_generation_extends_search_symmetrically_for_timestamp_skew(self) -> None:
+        assets = [
+            media("earlier", "2025-10-15T12:00:00+00:00", 5_000_000),
+            media("later", "2025-10-15T12:00:40+00:00", 5_000_000),
+        ]
+        project = new_project("Skewed timestamps", "library", assets, initialize_legacy_program=False)
+        by_id = {item["id"]: item for item in assets}
+        self.assertEqual(candidate_pairs(project, by_id, uncertainty_us=30_000_000), [])
+        pairs = candidate_pairs(project, by_id, uncertainty_us=40_000_000)
+        self.assertEqual(len(pairs), 1)
+        self.assertEqual(
+            {pairs[0][0]["clip"]["assetId"], pairs[0][1]["clip"]["assetId"]},
+            {"earlier", "later"},
+        )
+
     def test_proposal_set_aggregates_audio_and_timestamp_review_outcomes(self) -> None:
         assets = [
             media("left", "2025-10-15T12:00:00+00:00"),
@@ -136,8 +151,13 @@ class AudioAlignmentAlgorithmTests(unittest.TestCase):
             }
         )
         result = analyze_project_alignment(
-            project, {item["id"]: item for item in assets}, signatures
+            project,
+            {item["id"]: item for item in assets},
+            signatures,
+            overlap_search_extension_us=45_000_000,
         )
+        self.assertEqual(result["config"]["overlapSearchExtensionUs"], 45_000_000)
+        self.assertEqual(result["algorithmVersion"], "2")
         self.assertEqual(result["summary"]["audioConfirmed"], 2)
         self.assertEqual(result["summary"]["timestampOnly"], 1)
         self.assertEqual(len(result["proposals"]), 3)
@@ -383,8 +403,8 @@ class ProposalSetStoreTests(unittest.TestCase):
             "inputDigest": "a" * 64,
             "digest": "b" * 64,
             "algorithm": "bounded-audio-evidence-graph",
-            "algorithmVersion": "1",
-            "config": {},
+            "algorithmVersion": "2",
+            "config": {"overlapSearchExtensionUs": 30_000_000},
             "configDigest": "c" * 64,
             "status": "PENDING",
             "summary": {},

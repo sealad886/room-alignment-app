@@ -105,6 +105,13 @@
     ],
     "queryParameters": {}
   },
+  "getApplicationSettings": {
+    "binary": false,
+    "method": "GET",
+    "path": "/settings",
+    "pathParameters": [],
+    "queryParameters": {}
+  },
   "getArtifact": {
     "binary": false,
     "method": "GET",
@@ -557,6 +564,13 @@
       "after": false,
       "token": true
     }
+  },
+  "updateApplicationSettings": {
+    "binary": false,
+    "method": "PUT",
+    "path": "/settings",
+    "pathParameters": [],
+    "queryParameters": {}
   },
   "updateLibraryTimePolicy": {
     "binary": false,

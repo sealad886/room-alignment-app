@@ -360,6 +360,7 @@ class App:
 
     def start_alignment_analysis(self, project_id: str) -> dict[str, object]:
         project = self.store.project(project_id)
+        settings = self.store.application_settings()
         self.store.active_library_root_paths(project["libraryId"])
         with self.lock:
             if len(self.analysis_reserved) >= 2:
@@ -379,6 +380,7 @@ class App:
                     project,
                     assets,
                     self.audio_signatures,
+                    overlap_search_extension_us=int(settings["overlapSearchExtensionUs"]),
                     canceled=lambda: self.closing or self._job_stopping(job["id"]),
                     progress=lambda value, message: self.store.transition_job(
                         job["id"], "RUNNING", value, message
@@ -727,6 +729,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/session":
             _session_id, session = self.session()
             return self.respond({"authenticated": True, "csrfToken": session["csrf"]})
+        if path == "/api/v1/settings":
+            return self.respond(APP.store.application_settings())
         if path == "/api/v1/openapi.json":
             return self.respond(CONTRACT.read_bytes(), content_type="application/json; charset=utf-8")
         if path == "/api/v1/grants":
@@ -1000,6 +1004,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.post_api(path, query, body)
         except FileNotFoundError:
             self.error(DomainError("VALIDATION_FAILED", "Directory does not exist"))
+        except Exception as error:
+            self.error(error)
+
+    def do_PUT(self) -> None:
+        self._set_request_id()
+        try:
+            self.enforce_request_boundary(mutation=True)
+            path = urlparse(self.path).path
+            body = self.json_body()
+            if path != "/api/v1/settings":
+                raise DomainError("NOT_FOUND", "API resource not found")
+            return self.respond(APP.store.update_application_settings(body))
         except Exception as error:
             self.error(error)
 

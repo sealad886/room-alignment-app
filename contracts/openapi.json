@@ -10,6 +10,10 @@
   "paths": {
     "/system": {"get": {"operationId": "getSystem", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Capabilities", "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/System"}}}}}}},
     "/session": {"get": {"operationId": "getSession", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Authenticated local session", "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/Session"}}}}}}},
+    "/settings": {
+      "get": {"operationId": "getApplicationSettings", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Persisted application and overlap-analysis settings", "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/ApplicationSettings"}}}}}},
+      "put": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "updateApplicationSettings", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/ApplicationSettingsUpdate"}}}}, "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Updated application settings", "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/ApplicationSettings"}}}}}}
+    },
     "/openapi.json": {"get": {"operationId": "getOpenApiContract", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Normative OpenAPI contract"}}}},
     "/contracts/{contractName}": {"parameters": [{"$ref": "#/components/parameters/ContractName"}], "get": {"operationId": "getJsonSchemaContract", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Normative JSON Schema contract"}}}},
     "/grants": {

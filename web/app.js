@@ -7,6 +7,11 @@ const client = new RoomAlignmentAPIClient();
 
 const state = {
   view: "library",
+  settings: {
+    overlapSearchExtensionUs: 30_000_000,
+    textScalePercent: 100,
+    colorScheme: "DARKROOM",
+  },
   library: null,
   media: [],
   mediaById: new Map(),
@@ -78,6 +83,61 @@ function toast(message) {
   node.classList.add("show");
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => node.classList.remove("show"), 3600);
+}
+
+function applyAppearanceSettings(settings = state.settings) {
+  const scale = Math.max(85, Math.min(140, Number(settings.textScalePercent || 100))) / 100;
+  document.documentElement.dataset.theme = settings.colorScheme || "DARKROOM";
+  document.documentElement.style.setProperty("--text-scale", String(scale));
+  document.documentElement.style.setProperty("--inverse-text-scale", String(1 / scale));
+  document.querySelector('meta[name="color-scheme"]')?.setAttribute(
+    "content",
+    settings.colorScheme === "DAYLIGHT" ? "light" : "dark",
+  );
+}
+
+function populateSettingsForm(settings = state.settings) {
+  $("#overlap-search-seconds").value = Math.round(Number(settings.overlapSearchExtensionUs) / 1_000_000);
+  $("#text-scale").value = String(settings.textScalePercent);
+  $("#color-scheme").value = settings.colorScheme;
+}
+
+function previewSettingsForm() {
+  applyAppearanceSettings({
+    ...state.settings,
+    textScalePercent: Number($("#text-scale").value),
+    colorScheme: $("#color-scheme").value,
+  });
+}
+
+function closeSettings({restore = true} = {}) {
+  if (restore) applyAppearanceSettings(state.settings);
+  $("#settings-dialog").close();
+}
+
+async function saveSettings(event) {
+  event.preventDefault();
+  const saveState = $("#settings-save-state");
+  saveState.textContent = "Saving…";
+  try {
+    const previousExtension = Number(state.settings.overlapSearchExtensionUs);
+    state.settings = await client.updateApplicationSettings({}, {
+      overlapSearchExtensionUs: Math.round(Number($("#overlap-search-seconds").value) * 1_000_000),
+      textScalePercent: Number($("#text-scale").value),
+      colorScheme: $("#color-scheme").value,
+    });
+    applyAppearanceSettings();
+    $("#settings-dialog").close();
+    if (Number(state.settings.overlapSearchExtensionUs) !== previousExtension && state.project) {
+      state.proposalSets = await client.listAlignmentProposalSets({projectId: state.project.id});
+      renderSuggestions();
+    }
+    toast("Settings saved locally");
+  } catch (error) {
+    saveState.textContent = "Could not save";
+    applyAppearanceSettings(state.settings);
+    handleError(error);
+  }
 }
 
 function confirmAction(message, {title = "Confirm change", confirmLabel = "Confirm"} = {}) {
@@ -1054,7 +1114,7 @@ function renderSuggestions() {
     const unplaced = state.timelineWindow?.unplacedItems || [];
     container.innerHTML = unplaced.length
       ? `<div class="review-queue">${unplaced.slice(0, 12).map(item => `<div class="confidence"><strong>Unplaced clip</strong><p><a class="timeline-clip-link" href="#alignment-timeline" data-focus-clip="${safe(item.clipId)}">${safe(item.relativePath || item.assetId)}</a></p><small>Manual timing evidence required</small></div>`).join("")}</div>`
-      : '<p class="muted">Analyze overlaps to compare bounded cross-source audio evidence. Timestamp placement stays provisional.</p>';
+      : `<p class="muted">Analyze overlaps to compare bounded cross-source audio evidence across a ±${Math.round(Number(state.settings.overlapSearchExtensionUs) / 1_000_000)} second timestamp window. Timestamp placement stays provisional.</p>`;
     return;
   }
   const summary = proposalSet.summary;
@@ -1068,7 +1128,7 @@ function renderSuggestions() {
       <div><strong>${summary.timestampOnly}</strong><small>timestamp-only</small></div>
       <div><strong>${summary.conflicting}</strong><small>conflicting</small></div>
       <div><strong>${summary.unresolved}</strong><small>unresolved</small></div>
-    </div><small>${summary.candidatePairs} bounded comparisons · ${summary.confirmedEdges} supported edges · visual matching not used</small></div>
+    </div><small>${summary.candidatePairs} bounded comparisons · ${summary.confirmedEdges} supported edges · ±${Math.round(Number(proposalSet.config?.overlapSearchExtensionUs || state.settings.overlapSearchExtensionUs) / 1_000_000)}s timestamp search · visual matching not used</small></div>
     ${highConfidence.length ? `<button class="btn primary wide" id="accept-high-confidence">Accept ${highConfidence.length} high-confidence result${highConfidence.length === 1 ? "" : "s"}</button>` : ""}
     <div class="review-queue">${review.slice(0, 20).map(item => `<div class="confidence"><strong>${safe(item.classification.replaceAll("_", " "))} · ${Math.round(Number(item.confidence) * 100)}%</strong><p><a class="timeline-clip-link" href="#alignment-timeline" data-focus-clip="${safe(item.clipId)}">${safe(state.mediaById.get(item.assetId)?.relative_path || item.assetId)}</a></p><small>${safe(item.limitations.join("; ") || "Review evidence before accepting")}</small><div class="link-row"><button class="btn" data-accept-proposal="${safe(item.id)}">Accept manually</button><button class="btn" data-reject-proposal="${safe(item.id)}">Reject</button></div></div>`).join("")}</div>`;
   if ($("#accept-high-confidence")) $("#accept-high-confidence").onclick = () => acceptHighConfidence(proposalSet);
@@ -1718,6 +1778,20 @@ async function addFolderAndScan(path) {
 
 function setupEvents() {
   $$('[data-view]').forEach(button => { button.onclick = () => showView(button.dataset.view); });
+  $("#open-settings").onclick = () => {
+    populateSettingsForm();
+    $("#settings-save-state").textContent = "";
+    $("#settings-dialog").showModal();
+  };
+  $("#close-settings").onclick = () => closeSettings();
+  $("#cancel-settings").onclick = () => closeSettings();
+  $("#settings-dialog").addEventListener("cancel", event => {
+    event.preventDefault();
+    closeSettings();
+  });
+  $("#settings-form").onsubmit = saveSettings;
+  $("#text-scale").onchange = previewSettingsForm;
+  $("#color-scheme").onchange = previewSettingsForm;
   $("#suggestion-list").addEventListener("click", event => {
     const link = event.composedPath().find(node => node instanceof Element && node.matches?.("[data-focus-clip]"));
     if (!link) return;
@@ -1991,6 +2065,8 @@ function handleError(error) {
 async function start() {
   try {
     await client.getSession();
+    state.settings = await client.getApplicationSettings();
+    applyAppearanceSettings();
     $("#library-time-zone").value = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
     setupEvents();
     connectEventFeed();

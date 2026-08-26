@@ -36,11 +36,18 @@ from .provenance import normalize_timestamp
 from .scanner import media_record_from_dict, quick_fingerprint
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 PROJECT_SNAPSHOT_INTERVAL = 25
 MAX_JOB_EVENTS = 100_000
 MAX_CACHE_ENTRIES = 10_000
 MAX_CACHE_BYTES = 2 * 1024 * 1024 * 1024
+DEFAULT_APPLICATION_SETTINGS = {
+    "overlapSearchExtensionUs": 30_000_000,
+    "textScalePercent": 100,
+    "colorScheme": "DARKROOM",
+}
+COLOR_SCHEMES = {"DARKROOM", "SLATE", "DAYLIGHT", "HIGH_CONTRAST"}
+TEXT_SCALES = {90, 100, 115, 130}
 TERMINAL_JOB_STATES = {"CANCELED", "SUCCEEDED", "FAILED", "INTERRUPTED", "FAILED_RECOVERABLE"}
 JOB_STATES = {
     "QUEUED",
@@ -68,6 +75,13 @@ PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL, details_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS application_settings (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  overlap_search_extension_us INTEGER NOT NULL DEFAULT 30000000,
+  text_scale_percent INTEGER NOT NULL DEFAULT 100,
+  color_scheme TEXT NOT NULL DEFAULT 'DARKROOM',
+  updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS directory_grants (
   id TEXT PRIMARY KEY,
@@ -452,6 +466,16 @@ class Store:
         self._backup_before_migration()
         with self.connect() as db:
             db.executescript(SCHEMA)
+            db.execute(
+                "INSERT OR IGNORE INTO application_settings(singleton,overlap_search_extension_us,"
+                "text_scale_percent,color_scheme,updated_at) VALUES(1,?,?,?,?)",
+                (
+                    DEFAULT_APPLICATION_SETTINGS["overlapSearchExtensionUs"],
+                    DEFAULT_APPLICATION_SETTINGS["textScalePercent"],
+                    DEFAULT_APPLICATION_SETTINGS["colorScheme"],
+                    now_iso(),
+                ),
+            )
             self._ensure_legacy_columns(db)
             self._backfill_directory_grant_identities(db)
             self._backfill_library_roots(db)
@@ -469,6 +493,84 @@ class Store:
         self.interrupt_orphaned_jobs()
         self.compact_events()
         self.prune_cache()
+
+    def application_settings(self) -> dict[str, Any]:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT overlap_search_extension_us,text_scale_percent,color_scheme,updated_at "
+                "FROM application_settings WHERE singleton=1"
+            ).fetchone()
+            if not row:
+                return {**DEFAULT_APPLICATION_SETTINGS, "updatedAt": None}
+            return {
+                "overlapSearchExtensionUs": int(row["overlap_search_extension_us"]),
+                "textScalePercent": int(row["text_scale_percent"]),
+                "colorScheme": str(row["color_scheme"]),
+                "updatedAt": row["updated_at"],
+            }
+
+    def update_application_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        allowed = {"overlapSearchExtensionUs", "textScalePercent", "colorScheme"}
+        unknown = set(settings) - allowed
+        if unknown:
+            raise DomainError(
+                "VALIDATION_FAILED",
+                f"Unknown application setting: {sorted(unknown)[0]}",
+            )
+        current = self.application_settings()
+        def integer_setting(name: str, fallback: object) -> int:
+            value = settings.get(name, fallback)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise DomainError("VALIDATION_FAILED", f"{name} must be an integer")
+            return value
+
+        overlap_us = integer_setting(
+            "overlapSearchExtensionUs", current["overlapSearchExtensionUs"]
+        )
+        text_scale = integer_setting("textScalePercent", current["textScalePercent"])
+        color_scheme = str(settings.get("colorScheme", current["colorScheme"]))
+        if not 0 <= overlap_us <= 300_000_000:
+            raise DomainError(
+                "VALIDATION_FAILED",
+                "Overlap search extension must be between 0 and 300 seconds",
+            )
+        if text_scale not in TEXT_SCALES:
+            raise DomainError("VALIDATION_FAILED", "Text scale must be 90, 100, 115, or 130 percent")
+        if color_scheme not in COLOR_SCHEMES:
+            raise DomainError("VALIDATION_FAILED", "Unknown color scheme")
+        updated_at = now_iso()
+        with self._lock, self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "INSERT INTO application_settings(singleton,overlap_search_extension_us,"
+                "text_scale_percent,color_scheme,updated_at) VALUES(1,?,?,?,?) "
+                "ON CONFLICT(singleton) DO UPDATE SET overlap_search_extension_us=excluded.overlap_search_extension_us,"
+                "text_scale_percent=excluded.text_scale_percent,color_scheme=excluded.color_scheme,"
+                "updated_at=excluded.updated_at",
+                (overlap_us, text_scale, color_scheme, updated_at),
+            )
+            if overlap_us != int(current["overlapSearchExtensionUs"]):
+                rows = list(
+                    db.execute(
+                        "SELECT id,set_json FROM alignment_proposal_sets "
+                        "WHERE status IN ('PENDING','PARTIALLY_RESOLVED')"
+                    )
+                )
+                for row in rows:
+                    value = json.loads(row["set_json"])
+                    value["status"] = "STALE"
+                    value["invalidationReason"] = "Overlap search settings changed"
+                    value["updatedAt"] = updated_at
+                    db.execute(
+                        "UPDATE alignment_proposal_sets SET status='STALE',set_json=?,updated_at=? WHERE id=?",
+                        (json.dumps(value), updated_at, row["id"]),
+                    )
+        return {
+            "overlapSearchExtensionUs": overlap_us,
+            "textScalePercent": text_scale,
+            "colorScheme": color_scheme,
+            "updatedAt": updated_at,
+        }
 
     def _backup_before_migration(self) -> None:
         if not self.path.exists() or self.path.stat().st_size == 0:
@@ -2883,6 +2985,9 @@ class Store:
             if not project_row:
                 raise DomainError("NOT_FOUND", "Project not found")
             current = self._migrate_legacy_project(json.loads(project_row["document_json"]))
+            settings_row = db.execute(
+                "SELECT overlap_search_extension_us FROM application_settings WHERE singleton=1"
+            ).fetchone()
             if (
                 int(project_row["revision"]) != int(value["projectRevision"])
                 or str((current.get("selectionSnapshot") or {}).get("digest", ""))
@@ -2890,6 +2995,12 @@ class Store:
             ):
                 value["status"] = "STALE"
                 value["invalidationReason"] = "Project changed before analysis completed"
+                value["updatedAt"] = now_iso()
+            elif settings_row and int(
+                value.get("config", {}).get("overlapSearchExtensionUs", -1)
+            ) != int(settings_row["overlap_search_extension_us"]):
+                value["status"] = "STALE"
+                value["invalidationReason"] = "Overlap search settings changed during analysis"
                 value["updatedAt"] = now_iso()
             rows = list(
                 db.execute(
