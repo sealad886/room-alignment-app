@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Literal
 
+from room_alignment import __version__
+
 
 EvidenceKind = Literal["filesystem", "filename", "container", "sidecar", "importer", "user"]
 
@@ -19,7 +21,7 @@ class ProvenanceEvidence:
     normalized_value: Any | None = None
     observed_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     extractor: str = "room-alignment"
-    extractor_version: str = "0.2.0"
+    extractor_version: str = __version__
     uncertainty: str | None = None
     custom: dict[str, Any] = field(default_factory=dict)
 

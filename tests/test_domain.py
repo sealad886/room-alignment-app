@@ -130,6 +130,15 @@ class ProgramCompilerTests(unittest.TestCase):
         self.assertIn("AUDIO_UNAVAILABLE", {item["code"] for item in compiled["issues"]})
         self.assertFalse(compiled["audioSlices"])
 
+    def test_missing_duration_is_an_unavailable_warning_path_not_a_conversion_error(self):
+        media = asset("a", "Door", 5_000_000)
+        media["durationUs"] = None
+        media["duration"] = None
+        media["warning"] = "Duration unavailable"
+        project = new_project("Event", "lib", [media], "project")
+        compiled = compile_program(project, {"a": media})
+        self.assertIn("VIDEO_GAP", {item["code"] for item in compiled["issues"]})
+
     def test_explicit_silence_is_independent_from_video(self):
         media = asset("a", "Door", 5_000_000, audio=False)
         project = new_project("Event", "lib", [media], "project")
@@ -240,6 +249,25 @@ class CommandTests(unittest.TestCase):
                 },
                 {"a": media},
             )
+
+    def test_new_audio_block_requires_explicit_drift_confirmation(self):
+        media = asset("a", "Door", 5_000_000)
+        project = new_project("Event", "lib", [media], "project")
+        payload = {
+            "startUs": 0,
+            "endUs": 1_000_000,
+            "mode": "SILENCE",
+            "ratePpm": 100,
+        }
+        with self.assertRaisesRegex(DomainError, "confirmDrift"):
+            apply_command(project, "AddAudioBlock", payload, {"a": media})
+        changed = apply_command(
+            project,
+            "AddAudioBlock",
+            {**payload, "confirmDrift": True},
+            {"a": media},
+        )
+        self.assertEqual(changed["audioBlocks"][-1]["ratePpm"], 100)
 
 
 if __name__ == "__main__":

@@ -26,6 +26,16 @@ class ServerBoundaryTests(unittest.TestCase):
         self.output.mkdir()
         self.app = server_module.App(self.root / "state")
         self.addCleanup(self.app.close)
+        had_previous_app = hasattr(server_module, "APP")
+        previous_app = getattr(server_module, "APP", None)
+
+        def restore_app() -> None:
+            if had_previous_app:
+                server_module.APP = previous_app
+            elif hasattr(server_module, "APP"):
+                del server_module.APP
+
+        self.addCleanup(restore_app)
         server_module.APP = self.app
         try:
             self.server = server_module.ThreadingHTTPServer(("127.0.0.1", 0), server_module.Handler)

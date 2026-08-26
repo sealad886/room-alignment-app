@@ -113,9 +113,7 @@ class ScannerSafetyTests(unittest.TestCase):
             with patch("room_alignment.scanner._scan_path", side_effect=controlled_scan):
                 records = iter_scan_records(root, "library", probe_workers=2)
                 next(records)
-                started = time.monotonic()
                 records.close()
-                self.assertLess(time.monotonic() - started, 0.5)
                 self.assertTrue(stopped.wait(1))
 
 

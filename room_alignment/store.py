@@ -336,6 +336,9 @@ class Store:
             destination.close()
             source.close()
         os.replace(staging, self.path)
+        for suffix in ("-wal", "-shm"):
+            Path(f"{self.path}{suffix}").unlink(missing_ok=True)
+            Path(f"{staging}{suffix}").unlink(missing_ok=True)
 
     def _ensure_legacy_columns(self, db: sqlite3.Connection) -> None:
         additions = {
@@ -613,15 +616,25 @@ class Store:
             if owns:
                 db.close()
 
-    def scan_progress(self, scan_id: str, *, warning: bool = False, message: str | None = None) -> None:
+    def scan_progress(
+        self,
+        scan_id: str,
+        *,
+        processed: int = 1,
+        warning: bool = False,
+        warning_count: int | None = None,
+        message: str | None = None,
+    ) -> None:
+        if processed < 1:
+            raise DomainError("VALIDATION_FAILED", "Scan progress must include at least one record")
         with self._lock, self.connect() as db:
             row = db.execute("SELECT * FROM scan_generations WHERE id=?", (scan_id,)).fetchone()
             if not row:
                 raise DomainError("NOT_FOUND", "Scan not found")
             if row["cancel_requested"] or row["status"] in {"CANCEL_REQUESTED", "CANCELED", "FAILED", "SUCCEEDED"}:
                 return
-            scanned = int(row["scanned"]) + 1
-            warnings = int(row["warnings"]) + int(warning)
+            scanned = int(row["scanned"]) + processed
+            warnings = int(row["warnings"]) + (int(warning) if warning_count is None else warning_count)
             db.execute(
                 "UPDATE scan_generations SET status='RUNNING',scanned=?,videos=?,warnings=?,message=?,updated_at=? WHERE id=?",
                 (scanned, scanned, warnings, message, now_iso(), scan_id),
@@ -655,9 +668,10 @@ class Store:
             if not scan:
                 raise DomainError("NOT_FOUND", "Scan not found")
             policy = db.execute(
-                "SELECT time_zone,dst_fold,nonexistent_policy FROM libraries WHERE id=?",
+                "SELECT root,time_zone,dst_fold,nonexistent_policy FROM libraries WHERE id=?",
                 (scan["library_id"],),
             ).fetchone()
+            library_root = Path(policy["root"])
             for record in records:
                 _normalize_media_record_timestamp(record, dict(policy))
                 fingerprint = record.fingerprint or {}
@@ -671,9 +685,6 @@ class Store:
                     identity_material.get(key) is not None for key in ("device", "inode", "size", "sampleSha256")
                 ) else None
                 if identity_key and not db.execute("SELECT 1 FROM media WHERE id=?", (record.id,)).fetchone():
-                    library_root = Path(
-                        db.execute("SELECT root FROM libraries WHERE id=?", (scan["library_id"],)).fetchone()[0]
-                    )
                     rename_candidates = list(
                         db.execute(
                             "SELECT keys.asset_id,media.relative_path FROM media_identity_keys keys "

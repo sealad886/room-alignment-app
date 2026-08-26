@@ -144,7 +144,8 @@
         "id": {"$ref": "#/$defs/Id"}, "startUs": {"$ref": "#/$defs/Us"}, "endUs": {"$ref": "#/$defs/Us"},
         "mode": {"enum": ["FOLLOW_VIDEO", "FIXED_SOURCE", "FIXED_CLIP", "SILENCE"]},
         "logicalSourceId": {"type": ["string", "null"]}, "clipId": {"type": ["string", "null"]},
-        "offsetUs": {"type": "integer"}, "ratePpm": {"type": "integer", "minimum": -2000, "maximum": 2000}
+        "offsetUs": {"type": "integer"}, "ratePpm": {"type": "integer", "minimum": -2000, "maximum": 2000},
+        "confirmDrift": {"type": "boolean"}
       }
     }
   }

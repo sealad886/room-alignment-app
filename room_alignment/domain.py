@@ -35,7 +35,8 @@ COMMAND_PAYLOAD_FIELDS = {
     "PinVideoClip": {"blockId", "clipId"},
     "CutToSource": {"blockId", "atUs", "logicalSourceId", "pinnedClipId", "newBlockId"},
     "AddAudioBlock": {
-        "id", "startUs", "endUs", "mode", "logicalSourceId", "clipId", "offsetUs", "ratePpm"
+        "id", "startUs", "endUs", "mode", "logicalSourceId", "clipId", "offsetUs", "ratePpm",
+        "confirmDrift"
     },
     "SplitAudioBlock": {"blockId", "atUs"},
     "MoveAudioBoundary": {"leftBlockId", "rightBlockId", "atUs"},
@@ -76,6 +77,14 @@ def digest_json(value: Any) -> str:
 
 def seconds_to_us(value: int | float | str | Decimal) -> int:
     return int((Decimal(str(value)) * Decimal(1_000_000)).quantize(Decimal("1"), rounding=ROUND_HALF_EVEN))
+
+
+def _asset_duration_us(asset: dict[str, Any]) -> int:
+    duration_us = asset.get("durationUs")
+    if duration_us is not None:
+        return int(duration_us)
+    duration = asset.get("duration")
+    return seconds_to_us(duration) if duration is not None else 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -540,6 +549,9 @@ def _cut_to_source(project: dict[str, Any], payload: dict[str, Any]) -> None:
 
 
 def _add_audio_block(project: dict[str, Any], payload: dict[str, Any]) -> None:
+    rate_ppm = int(payload.get("ratePpm", 0))
+    if rate_ppm and not payload.get("confirmDrift"):
+        raise DomainError("VALIDATION_FAILED", "Non-zero audio ratePpm requires confirmDrift")
     project["audioBlocks"].append(
         {
             "id": payload.get("id") or opaque_id("ablock"),
@@ -549,7 +561,7 @@ def _add_audio_block(project: dict[str, Any], payload: dict[str, Any]) -> None:
             "logicalSourceId": payload.get("logicalSourceId"),
             "clipId": payload.get("clipId"),
             "offsetUs": int(payload.get("offsetUs", 0)),
-            "ratePpm": int(payload.get("ratePpm", 0)),
+            "ratePpm": rate_ppm,
         }
     )
 
@@ -636,7 +648,7 @@ def _clip_ranges(project: dict[str, Any], assets: dict[str, dict[str, Any]]) -> 
         asset = assets.get(clip["assetId"])
         if not asset or asset.get("missing"):
             continue
-        duration_us = int(asset.get("durationUs") or seconds_to_us(asset.get("duration", 0)))
+        duration_us = _asset_duration_us(asset)
         if duration_us <= 0:
             continue
         transform = SyncTransform.from_dict(clip.get("sync"))
@@ -837,7 +849,7 @@ def _apply_audio_timing(
             transforms.append(f"audio rate correction {rate_ppm} ppm")
         item["transforms"] = transforms
         asset = assets.get(item["assetId"], {})
-        duration_us = int(asset.get("durationUs") or seconds_to_us(asset.get("duration", 0)))
+        duration_us = _asset_duration_us(asset)
         if (
             item["sourceStartUs"] < 0
             or item["sourceEndUs"] <= item["sourceStartUs"]

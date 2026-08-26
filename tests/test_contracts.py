@@ -41,6 +41,12 @@ class ContractTests(unittest.TestCase):
             [{"sessionCookie": [], "eventToken": []}],
         )
         for path_item in contract["paths"].values():
+            for method in ("get", "post", "put", "patch", "delete"):
+                if method in path_item:
+                    self.assertEqual(
+                        path_item[method]["responses"]["default"],
+                        {"$ref": "#/components/responses/Error"},
+                    )
             if "post" in path_item:
                 self.assertEqual(
                     path_item["post"]["security"],
@@ -62,6 +68,12 @@ class ContractTests(unittest.TestCase):
             self.assertEqual(schema["$schema"], "https://json-schema.org/draft/2020-12/schema")
         self.assertIn("/contracts/{contractName}", contract["paths"])
         self.assertIn("/artifacts/{artifactId}/video", contract["paths"])
+        manifest = json.loads((ROOT / "contracts" / "manifest.schema.json").read_text(encoding="utf-8"))
+        self.assertIn("manifestCanonicalization", manifest["required"])
+        self.assertEqual(
+            manifest["properties"]["manifestCanonicalization"]["const"],
+            "room-alignment-canonical-json/v1",
+        )
 
     def test_generated_browser_client_is_current(self):
         result = subprocess.run(

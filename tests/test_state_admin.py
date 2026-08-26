@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import sqlite3
 import unittest
@@ -41,6 +42,27 @@ class StateAdministrationTests(unittest.TestCase):
             backup(state, backup_file)
             with self.assertRaisesRegex(ValueError, "--replace"):
                 restore(state, backup_file, False)
+
+    def test_restore_removes_sidecars_from_replaced_database(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state.sqlite3"
+            Store(state)
+            backup_file = root / "backup.sqlite3"
+            backup(state, backup_file)
+            real_replace = os.replace
+
+            def replace_then_create_stale_sidecars(source: Path, destination: Path) -> None:
+                real_replace(source, destination)
+                Path(f"{destination}-wal").write_bytes(b"stale wal")
+                Path(f"{destination}-shm").write_bytes(b"stale shm")
+
+            with patch("scripts.state_admin.os.replace", side_effect=replace_then_create_stale_sidecars):
+                restore(state, backup_file, True)
+            for suffix, stale in (("-wal", b"stale wal"), ("-shm", b"stale shm")):
+                sidecar = Path(f"{state}{suffix}")
+                if sidecar.exists():
+                    self.assertNotEqual(sidecar.read_bytes(), stale)
 
     def test_read_only_sqlite_uri_handles_reserved_path_characters(self):
         with tempfile.TemporaryDirectory() as temporary:

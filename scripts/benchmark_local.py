@@ -52,10 +52,14 @@ def run() -> dict[str, object]:
         tracemalloc.stop()
 
         read_times = []
-        for offset in range(50):
+        cursor = None
+        for _page_number in range(50):
             page_started = time.perf_counter()
-            store.media_page(library["id"], 200, None if offset == 0 else None, scan["generation"])
+            page = store.media_page(library["id"], 200, cursor, scan["generation"])
             read_times.append((time.perf_counter() - page_started) * 1000)
+            cursor = page["nextCursor"]
+            if cursor is None:
+                break
 
         project = store.create_project("Scale", library["id"], ["asset-000000"])
         source_id = project["logicalSources"][0]["id"]

@@ -8,13 +8,13 @@ All sensitive reads and every mutation require the bootstrapped local session. M
 
 - `/system`, `/session`, `/openapi.json`, `/contracts/{contractName}`
 - `/grants`, `/grants/{grantId}/revoke`
-- `/libraries`, `/libraries/{libraryId}/scans`, `/time-policy`, `/cluster-jobs`, `/cluster-suggestions`
+- `/libraries`, `/libraries/{libraryId}/scans`, `/libraries/{libraryId}/time-policy`, `/libraries/{libraryId}/cluster-jobs`, `/libraries/{libraryId}/cluster-suggestions`
 - `/scans/{scanId}`, `/scans/{scanId}/cancel`
-- `/libraries/{libraryId}/media`, `/media/{mediaId}`, `/provenance/resolutions`
-- `/projects`, `/projects/{projectId}`, `/commands`, `/program`, `/program-at`, `/suggestions`, `/alignment-jobs`, `/render-plans`
-- `/render-plans/{planId}`, `/review`, `/render`
-- `/jobs/{jobId}`, `/cancel`, `/jobs/event-token`, `/events`
-- `/artifacts/{artifactId}`, `/video`, `/manifest`
+- `/libraries/{libraryId}/media`, `/media/{mediaId}`, `/media/{mediaId}/provenance/resolutions`
+- `/projects`, `/projects/{projectId}`, `/projects/{projectId}/commands`, `/projects/{projectId}/program`, `/projects/{projectId}/program-at`, `/projects/{projectId}/suggestions`, `/projects/{projectId}/alignment-jobs`, `/projects/{projectId}/render-plans`
+- `/render-plans/{planId}`, `/render-plans/{planId}/review`, `/render-plans/{planId}/render`
+- `/jobs/{jobId}`, `/jobs/{jobId}/cancel`, `/jobs/event-token`, `/events`
+- `/artifacts/{artifactId}`, `/artifacts/{artifactId}/video`, `/artifacts/{artifactId}/manifest`
 
 ## Commands and concurrency
 

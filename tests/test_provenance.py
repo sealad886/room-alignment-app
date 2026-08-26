@@ -3,11 +3,17 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from room_alignment import __version__
+from room_alignment.models import ProvenanceEvidence
 from room_alignment.provenance import infer_from_path, merge_evidence, normalize_timestamp, read_sidecar
 from room_alignment.scanner import media_record_from_dict
 
 
 class ProvenanceTests(unittest.TestCase):
+    def test_default_extractor_version_matches_the_package(self):
+        evidence = ProvenanceEvidence("user", "camera", "Door", 1, "test")
+        self.assertEqual(evidence.extractor_version, __version__)
+
     def test_infers_common_but_not_vendor_specific_filename(self):
         root = Path("archive")
         path = root / "yard" / "2026-08-25_19-42-08_North_Gate_0042.mp4"

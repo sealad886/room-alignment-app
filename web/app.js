@@ -680,7 +680,7 @@ function togglePlay() {
   }
 }
 
-async function prepareReview() {
+async function prepareReview({provisionGrant = false} = {}) {
   state.renderPlan = null;
   state.artifact = null;
   $("#reviewed-check").checked = false;
@@ -698,6 +698,9 @@ async function prepareReview() {
     if (!filename.toLowerCase().endsWith(suffix)) throw new Error(`${profile} output filename must end with ${suffix}`);
     let grant = state.outputGrantByDirectory.get(directory);
     if (!grant || grant.revoked) {
+      if (!provisionGrant) {
+        throw new Error("Confirm the output path to grant write access to its directory");
+      }
       grant = await client.createGrant({}, {path: directory, role: "WRITE_OUTPUT"});
       state.outputGrantByDirectory.set(directory, grant);
     }
@@ -1033,6 +1036,10 @@ function setupEvents() {
   $("#output-path").oninput = () => {
     clearTimeout(prepareReview.inputTimer);
     prepareReview.inputTimer = setTimeout(() => { if (state.view === "review") prepareReview(); }, 350);
+  };
+  $("#output-path").onblur = () => {
+    clearTimeout(prepareReview.inputTimer);
+    if (state.view === "review") prepareReview({provisionGrant: true});
   };
   $("#lossless-check").onchange = () => { if (state.view === "review") prepareReview(); };
   $("#download-manifest").onclick = async () => {

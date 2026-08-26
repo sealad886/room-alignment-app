@@ -5,19 +5,23 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema", "artifact", "project", "renderPlan", "sourceSetDigest", "provenanceResolutions",
+    "schema", "manifestCanonicalization", "artifact", "project", "renderPlan", "sourceSetDigest", "provenanceResolutions",
     "sources", "outputTimebase", "videoSlices", "audioSlices", "transforms", "warnings",
     "toolVersions", "fidelity", "manifestCanonicalContentSha256"
   ],
   "properties": {
     "schema": {"const": "room-alignment-provenance-manifest/v1"},
+    "manifestCanonicalization": {
+      "const": "room-alignment-canonical-json/v1",
+      "description": "Digest procedure: omit manifestCanonicalContentSha256; serialize the remaining JSON with object keys recursively sorted by Unicode code point, arrays in source order, no insignificant whitespace, comma and colon separators, non-ASCII characters unescaped, and UTF-8 encoding without a BOM; then compute lowercase SHA-256. The raw final manifest-file SHA-256 is stored externally in Artifact.manifestDigest because a file cannot contain its own digest."
+    },
     "artifact": {
       "type": "object",
       "required": ["id", "videoSha256", "manifestSha256", "manifestFileDigestRecordedInArtifactState"],
       "properties": {
         "id": {"type": ["string", "null"]},
         "videoSha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
-        "manifestSha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$"},
+        "manifestSha256": {"type": ["string", "null"], "pattern": "^[a-f0-9]{64}$", "description": "Raw final manifest-file SHA-256 when known externally; null in the manifest file to avoid self-reference. The completed Artifact.manifestDigest is authoritative."},
         "manifestFileDigestRecordedInArtifactState": {"const": true}
       }
     },

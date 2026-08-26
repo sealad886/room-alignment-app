@@ -392,6 +392,7 @@ def build_v1_manifest(plan: dict[str, Any], artifact: dict[str, Any] | None = No
     program = plan["compiledProgram"]
     manifest = {
         "schema": "room-alignment-provenance-manifest/v1",
+        "manifestCanonicalization": "room-alignment-canonical-json/v1",
         "artifact": {
             "id": artifact.get("id") if artifact else None,
             "videoSha256": artifact.get("videoDigest") if artifact else None,

@@ -84,6 +84,9 @@ def restore(state_database: Path, backup_database: Path, replace: bool) -> dict[
         try:
             _online_backup(backup_database, staging)
             os.replace(staging, state_database)
+            for suffix in ("-wal", "-shm"):
+                Path(f"{state_database}{suffix}").unlink(missing_ok=True)
+                Path(f"{staging}{suffix}").unlink(missing_ok=True)
         finally:
             staging.unlink(missing_ok=True)
         details = _validate_database(state_database)

@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from room_alignment.domain import DomainError
 from room_alignment.models import MediaRecord
@@ -226,6 +229,38 @@ class StoreV1Tests(unittest.TestCase):
         self.assertEqual(self.store.media_record("asset-second")["relative_path"], "first.mp4")
         self.assertEqual(self.store.media_record("asset-first")["relative_path"], "second.mp4")
 
+    def test_path_collision_without_identity_key_uses_library_root_safely(self):
+        first_path = self.root / "first.mp4"
+        second_path = self.root / "second.mp4"
+        first_path.write_bytes(b"first")
+        second_path.write_bytes(b"second")
+
+        def record(media_id: str, path: Path) -> MediaRecord:
+            return MediaRecord(
+                media_id,
+                self.library["id"],
+                path.name,
+                path.stat().st_size,
+                path.stat().st_mtime_ns,
+                duration=1,
+                duration_us=1_000_000,
+                fingerprint={"size": path.stat().st_size, "modifiedNs": path.stat().st_mtime_ns},
+            )
+
+        self.scan("FULL", [record("asset-first", first_path), record("asset-second", second_path)])
+        incoming = record("asset-first", second_path)
+        scan = self.store.begin_scan(self.library["id"], "INCREMENTAL")
+        self.store.save_media_batch(scan["id"], [incoming])
+        self.store.scan_progress(scan["id"])
+        self.store.finish_scan(scan["id"], "SUCCEEDED", {"videos": 1})
+        self.assertEqual(self.store.media_record("asset-first")["relative_path"], "second.mp4")
+
+    def test_scan_progress_accepts_batched_counts(self):
+        scan = self.store.begin_scan(self.library["id"], "FULL")
+        self.store.scan_progress(scan["id"], processed=50, warning_count=3, message="Indexing media")
+        current = self.store.scan(scan["id"])
+        self.assertEqual((current["scanned"], current["videos"], current["warnings"]), (50, 50, 3))
+
     def test_library_time_policy_renormalizes_without_losing_raw_evidence(self):
         media = self.record("clock", "clock.mp4")
         media.captured_at = "2026-10-25T01:30:00"
@@ -237,6 +272,27 @@ class StoreV1Tests(unittest.TestCase):
         second = self.store.media_record("clock")
         self.assertNotEqual(first["captured_at"], second["captured_at"])
         self.assertEqual(second["custom"]["timestampPolicy"]["rawValue"], "2026-10-25T01:30:00")
+
+    def test_successful_migration_removes_replaced_database_sidecars(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "legacy.sqlite3"
+            connection = sqlite3.connect(state)
+            connection.execute("CREATE TABLE legacy(value TEXT)")
+            connection.commit()
+            connection.close()
+            real_replace = os.replace
+
+            def replace_then_create_stale_sidecars(source: Path, destination: Path) -> None:
+                real_replace(source, destination)
+                Path(f"{destination}-wal").write_bytes(b"stale wal")
+                Path(f"{destination}-shm").write_bytes(b"stale shm")
+
+            with patch("room_alignment.store.os.replace", side_effect=replace_then_create_stale_sidecars):
+                Store(state)
+            for suffix, stale in (("-wal", b"stale wal"), ("-shm", b"stale shm")):
+                sidecar = Path(f"{state}{suffix}")
+                if sidecar.exists():
+                    self.assertNotEqual(sidecar.read_bytes(), stale)
 
     def test_legacy_project_migration_preserves_unknowns_and_requires_explicit_silence(self):
         first = self.record("first", "first.mp4")

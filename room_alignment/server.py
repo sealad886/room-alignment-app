@@ -168,6 +168,7 @@ class App:
             date_groups: dict[str, int] = {}
             warnings = 0
             batch = []
+            last_progress_at = time.monotonic()
             try:
                 root = self.store.library_root(library_id)
                 for record in iter_scan_records(
@@ -200,12 +201,24 @@ class App:
                         date_groups[date] = date_groups.get(date, 0) + 1
                     warnings += int(bool(record.warning))
                     batch.append(record)
-                    self.store.scan_progress(scan["id"], warning=bool(record.warning), message="Indexing media")
-                    if len(batch) >= 50:
+                    if len(batch) >= 50 or time.monotonic() - last_progress_at >= 1:
                         self.store.save_media_batch(scan["id"], batch)
+                        self.store.scan_progress(
+                            scan["id"],
+                            processed=len(batch),
+                            warning_count=sum(int(bool(item.warning)) for item in batch),
+                            message="Indexing media",
+                        )
                         batch.clear()
+                        last_progress_at = time.monotonic()
                 if batch:
                     self.store.save_media_batch(scan["id"], batch)
+                    self.store.scan_progress(
+                        scan["id"],
+                        processed=len(batch),
+                        warning_count=sum(int(bool(item.warning)) for item in batch),
+                        message="Indexing media",
+                    )
                 current = self.store.scan(scan["id"])
                 summary = {
                     "libraryId": library_id,

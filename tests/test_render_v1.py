@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from room_alignment.domain import digest_json
 from room_alignment.models import MediaRecord
 from room_alignment.render import CanonicalRenderManager, RunningJob, build_render_plan, build_v1_ffmpeg_command
 from room_alignment.scanner import probe, quick_fingerprint
@@ -89,6 +90,7 @@ class CanonicalRenderTests(unittest.TestCase):
         manager = CanonicalRenderManager(self.store)
         started = manager.start(plan["id"])
         deadline = time.monotonic() + 20
+        job = self.store.job(started["job"]["id"])
         while time.monotonic() < deadline:
             job = self.store.job(started["job"]["id"])
             if job["status"] in {"SUCCEEDED", "FAILED", "CANCELED"}:
@@ -108,6 +110,9 @@ class CanonicalRenderTests(unittest.TestCase):
         self.assertTrue(manifest["audioSlices"][0]["streamId"])
         self.assertIn("ffmpeg", manifest["toolVersions"])
         self.assertEqual(len(manifest["manifestCanonicalContentSha256"]), 64)
+        canonical_digest = manifest.pop("manifestCanonicalContentSha256")
+        self.assertEqual(manifest["manifestCanonicalization"], "room-alignment-canonical-json/v1")
+        self.assertEqual(canonical_digest, digest_json(manifest))
         self.assertTrue(manifest["fidelity"]["sourceFilesModified"] is False)
 
     def test_project_change_invalidates_reviewed_plan(self):
