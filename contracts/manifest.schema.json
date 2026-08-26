@@ -57,9 +57,9 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["assetId", "libraryRelativePath", "size", "sha256"],
+        "required": ["assetId", "rootId", "libraryRelativePath", "size", "sha256"],
         "properties": {
-          "assetId": {"type": "string"}, "libraryRelativePath": {"type": "string"},
+          "assetId": {"type": "string"}, "rootId": {"type": ["string", "null"]}, "libraryRelativePath": {"type": "string"},
           "size": {"type": "integer", "minimum": 0}, "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
         }
       }

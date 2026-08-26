@@ -2512,11 +2512,17 @@ class Store:
                 raise DomainError("VALIDATION_FAILED", "Suggestion payload does not match canonical evidence")
 
     def media_source_path(self, media_id: str) -> Path:
-        media = self.media_record(media_id)
-        if media.get("missing"):
+        with self.connect() as db:
+            media = db.execute(
+                "SELECT id,library_id,root_id,relative_path,missing FROM media WHERE id=?",
+                (media_id,),
+            ).fetchone()
+        if not media:
+            raise DomainError("NOT_FOUND", f"Unknown media: {media_id}")
+        if media["missing"]:
             raise DomainError("SOURCE_MISSING", "Source media is missing")
         try:
-            root_id = media.get("rootId")
+            root_id = media["root_id"]
             if root_id:
                 with self.connect() as db:
                     row = db.execute(
@@ -2536,7 +2542,11 @@ class Store:
                 root = self._validated_grant_root(row)
             else:
                 root = self.library_root(str(media["library_id"])).resolve(strict=True)
-            target = (root / str(media["relative_path"])).resolve(strict=True)
+            relative_path = str(media["relative_path"])
+            storage_prefix = f"{root_id}::" if root_id else ""
+            if storage_prefix and relative_path.startswith(storage_prefix):
+                relative_path = relative_path[len(storage_prefix) :]
+            target = (root / relative_path).resolve(strict=True)
         except FileNotFoundError as error:
             raise DomainError("SOURCE_MISSING", "Source media is missing") from error
         if not target.is_relative_to(root) or not target.is_file():

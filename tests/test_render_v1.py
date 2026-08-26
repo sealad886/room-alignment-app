@@ -131,6 +131,60 @@ class CanonicalRenderTests(unittest.TestCase):
         self.assertEqual(canonical_digest, digest_json(manifest))
         self.assertTrue(manifest["fidelity"]["sourceFilesModified"] is False)
 
+    def test_render_plan_preserves_each_assets_root_when_relative_paths_collide(self):
+        library = self.store.libraries()[0]
+        second_root = Path(self.temp.name) / "second-source"
+        second_root.mkdir()
+        second_path = second_root / self.media_path.name
+        shutil.copy2(self.media_path, second_path)
+        second_grant = self.store.create_grant(second_root, "READ_ONLY_SOURCE")
+        second = self.store.add_library_root(library["id"], second_grant["id"])
+        values, evidence, warning = probe(second_path)
+        self.assertIsNone(warning)
+        scan = self.store.begin_scan(library["id"], "FULL", root_ids=[second["id"]])
+        self.store.save_media_batch(
+            scan["id"],
+            [
+                MediaRecord(
+                    "asset-second-root",
+                    library["id"],
+                    second_path.name,
+                    second_path.stat().st_size,
+                    second_path.stat().st_mtime_ns,
+                    root_id=second["id"],
+                    camera="Second root",
+                    evidence=evidence,
+                    fingerprint=quick_fingerprint(second_path),
+                    **values,
+                )
+            ],
+        )
+        self.store.finish_scan(scan["id"], "SUCCEEDED", {"videos": 1})
+        project = self.store.create_project(
+            "Second root event",
+            library["id"],
+            ["asset-second-root"],
+            initialize_legacy_program=True,
+        )
+
+        plan = build_render_plan(
+            self.store,
+            project["id"],
+            {
+                "outputGrantId": self.output_grant_id,
+                "filename": "second-root.mp4",
+                "profile": "COMPATIBLE",
+            },
+        )
+
+        self.assertEqual(plan["status"], "READY", plan["issues"])
+        self.assertEqual(plan["sources"][0]["rootId"], second["id"])
+        manifest = build_v1_manifest(plan)
+        self.assertEqual(manifest["sources"][0]["rootId"], second["id"])
+        command = build_v1_ffmpeg_command(self.store, plan, self.output / "partial.mp4")
+        self.assertIn(str(second_path), command)
+        self.assertNotIn(str(self.media_path), command)
+
     def test_generated_slate_renders_and_is_disclosed_in_manifest(self):
         project = copy.deepcopy(self.project)
         source_id = project["logicalSources"][0]["id"]

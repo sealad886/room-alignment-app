@@ -43,7 +43,6 @@ def _safe_source(root: Path, relative: str) -> Path:
 
 
 def preflight(store: Store, project: dict[str, Any]) -> dict[str, Any]:
-    root = store.library_root(project["libraryId"])
     video = sorted(project.get("videoSegments", []), key=lambda item: item["start"])
     audio = sorted(project.get("audioSegments", []), key=lambda item: item["start"])
     issues: list[dict[str, str]] = []
@@ -59,7 +58,7 @@ def preflight(store: Store, project: dict[str, Any]) -> dict[str, Any]:
         cursor = max(cursor, end)
         try:
             media = store.media_record(segment["mediaId"])
-            _safe_source(root, media["relative_path"])
+            store.media_source_path(media["id"])
             required_duration = float(segment.get("sourceIn", 0)) + end - start
             if media.get("duration") is not None and required_duration > float(media["duration"]) + 0.05:
                 issues.append({"kind": "missing-coverage", "message": f"{segment.get('id', 'segment')} exceeds source duration by {required_duration - float(media['duration']):.3f}s"})
@@ -73,7 +72,7 @@ def preflight(store: Store, project: dict[str, Any]) -> dict[str, Any]:
             continue
         try:
             media = store.media_record(segment["mediaId"])
-            _safe_source(root, media["relative_path"])
+            store.media_source_path(media["id"])
             if not media.get("audio_codec"):
                 issues.append({"kind": "missing-audio", "message": f"{segment.get('id', 'audio segment')} selects a source without an audio stream"})
         except (KeyError, OSError, PreflightError) as error:
@@ -140,7 +139,6 @@ def build_ffmpeg_command(store: Store, project: dict[str, Any], output: Path, lo
     check = preflight(store, project)
     if not check["valid"]:
         raise PreflightError("Render blocked: " + "; ".join(item["message"] for item in check["issues"]))
-    root = store.library_root(project["libraryId"])
     video = sorted(project["videoSegments"], key=lambda item: item["start"])
     audio = sorted(project.get("audioSegments", []), key=lambda item: item["start"])
     command = ["ffmpeg", "-hide_banner", "-nostdin", "-y"]
@@ -151,7 +149,7 @@ def build_ffmpeg_command(store: Store, project: dict[str, Any], output: Path, lo
     target_fps = float(first_media.get("frame_rate") or 30)
     for index, segment in enumerate(video):
         media = store.media_record(segment["mediaId"])
-        source = _safe_source(root, media["relative_path"])
+        source = store.media_source_path(media["id"])
         duration = float(segment["end"]) - float(segment["start"])
         command += ["-ss", str(float(segment.get("sourceIn", 0))), "-t", str(duration), "-i", str(source)]
         filters.append(
@@ -170,7 +168,7 @@ def build_ffmpeg_command(store: Store, project: dict[str, Any], output: Path, lo
                 command += ["-f", "lavfi", "-t", str(duration), "-i", "anullsrc=r=48000:cl=stereo"]
             else:
                 media = store.media_record(segment["mediaId"])
-                source = _safe_source(root, media["relative_path"])
+                source = store.media_source_path(media["id"])
                 source_in = float(segment.get("sourceIn", 0)) + float(segment.get("offsetMs", 0)) / 1000
                 command += ["-ss", str(max(0, source_in)), "-t", str(duration), "-i", str(source)]
             filters.append(f"[{audio_base + index}:a:0]asetpts=PTS-STARTPTS,aresample=48000[a{index}]")
@@ -312,15 +310,15 @@ def build_render_plan(
             if item.get("assetId")
         }
     )
-    root = store.library_root(project["libraryId"])
     sources: list[dict[str, Any]] = []
     for media_id in selected_ids:
         media = assets[media_id]
-        source = _safe_source(root, media["relative_path"])
+        source = store.media_source_path(media_id)
         digest = full_digest(source)
         sources.append(
             {
                 "assetId": media_id,
+                "rootId": media.get("rootId"),
                 "libraryRelativePath": media["relative_path"],
                 "size": source.stat().st_size,
                 "modifiedNs": source.stat().st_mtime_ns,
@@ -492,6 +490,7 @@ def build_v1_manifest(plan: dict[str, Any], artifact: dict[str, Any] | None = No
         "sources": [
             {
                 "assetId": item["assetId"],
+                "rootId": item.get("rootId"),
                 "libraryRelativePath": item["libraryRelativePath"],
                 "size": item["size"],
                 "sha256": item["sha256"],
@@ -527,9 +526,7 @@ def build_v1_manifest(plan: dict[str, Any], artifact: dict[str, Any] | None = No
 def build_v1_ffmpeg_command(store: Store, plan: dict[str, Any], output: Path) -> list[str]:
     if plan["status"] != "READY":
         raise DomainError("COVERAGE_INVALID", "Render plan has blocking issues")
-    project = store.project(plan["projectId"])
-    root = store.library_root(project["libraryId"])
-    planned_paths = {item["assetId"]: item["libraryRelativePath"] for item in plan["sources"]}
+    planned_sources = {item["assetId"]: item for item in plan["sources"]}
     video = plan["compiledProgram"]["videoSlices"]
     audio = plan["compiledProgram"]["audioSlices"]
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
@@ -550,7 +547,7 @@ def build_v1_ffmpeg_command(store: Store, plan: dict[str, Any], output: Path) ->
                 ),
             ]
         else:
-            source = _planned_source(root, planned_paths, item["assetId"])
+            source = _planned_source(store, planned_sources, item["assetId"])
             source_duration = (item["sourceEndUs"] - item["sourceStartUs"]) / 1_000_000
             command += ["-ss", _seconds(item["sourceStartUs"]), "-t", f"{source_duration:.6f}", "-i", str(source)]
     audio_base = len(video)
@@ -559,7 +556,7 @@ def build_v1_ffmpeg_command(store: Store, plan: dict[str, Any], output: Path) ->
         if item.get("synthetic"):
             command += ["-f", "lavfi", "-t", f"{output_duration:.6f}", "-i", "anullsrc=r=48000:cl=stereo"]
         else:
-            source = _planned_source(root, planned_paths, item["assetId"])
+            source = _planned_source(store, planned_sources, item["assetId"])
             source_start = int(item["sourceStartUs"])
             source_duration = (item["sourceEndUs"] - item["sourceStartUs"]) / 1_000_000
             command += ["-ss", _seconds(source_start), "-t", f"{source_duration:.6f}", "-i", str(source)]
@@ -683,11 +680,19 @@ def _slate_drawbox_chain(value: str, width: int, height: int) -> str:
     return ",".join(filters)
 
 
-def _planned_source(root: Path, planned_paths: dict[str, str], asset_id: str) -> Path:
-    relative = planned_paths.get(asset_id)
-    if relative is None:
+def _planned_source(
+    store: Store, planned_sources: dict[str, dict[str, Any]], asset_id: str
+) -> Path:
+    expected = planned_sources.get(asset_id)
+    if expected is None:
         raise DomainError("PLAN_STALE", "Selected source is absent from the immutable render plan")
-    return _safe_source(root, relative)
+    media = store.media_record(asset_id)
+    if (
+        media.get("rootId") != expected.get("rootId")
+        or media["relative_path"] != expected["libraryRelativePath"]
+    ):
+        raise DomainError("SOURCE_CHANGED", "A selected source location changed after review")
+    return store.media_source_path(asset_id)
 
 
 class CanonicalRenderManager:
@@ -918,16 +923,17 @@ class CanonicalRenderManager:
         return False
 
     def _validate_sources(self, plan: dict[str, Any]) -> None:
-        project = self.store.project(plan["projectId"])
-        root = self.store.library_root(project["libraryId"])
         for expected in plan["sources"]:
             media = self.store.media_record(expected["assetId"])
-            if media["relative_path"] != expected["libraryRelativePath"]:
+            if (
+                media.get("rootId") != expected.get("rootId")
+                or media["relative_path"] != expected["libraryRelativePath"]
+            ):
                 raise DomainError("SOURCE_CHANGED", "A selected source path changed after review")
             try:
-                source = _safe_source(root, expected["libraryRelativePath"])
+                source = self.store.media_source_path(expected["assetId"])
                 stat = source.stat()
-            except (OSError, PreflightError) as error:
+            except (OSError, PreflightError, DomainError) as error:
                 raise DomainError("SOURCE_CHANGED", "A selected source is no longer available") from error
             if stat.st_size != expected["size"] or full_digest(source) != expected["sha256"]:
                 raise DomainError("SOURCE_CHANGED", "A selected source changed after review")
