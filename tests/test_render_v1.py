@@ -82,7 +82,9 @@ class CanonicalRenderTests(unittest.TestCase):
         self.store.save_media_batch(scan["id"], [record])
         self.store.scan_progress(scan["id"])
         self.store.finish_scan(scan["id"], "SUCCEEDED", {"videos": 1})
-        self.project = self.store.create_project("Event", library["id"], ["asset"])
+        self.project = self.store.create_project(
+            "Event", library["id"], ["asset"], initialize_legacy_program=True
+        )
 
     def tearDown(self):
         self.temp.cleanup()

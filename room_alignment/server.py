@@ -704,7 +704,13 @@ class Handler(BaseHTTPRequestHandler):
         parts = [part for part in path.split("/") if part]
         if len(parts) == 4 and parts[:3] == ["api", "v1", "contracts"]:
             name = parts[3]
-            if name not in {"api.schema.json", "domain.schema.json", "commands.schema.json", "manifest.schema.json"}:
+            if name not in {
+                "api.schema.json",
+                "domain.schema.json",
+                "commands.schema.json",
+                "manifest.schema.json",
+                "timeline.schema.json",
+            }:
                 raise DomainError("NOT_FOUND", "Contract not found")
             return self.respond((CONTRACTS / name).read_bytes(), content_type="application/schema+json; charset=utf-8")
         if len(parts) == 3 and parts[:2] == ["api", "v1"] and parts[2] == "events":

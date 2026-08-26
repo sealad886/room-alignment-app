@@ -12,6 +12,14 @@ flowchart LR
 
 The backend is the only business-rule authority. It owns grants, scan generations, evidence/resolution ledgers, logical-source identity, project revisions, synchronization math, video/audio compilation, issues, immutable plans, review binding, source hashes, rendering, artifacts, events, migrations, and recovery. The frontend presents provisional interaction feedback and submits named commands; it reloads canonical results after every mutation.
 
+Project preparation uses two backend-owned editorial clocks. Clip alignment maps
+source-relative time to `alignedTimeUs`, the complete selected-evidence timeline.
+Explicit keep/exclude/slate sections then map aligned time to `programTimeUs`.
+Program Video and Audio do not exist until alignment review authorizes a bound
+program-draft command. Libraries contain independently granted roots; immutable
+catalog and cluster generations feed exact project selection snapshots. See ADRs
+0004 through 0006.
+
 Distribution is one Python wheel. Hatchling maps `web/` and `contracts/` into the `room_alignment` package at build time, so installed runtime never depends on repository-relative files. `room-alignment` and `python -m room_alignment` share one CLI dispatcher for service launch, dependency/resource diagnosis, and canonical-state administration. Source-checkout resource fallback exists only for development compatibility.
 
 ## Fixed semantics

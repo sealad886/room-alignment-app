@@ -112,14 +112,22 @@
     },
     "ProjectClip": {
       "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "assetId", "logicalSourceId", "sync"],
+      "additionalProperties": true,
+      "required": ["id", "assetId", "logicalSourceId"],
       "properties": {
         "id": {"$ref": "#/$defs/OpaqueId"},
         "assetId": {"$ref": "#/$defs/OpaqueId"},
         "logicalSourceId": {"$ref": "#/$defs/OpaqueId"},
-        "sync": {"$ref": "#/$defs/SyncTransform"}
-      }
+        "alignment": {"$ref": "./timeline.schema.json#/$defs/ClipAlignmentTransform"},
+        "alignmentState": {"enum": ["PROVISIONAL", "ACCEPTED", "REVIEW_REQUIRED", "UNRESOLVED"]},
+        "alignmentConfidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "alignmentEvidence": {"type": "array", "items": {"type": "string"}},
+        "sync": {"$ref": "#/$defs/SyncTransform", "deprecated": true}
+      },
+      "anyOf": [
+        {"required": ["alignment", "alignmentState", "alignmentConfidence", "alignmentEvidence"]},
+        {"required": ["sync"]}
+      ]
     },
     "VideoBlock": {
       "allOf": [
@@ -235,7 +243,7 @@
     },
     "Project": {
       "type": "object",
-      "required": ["id", "name", "libraryId", "revision", "provenanceRevision", "archived", "anchorMode", "logicalSources", "clips", "videoBlocks", "audioBlocks", "renderSettings", "review", "createdAt", "updatedAt"],
+      "required": ["id", "name", "libraryId", "revision", "provenanceRevision", "archived", "anchorMode", "logicalSources", "clips", "selectionSnapshot", "alignmentDigest", "timelineSections", "programDraft", "videoBlocks", "audioBlocks", "renderSettings", "review", "createdAt", "updatedAt"],
       "properties": {
         "id": {"$ref": "#/$defs/OpaqueId"},
         "name": {"type": "string", "minLength": 1, "maxLength": 200},
@@ -246,6 +254,10 @@
         "anchorMode": {"enum": ["PROGRAM_TIME", "SOURCE_TIME"]},
         "logicalSources": {"type": "array", "items": {"$ref": "#/$defs/LogicalSource"}},
         "clips": {"type": "array", "items": {"$ref": "#/$defs/ProjectClip"}},
+        "selectionSnapshot": {"$ref": "./timeline.schema.json#/$defs/ProjectSelectionSnapshot"},
+        "alignmentDigest": {"type": "string"},
+        "timelineSections": {"type": "array", "items": {"$ref": "./timeline.schema.json#/$defs/TimelineSection"}},
+        "programDraft": {"type": ["object", "null"]},
         "videoBlocks": {"type": "array", "items": {"$ref": "#/$defs/VideoBlock"}},
         "audioBlocks": {"type": "array", "items": {"$ref": "#/$defs/AudioBlock"}},
         "renderSettings": {"type": "object"},

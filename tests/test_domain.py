@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from room_alignment.domain import (
+    ClipAlignmentTransform,
     DomainError,
     SyncTransform,
     apply_command,
@@ -40,6 +41,13 @@ class TimeTransformTests(unittest.TestCase):
     def test_rate_bounds_reject_instead_of_clamp(self):
         with self.assertRaisesRegex(DomainError, "ratePpm"):
             SyncTransform(rate_ppm=2_001)
+
+    def test_alignment_transform_names_the_evidence_clock_and_round_trips(self):
+        transform = ClipAlignmentTransform(250_000, 900_000, 731)
+        self.assertEqual(transform.to_dict()["anchorAlignedUs"], 900_000)
+        for source_us in (-5_000_000, 0, 250_000, 90_000_000):
+            round_trip = transform.aligned_to_source(transform.source_to_aligned(source_us))
+            self.assertLessEqual(abs(round_trip - source_us), 1)
 
 
 class ProgramCompilerTests(unittest.TestCase):
@@ -185,6 +193,26 @@ class ProgramCompilerTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    def test_new_evidence_project_accepts_manual_alignment_before_program_generation(self):
+        media = asset("a", "Door", 5_000_000)
+        media["captured_at"] = "2025-10-15T12:00:00+00:00"
+        project = new_project(
+            "Event", "lib", [media], "project", initialize_legacy_program=False
+        )
+        self.assertEqual(project["videoBlocks"], [])
+        self.assertEqual(project["clips"][0]["alignmentState"], "PROVISIONAL")
+        changed = apply_command(
+            project,
+            "SetClipAlignment",
+            {
+                "clipId": project["clips"][0]["id"],
+                "alignment": {"anchorSourceUs": 0, "anchorAlignedUs": 250_000, "ratePpm": 0},
+                "confirmDrift": False,
+            },
+            {"a": media},
+        )
+        self.assertEqual(changed["clips"][0]["alignmentState"], "ACCEPTED")
+        self.assertEqual(changed["videoBlocks"], [])
     def test_malformed_payload_is_a_stable_validation_error(self):
         media = asset("a", "Door", 5_000_000)
         project = new_project("Event", "lib", [media], "project")

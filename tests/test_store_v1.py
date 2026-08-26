@@ -105,6 +105,9 @@ class StoreV1Tests(unittest.TestCase):
         media = self.record("one", "one.mp4")
         self.scan("FULL", [media])
         project = self.store.create_project("Event", self.library["id"], ["one"])
+        self.assertEqual(project["videoBlocks"], [])
+        self.assertEqual(project["audioBlocks"], [])
+        self.assertIsNone(project["programDraft"])
         other_project = self.store.create_project("Other event", self.library["id"], ["one"])
         envelope = {
             "commandId": "command-1",

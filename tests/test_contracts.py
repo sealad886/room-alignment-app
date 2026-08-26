@@ -18,10 +18,18 @@ class ContractTests(unittest.TestCase):
         for path in (
             "/grants",
             "/libraries/{libraryId}/scans",
+            "/libraries/{libraryId}/roots",
+            "/libraries/{libraryId}/roots/{rootId}/revoke",
             "/libraries/{libraryId}/time-policy",
             "/libraries/{libraryId}/cluster-jobs",
+            "/libraries/{libraryId}/cluster-generations",
+            "/cluster-generations/{clusterGenerationId}/sessions",
+            "/cluster-generations/{clusterGenerationId}/events",
             "/libraries/{libraryId}/cluster-suggestions",
             "/projects/{projectId}/commands",
+            "/projects/{projectId}/commands/delta",
+            "/projects/{projectId}/alignment-summary",
+            "/projects/{projectId}/timeline-window",
             "/projects/{projectId}/program-at",
             "/projects/{projectId}/alignment-jobs",
             "/projects/{projectId}/render-plans",
@@ -58,12 +66,21 @@ class ContractTests(unittest.TestCase):
             for variant in commands["allOf"][0]["oneOf"]
         }
         self.assertIn("SetSyncTransform", command_types)
+        self.assertIn("SetClipAlignment", command_types)
+        self.assertIn("SetTimelineSections", command_types)
+        self.assertIn("GenerateProgramDraft", command_types)
         self.assertIn("SetAudioMode", command_types)
         self.assertIn("ReconcileBoundary", command_types)
 
     def test_all_normative_json_contracts_parse_and_are_served(self):
         contract = json.loads((ROOT / "contracts" / "openapi.json").read_text(encoding="utf-8"))
-        for name in ("api.schema.json", "domain.schema.json", "commands.schema.json", "manifest.schema.json"):
+        for name in (
+            "api.schema.json",
+            "domain.schema.json",
+            "commands.schema.json",
+            "manifest.schema.json",
+            "timeline.schema.json",
+        ):
             schema = json.loads((ROOT / "contracts" / name).read_text(encoding="utf-8"))
             self.assertEqual(schema["$schema"], "https://json-schema.org/draft/2020-12/schema")
         self.assertIn("/contracts/{contractName}", contract["paths"])

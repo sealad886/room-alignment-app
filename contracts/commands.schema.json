@@ -12,7 +12,8 @@
       "enum": [
         "UpdateProjectMetadata", "AddLogicalSource", "RenameLogicalSource", "MergeLogicalSources",
         "SplitLogicalSource", "ArchiveLogicalSource", "AssignClip", "SetReferenceSource",
-        "SetSyncTransform", "InitializeProgram", "AddVideoBlock", "SplitVideoBlock",
+        "SetSyncTransform", "SetClipAlignment", "InitializeProgram", "SetTimelineSections",
+        "GenerateProgramDraft", "AddVideoBlock", "SplitVideoBlock",
         "MoveVideoBoundary", "DeleteVideoBlock", "AssignVideoSource", "PinVideoClip", "CutToSource",
         "AddAudioBlock", "SplitAudioBlock", "MoveAudioBoundary", "DeleteAudioBlock", "SetAudioMode",
         "SetAnchoringMode", "ReconcileBoundary", "ArchiveProject", "AcceptAlignmentSuggestion", "AcceptAlignmentSuggestions",
@@ -33,7 +34,10 @@
         {"$ref": "#/$defs/AssignClip"},
         {"$ref": "#/$defs/SetReferenceSource"},
         {"$ref": "#/$defs/SetSyncTransform"},
+        {"$ref": "#/$defs/SetClipAlignment"},
         {"$ref": "#/$defs/InitializeProgram"},
+        {"$ref": "#/$defs/SetTimelineSections"},
+        {"$ref": "#/$defs/GenerateProgramDraft"},
         {"$ref": "#/$defs/AddVideoBlock"},
         {"$ref": "#/$defs/SplitVideoBlock"},
         {"$ref": "#/$defs/MoveVideoBoundary"},
@@ -86,7 +90,16 @@
     "SetSyncTransform": {
       "properties": {"commandType": {"const": "SetSyncTransform"}, "payload": {"type": "object", "additionalProperties": false, "required": ["clipId", "sync"], "properties": {"clipId": {"$ref": "#/$defs/Id"}, "sync": {"$ref": "./domain.schema.json#/$defs/SyncTransform"}, "confirmDrift": {"type": "boolean"}}}}
     },
-    "InitializeProgram": {"properties": {"commandType": {"const": "InitializeProgram"}, "payload": {"$ref": "#/$defs/Empty"}}},
+    "SetClipAlignment": {
+      "properties": {"commandType": {"const": "SetClipAlignment"}, "payload": {"type": "object", "additionalProperties": false, "required": ["clipId", "alignment"], "properties": {"clipId": {"$ref": "#/$defs/Id"}, "alignment": {"$ref": "./timeline.schema.json#/$defs/ClipAlignmentTransform"}, "confirmDrift": {"type": "boolean"}}}}
+    },
+    "InitializeProgram": {"deprecated": true, "properties": {"commandType": {"const": "InitializeProgram"}, "payload": {"$ref": "#/$defs/Empty"}}},
+    "SetTimelineSections": {
+      "properties": {"commandType": {"const": "SetTimelineSections"}, "payload": {"type": "object", "additionalProperties": false, "required": ["sections"], "properties": {"sections": {"type": "array", "minItems": 1, "items": {"$ref": "./timeline.schema.json#/$defs/TimelineSection"}}}}}
+    },
+    "GenerateProgramDraft": {
+      "properties": {"commandType": {"const": "GenerateProgramDraft"}, "payload": {"type": "object", "additionalProperties": false, "required": ["alignmentDigest", "selectionDigest", "replaceExisting"], "properties": {"alignmentDigest": {"type": "string"}, "selectionDigest": {"type": "string"}, "replaceExisting": {"type": "boolean"}}}}
+    },
     "AddVideoBlock": {
       "properties": {"commandType": {"const": "AddVideoBlock"}, "payload": {"type": "object", "additionalProperties": false, "required": ["startUs", "endUs", "logicalSourceId"], "properties": {"id": {"$ref": "#/$defs/Id"}, "startUs": {"$ref": "#/$defs/Us"}, "endUs": {"$ref": "#/$defs/Us"}, "logicalSourceId": {"$ref": "#/$defs/Id"}, "pinnedClipId": {"type": ["string", "null"]}}}}
     },

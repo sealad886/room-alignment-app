@@ -1,0 +1,197 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://room-alignment.local/contracts/timeline.schema.json",
+  "title": "Room Alignment evidence timeline and clustering resources",
+  "$defs": {
+    "Id": {"type": "string", "minLength": 1, "maxLength": 200},
+    "Us": {"type": "integer", "minimum": 0},
+    "LibraryRoot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "libraryId", "grantId", "label", "active", "createdAt"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Id"},
+        "libraryId": {"$ref": "#/$defs/Id"},
+        "grantId": {"$ref": "#/$defs/Id"},
+        "label": {"type": "string", "minLength": 1, "maxLength": 200},
+        "active": {"type": "boolean"},
+        "timePolicyOverride": {"type": ["object", "null"]},
+        "lastScanAt": {"type": ["string", "null"], "format": "date-time"},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "revokedAt": {"type": ["string", "null"], "format": "date-time"}
+      }
+    },
+    "CatalogRevision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "libraryId", "revision", "digest", "createdAt"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Id"},
+        "libraryId": {"$ref": "#/$defs/Id"},
+        "revision": {"type": "integer", "minimum": 1},
+        "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "createdAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "ClusterConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["eventGapUs", "sessionGapUs"],
+      "properties": {
+        "eventGapUs": {"type": "integer", "minimum": 0, "default": 15000000},
+        "sessionGapUs": {"type": "integer", "minimum": 0, "default": 120000000}
+      }
+    },
+    "ClusterGeneration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "libraryId", "catalogRevisionId", "algorithm", "algorithmVersion", "config", "configDigest", "status", "createdAt"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Id"},
+        "libraryId": {"$ref": "#/$defs/Id"},
+        "catalogRevisionId": {"$ref": "#/$defs/Id"},
+        "algorithm": {"const": "coverage-gap-hierarchy"},
+        "algorithmVersion": {"type": "string"},
+        "config": {"$ref": "#/$defs/ClusterConfig"},
+        "configDigest": {"type": "string"},
+        "status": {"enum": ["QUEUED", "RUNNING", "SUCCEEDED", "FAILED", "CANCELED"]},
+        "createdAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "ClusterSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "generationId", "kind", "startUs", "endUs", "eventCount", "clipCount", "sourceCount", "rootCount", "warnings"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Id"},
+        "generationId": {"$ref": "#/$defs/Id"},
+        "parentSessionId": {"type": ["string", "null"]},
+        "kind": {"enum": ["SESSION", "EVENT"]},
+        "startUs": {"$ref": "#/$defs/Us"},
+        "endUs": {"$ref": "#/$defs/Us"},
+        "eventCount": {"type": "integer", "minimum": 0},
+        "clipCount": {"type": "integer", "minimum": 1},
+        "sourceCount": {"type": "integer", "minimum": 0},
+        "rootCount": {"type": "integer", "minimum": 1},
+        "warnings": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "ProjectSelectionSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["clusterGenerationId", "selectedSessionIds", "selectedEventIds", "assetIds", "manualIncludeAssetIds", "manualExcludeAssetIds", "digest"],
+      "properties": {
+        "clusterGenerationId": {"type": ["string", "null"]},
+        "selectedSessionIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}},
+        "selectedEventIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}},
+        "assetIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}},
+        "manualIncludeAssetIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}},
+        "manualExcludeAssetIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}},
+        "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "ClipAlignmentTransform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["anchorSourceUs", "anchorAlignedUs", "ratePpm"],
+      "properties": {
+        "anchorSourceUs": {"type": "integer"},
+        "anchorAlignedUs": {"type": "integer"},
+        "ratePpm": {"type": "integer", "minimum": -2000, "maximum": 2000}
+      }
+    },
+    "TimelineSection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "startAlignedUs", "endAlignedUs", "mode"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Id"},
+        "startAlignedUs": {"$ref": "#/$defs/Us"},
+        "endAlignedUs": {"$ref": "#/$defs/Us"},
+        "mode": {"enum": ["KEEP", "EXCLUDE", "SLATE"]},
+        "slateText": {"type": ["string", "null"], "maxLength": 500}
+      }
+    },
+    "AlignmentProposalSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "projectId", "projectRevision", "selectionDigest", "inputDigest", "algorithm", "algorithmVersion", "configDigest", "status", "summary", "proposals", "createdAt"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Id"},
+        "projectId": {"$ref": "#/$defs/Id"},
+        "projectRevision": {"type": "integer", "minimum": 1},
+        "selectionDigest": {"type": "string"},
+        "inputDigest": {"type": "string"},
+        "algorithm": {"type": "string"},
+        "algorithmVersion": {"type": "string"},
+        "configDigest": {"type": "string"},
+        "status": {"enum": ["PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED", "REJECTED", "STALE", "SUPERSEDED"]},
+        "summary": {"type": "object"},
+        "proposals": {"type": "array", "items": {"type": "object"}},
+        "createdAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "TimelineWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectId", "revision", "startAlignedUs", "endAlignedUs", "resolutionUs", "mode", "items", "totalBeforeWindow", "alignmentDigest"],
+      "properties": {
+        "projectId": {"$ref": "#/$defs/Id"},
+        "revision": {"type": "integer", "minimum": 1},
+        "startAlignedUs": {"$ref": "#/$defs/Us"},
+        "endAlignedUs": {"$ref": "#/$defs/Us"},
+        "resolutionUs": {"type": "integer", "minimum": 1},
+        "mode": {"enum": ["EXACT", "AGGREGATED"]},
+        "items": {"type": "array", "maxItems": 2000, "items": {"type": "object"}},
+        "totalBeforeWindow": {"type": "integer", "minimum": 0},
+        "alignmentDigest": {"type": "string"}
+      }
+    },
+    "AlignmentSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectId", "revision", "alignmentDigest", "evidenceSpan", "proposedOutputDurationUs", "confidenceCounts", "coverage", "conflicts", "readyForProgramDraft"],
+      "properties": {
+        "projectId": {"$ref": "#/$defs/Id"},
+        "revision": {"type": "integer", "minimum": 1},
+        "alignmentDigest": {"type": "string"},
+        "evidenceSpan": {"type": "object"},
+        "proposedOutputDurationUs": {"$ref": "#/$defs/Us"},
+        "confidenceCounts": {"type": "object"},
+        "coverage": {"type": "object"},
+        "conflicts": {"type": "array", "items": {"type": "object"}},
+        "readyForProgramDraft": {"type": "boolean"}
+      }
+    },
+    "ProgramDraftPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "projectId", "projectRevision", "selectionDigest", "alignmentDigest", "strategy", "videoBlocks", "audioBlocks", "outputDurationUs", "issues", "digest"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Id"},
+        "projectId": {"$ref": "#/$defs/Id"},
+        "projectRevision": {"type": "integer", "minimum": 1},
+        "selectionDigest": {"type": "string"},
+        "alignmentDigest": {"type": "string"},
+        "strategy": {"const": "coverage-optimizer-v1"},
+        "videoBlocks": {"type": "array", "items": {"$ref": "./domain.schema.json#/$defs/VideoBlock"}},
+        "audioBlocks": {"type": "array", "items": {"$ref": "./domain.schema.json#/$defs/AudioBlock"}},
+        "outputDurationUs": {"$ref": "#/$defs/Us"},
+        "issues": {"type": "array", "items": {"$ref": "./domain.schema.json#/$defs/ProgramIssue"}},
+        "digest": {"type": "string"}
+      }
+    },
+    "SyntheticSlate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "text", "videoGenerated", "audioMode", "provenance"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Id"},
+        "text": {"type": "string", "minLength": 1, "maxLength": 500},
+        "videoGenerated": {"const": true},
+        "audioMode": {"const": "SILENCE"},
+        "provenance": {"type": "object"}
+      }
+    }
+  }
+}

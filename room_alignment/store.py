@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .domain import (
     DomainError,
+    alignment_digest,
     apply_command,
     compile_program,
     digest_json,
@@ -46,7 +47,8 @@ JOB_STATES = {
 }
 PROGRAM_AFFECTING_COMMANDS = {
     "MergeLogicalSources", "SplitLogicalSource", "ArchiveLogicalSource", "AssignClip", "SetReferenceSource",
-    "SetSyncTransform", "InitializeProgram", "AddVideoBlock", "SplitVideoBlock", "MoveVideoBoundary",
+    "SetSyncTransform", "SetClipAlignment", "InitializeProgram", "SetTimelineSections",
+    "GenerateProgramDraft", "AddVideoBlock", "SplitVideoBlock", "MoveVideoBoundary",
     "DeleteVideoBlock", "AssignVideoSource", "PinVideoClip", "CutToSource", "AddAudioBlock",
     "SplitAudioBlock", "MoveAudioBoundary", "DeleteAudioBlock", "SetAudioMode", "SetAnchoringMode",
     "ReconcileBoundary", "AcceptAlignmentSuggestion", "AcceptAlignmentSuggestions",
@@ -986,6 +988,8 @@ class Store:
         library_id: str,
         asset_ids: list[str],
         source_groups: list[dict[str, Any]] | None = None,
+        *,
+        initialize_legacy_program: bool = False,
     ) -> dict[str, Any]:
         self.library_root(library_id)
         assets = self.media_records(asset_ids)
@@ -998,6 +1002,7 @@ class Store:
             library_id,
             [assets[item] for item in asset_ids],
             source_groups=source_groups,
+            initialize_legacy_program=initialize_legacy_program,
         )
         with self._lock, self.connect() as db:
             db.execute(
@@ -1214,7 +1219,38 @@ class Store:
 
     def _migrate_legacy_project(self, project: dict[str, Any]) -> dict[str, Any]:
         if "logicalSources" in project:
-            return project
+            canonical = copy.deepcopy(project)
+            asset_ids = [str(item["assetId"]) for item in canonical.get("clips", [])]
+            snapshot = canonical.setdefault(
+                "selectionSnapshot",
+                {
+                    "clusterGenerationId": None,
+                    "selectedSessionIds": [],
+                    "selectedEventIds": [],
+                    "assetIds": asset_ids,
+                    "manualIncludeAssetIds": asset_ids,
+                    "manualExcludeAssetIds": [],
+                },
+            )
+            snapshot.setdefault("assetIds", asset_ids)
+            snapshot["digest"] = digest_json(
+                {key: value for key, value in snapshot.items() if key != "digest"}
+            )
+            canonical.setdefault("timelineSections", [])
+            canonical.setdefault(
+                "programDraft",
+                {
+                    "id": _stable_migration_id("draft", canonical.get("id", "legacy")),
+                    "selectionDigest": snapshot["digest"],
+                    "alignmentDigest": "legacy",
+                    "generatedAt": canonical.get("updatedAt", now_iso()),
+                    "strategy": "legacy-import",
+                }
+                if canonical.get("videoBlocks")
+                else None,
+            )
+            canonical["alignmentDigest"] = alignment_digest(canonical)
+            return canonical
         media_ids = list((project.get("alignment") or {}).keys())
         media_ids += [
             item["mediaId"]

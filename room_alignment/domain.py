@@ -14,6 +14,8 @@ from typing import Any
 MAX_RATE_PPM = 2_000
 AUDIO_MODES = {"FOLLOW_VIDEO", "FIXED_SOURCE", "FIXED_CLIP", "SILENCE"}
 ANCHOR_MODES = {"PROGRAM_TIME", "SOURCE_TIME"}
+ALIGNMENT_STATES = {"PROVISIONAL", "ACCEPTED", "REVIEW_REQUIRED", "UNRESOLVED"}
+TIMELINE_SECTION_MODES = {"KEEP", "EXCLUDE", "SLATE"}
 BLOCKING = "BLOCKING"
 WARNING = "WARNING"
 COMMAND_PAYLOAD_FIELDS = {
@@ -26,7 +28,10 @@ COMMAND_PAYLOAD_FIELDS = {
     "AssignClip": {"clipId", "logicalSourceId"},
     "SetReferenceSource": {"sourceId"},
     "SetSyncTransform": {"clipId", "sync", "confirmDrift"},
+    "SetClipAlignment": {"clipId", "alignment", "confirmDrift"},
     "InitializeProgram": set(),
+    "SetTimelineSections": {"sections"},
+    "GenerateProgramDraft": {"alignmentDigest", "selectionDigest", "replaceExisting"},
     "AddVideoBlock": {"id", "startUs", "endUs", "logicalSourceId", "pinnedClipId"},
     "SplitVideoBlock": {"blockId", "atUs", "newBlockId"},
     "MoveVideoBoundary": {"leftBlockId", "rightBlockId", "atUs"},
@@ -132,6 +137,75 @@ class SyncTransform:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ClipAlignmentTransform:
+    """Map source-relative time onto the shared evidence clock.
+
+    ``SyncTransform.anchorOutputUs`` remains readable for legacy projects, but
+    new project state uses ``anchorAlignedUs`` so evidence time cannot be
+    mistaken for the final edited program clock.
+    """
+
+    anchor_source_us: int = 0
+    anchor_aligned_us: int = 0
+    rate_ppm: int = 0
+
+    def __post_init__(self) -> None:
+        if abs(self.rate_ppm) > MAX_RATE_PPM:
+            raise DomainError(
+                "VALIDATION_FAILED",
+                f"ratePpm must be between {-MAX_RATE_PPM} and {MAX_RATE_PPM}",
+            )
+
+    @property
+    def numerator(self) -> int:
+        return 1_000_000 + self.rate_ppm
+
+    def source_to_aligned(self, source_us: int) -> int:
+        delta = source_us - self.anchor_source_us
+        return self.anchor_aligned_us + _round_ratio(delta * self.numerator, 1_000_000)
+
+    def aligned_to_source(self, aligned_us: int) -> int:
+        delta = aligned_us - self.anchor_aligned_us
+        return self.anchor_source_us + _round_ratio(delta * 1_000_000, self.numerator)
+
+    # Transitional aliases keep the media compiler compatible while it is
+    # moved to explicit aligned/program clock composition in MS-5.
+    def source_to_output(self, source_us: int) -> int:
+        return self.source_to_aligned(source_us)
+
+    def output_to_source(self, output_us: int) -> int:
+        return self.aligned_to_source(output_us)
+
+    def to_legacy_sync_dict(self) -> dict[str, int]:
+        return {
+            "anchorSourceUs": self.anchor_source_us,
+            "anchorOutputUs": self.anchor_aligned_us,
+            "ratePpm": self.rate_ppm,
+        }
+
+    def to_dict(self) -> dict[str, int]:
+        return {
+            "anchorSourceUs": self.anchor_source_us,
+            "anchorAlignedUs": self.anchor_aligned_us,
+            "ratePpm": self.rate_ppm,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any] | None) -> ClipAlignmentTransform:
+        value = value or {}
+        return cls(
+            int(value.get("anchorSourceUs", 0)),
+            int(value.get("anchorAlignedUs", value.get("anchorOutputUs", 0))),
+            int(value.get("ratePpm", 0)),
+        )
+
+    @classmethod
+    def from_legacy_sync(cls, value: dict[str, Any] | None) -> ClipAlignmentTransform:
+        legacy = SyncTransform.from_dict(value)
+        return cls(legacy.anchor_source_us, legacy.anchor_output_us, legacy.rate_ppm)
+
+
 def _round_ratio(numerator: int, denominator: int) -> int:
     if denominator <= 0:
         raise DomainError("VALIDATION_FAILED", "Time transform denominator must be positive")
@@ -150,6 +224,9 @@ def new_project(
     assets: Iterable[dict[str, Any]],
     project_id: str | None = None,
     source_groups: Iterable[dict[str, Any]] | None = None,
+    *,
+    selection_snapshot: dict[str, Any] | None = None,
+    initialize_legacy_program: bool = True,
 ) -> dict[str, Any]:
     chosen = list(assets)
     if not chosen:
@@ -171,6 +248,12 @@ def new_project(
             {"label": asset.get("camera") or f"Source {index + 1}", "assetIds": [asset["id"]]}
             for index, asset in enumerate(chosen)
         ]
+    captured_us = {
+        str(asset["id"]): value
+        for asset in chosen
+        if (value := _confirmed_timestamp_us(asset.get("captured_at"))) is not None
+    }
+    evidence_origin_us = min(captured_us.values(), default=0)
     sources: list[dict[str, Any]] = []
     clips: list[dict[str, Any]] = []
     for group in groups:
@@ -190,14 +273,38 @@ def new_project(
             }
         )
         for asset in group_assets:
-            clips.append(
-                {
-                    "id": opaque_id("clip"),
-                    "assetId": asset["id"],
-                    "logicalSourceId": source_id,
-                    "sync": SyncTransform().to_dict(),
-                }
-            )
+            clip = {
+                "id": opaque_id("clip"),
+                "assetId": asset["id"],
+                "logicalSourceId": source_id,
+            }
+            if initialize_legacy_program:
+                clip["sync"] = SyncTransform().to_dict()
+            else:
+                captured = captured_us.get(str(asset["id"]))
+                state = "PROVISIONAL" if captured is not None else "UNRESOLVED"
+                clip.update(
+                    {
+                        "alignment": ClipAlignmentTransform(
+                            anchor_aligned_us=(captured - evidence_origin_us) if captured is not None else 0
+                        ).to_dict(),
+                        "alignmentState": state,
+                        "alignmentConfidence": 0.6 if captured is not None else 0.0,
+                        "alignmentEvidence": ["timestamp"] if captured is not None else [],
+                    }
+                )
+            clips.append(clip)
+    exact_asset_ids = [str(asset["id"]) for asset in chosen]
+    snapshot = copy.deepcopy(selection_snapshot) if selection_snapshot is not None else {
+        "clusterGenerationId": None,
+        "selectedSessionIds": [],
+        "selectedEventIds": [],
+        "assetIds": exact_asset_ids,
+        "manualIncludeAssetIds": exact_asset_ids,
+        "manualExcludeAssetIds": [],
+    }
+    snapshot["assetIds"] = exact_asset_ids
+    snapshot["digest"] = digest_json({key: value for key, value in snapshot.items() if key != "digest"})
     project = {
         "id": project_id or opaque_id("project"),
         "name": name.strip() or "Untitled alignment",
@@ -208,6 +315,10 @@ def new_project(
         "anchorMode": "PROGRAM_TIME",
         "logicalSources": sources,
         "clips": clips,
+        "selectionSnapshot": snapshot,
+        "alignmentDigest": "",
+        "timelineSections": [],
+        "programDraft": None,
         "videoBlocks": [],
         "audioBlocks": [],
         "renderSettings": {"profile": "COMPATIBLE"},
@@ -215,7 +326,57 @@ def new_project(
         "createdAt": created,
         "updatedAt": created,
     }
-    return initialize_program(project, {asset["id"]: asset for asset in chosen})
+    project["alignmentDigest"] = alignment_digest(project)
+    if initialize_legacy_program:
+        return initialize_program(project, {asset["id"]: asset for asset in chosen})
+    return project
+
+
+def _confirmed_timestamp_us(value: Any) -> int | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    epoch = datetime(1970, 1, 1, tzinfo=UTC)
+    delta = parsed.astimezone(UTC) - epoch
+    return ((delta.days * 86_400) + delta.seconds) * 1_000_000 + delta.microseconds
+
+
+def _clip_alignment(clip: dict[str, Any]) -> ClipAlignmentTransform:
+    if isinstance(clip.get("alignment"), dict):
+        return ClipAlignmentTransform.from_dict(clip["alignment"])
+    return ClipAlignmentTransform.from_legacy_sync(clip.get("sync"))
+
+
+def alignment_digest(project: dict[str, Any]) -> str:
+    return digest_json(
+        [
+            {
+                "clipId": clip["id"],
+                "assetId": clip["assetId"],
+                "logicalSourceId": clip["logicalSourceId"],
+                "alignment": _clip_alignment(clip).to_dict(),
+                "state": clip.get("alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED"),
+                "confidence": float(clip.get("alignmentConfidence", 1.0 if "sync" in clip else 0.0)),
+            }
+            for clip in sorted(project.get("clips", []), key=lambda item: item["id"])
+        ]
+    )
+
+
+def aligned_extent(
+    project: dict[str, Any], assets: dict[str, dict[str, Any]], *, include_provisional: bool = True
+) -> dict[str, int]:
+    ranges = _clip_ranges(project, assets, include_provisional=include_provisional)
+    if not ranges:
+        return {"startAlignedUs": 0, "endAlignedUs": 0, "durationUs": 0}
+    start_us = min(int(item["startUs"]) for item in ranges)
+    end_us = max(int(item["endUs"]) for item in ranges)
+    return {"startAlignedUs": start_us, "endAlignedUs": end_us, "durationUs": end_us - start_us}
 
 
 def initialize_program(project: dict[str, Any], assets: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -291,7 +452,15 @@ def validate_project(project: dict[str, Any]) -> None:
     for clip in project["clips"]:
         if clip.get("logicalSourceId") not in source_ids:
             raise DomainError("VALIDATION_FAILED", f"Clip {clip['id']} references an unknown logical source")
-        SyncTransform.from_dict(clip.get("sync"))
+        _clip_alignment(clip)
+        state = clip.get("alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED")
+        if state not in ALIGNMENT_STATES:
+            raise DomainError("VALIDATION_FAILED", f"Clip {clip['id']} has an invalid alignment state")
+    for section in project.get("timelineSections", []):
+        if section.get("mode") not in TIMELINE_SECTION_MODES:
+            raise DomainError("VALIDATION_FAILED", f"Timeline section {section.get('id')} has an invalid mode")
+        if int(section.get("endAlignedUs", 0)) <= int(section.get("startAlignedUs", 0)):
+            raise DomainError("VALIDATION_FAILED", "Timeline sections must have positive aligned duration")
     for block in project["videoBlocks"]:
         _validate_interval(block)
         if block.get("logicalSourceId") not in source_ids:
@@ -371,7 +540,14 @@ def apply_command(
         "AssignClip": _assign_clip,
         "SetReferenceSource": _set_reference,
         "SetSyncTransform": lambda p, command_payload: _set_sync(p, command_payload, assets),
+        "SetClipAlignment": lambda p, command_payload: _set_clip_alignment(
+            p, command_payload, assets
+        ),
         "InitializeProgram": lambda p, _payload: _replace(p, initialize_program(p, assets)),
+        "SetTimelineSections": _set_timeline_sections,
+        "GenerateProgramDraft": lambda p, command_payload: _replace(
+            p, generate_program_draft(p, assets, command_payload)
+        ),
         "AddVideoBlock": _add_video_block,
         "SplitVideoBlock": _split_video_block,
         "MoveVideoBoundary": _move_video_boundary,
@@ -408,6 +584,7 @@ def apply_command(
         raise DomainError("VALIDATION_FAILED", "Command payload is invalid") from error
     result["review"] = None
     result["updatedAt"] = now_iso()
+    result["alignmentDigest"] = alignment_digest(result)
     validate_project(result)
     return result
 
@@ -513,10 +690,41 @@ def _set_reference(project: dict[str, Any], payload: dict[str, Any]) -> None:
 def _set_sync(
     project: dict[str, Any], payload: dict[str, Any], assets: dict[str, dict[str, Any]]
 ) -> None:
-    clip = _find(project["clips"], payload["clipId"], "project clip")
-    old = SyncTransform.from_dict(clip.get("sync"))
-    new = SyncTransform.from_dict(payload.get("sync"))
-    if new.rate_ppm and not payload.get("confirmDrift"):
+    _set_alignment(
+        project,
+        payload["clipId"],
+        ClipAlignmentTransform.from_legacy_sync(payload.get("sync")),
+        bool(payload.get("confirmDrift")),
+        assets,
+        legacy_payload=True,
+    )
+
+
+def _set_clip_alignment(
+    project: dict[str, Any], payload: dict[str, Any], assets: dict[str, dict[str, Any]]
+) -> None:
+    _set_alignment(
+        project,
+        payload["clipId"],
+        ClipAlignmentTransform.from_dict(payload.get("alignment")),
+        bool(payload.get("confirmDrift")),
+        assets,
+        legacy_payload=False,
+    )
+
+
+def _set_alignment(
+    project: dict[str, Any],
+    clip_id: str,
+    new: ClipAlignmentTransform,
+    confirm_drift: bool,
+    assets: dict[str, dict[str, Any]],
+    *,
+    legacy_payload: bool,
+) -> None:
+    clip = _find(project["clips"], clip_id, "project clip")
+    old = _clip_alignment(clip)
+    if new.rate_ppm and not confirm_drift:
         raise DomainError("VALIDATION_FAILED", "Non-zero ratePpm requires confirmDrift")
     if project["anchorMode"] == "SOURCE_TIME":
         original_video = copy.deepcopy(project["videoBlocks"])
@@ -537,7 +745,77 @@ def _set_sync(
                 block["startUs"] = remap(block["startUs"])
             if _audio_boundary_uses_clip(clip_ranges, original_video, block, "endUs", clip):
                 block["endUs"] = remap(block["endUs"])
-    clip["sync"] = new.to_dict()
+    if legacy_payload and "alignment" not in clip:
+        clip["sync"] = new.to_legacy_sync_dict()
+    else:
+        clip.pop("sync", None)
+        clip["alignment"] = new.to_dict()
+        clip["alignmentState"] = "ACCEPTED"
+        clip["alignmentConfidence"] = 1.0
+        clip["alignmentEvidence"] = ["manual"]
+
+
+def _set_timeline_sections(project: dict[str, Any], payload: dict[str, Any]) -> None:
+    raw = payload.get("sections")
+    if not isinstance(raw, list) or not raw:
+        raise DomainError("VALIDATION_FAILED", "sections must be a non-empty array")
+    sections: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise DomainError("VALIDATION_FAILED", "Every timeline section must be an object")
+        mode = str(item.get("mode", ""))
+        if mode not in TIMELINE_SECTION_MODES:
+            raise DomainError("VALIDATION_FAILED", "Unknown timeline section mode")
+        start_us = int(item.get("startAlignedUs", -1))
+        end_us = int(item.get("endAlignedUs", -1))
+        if start_us < 0 or end_us <= start_us:
+            raise DomainError("VALIDATION_FAILED", "Timeline sections require a positive aligned interval")
+        sections.append(
+            {
+                "id": str(item.get("id") or opaque_id("section")),
+                "startAlignedUs": start_us,
+                "endAlignedUs": end_us,
+                "mode": mode,
+                "slateText": "No recorded footage" if mode == "SLATE" else None,
+            }
+        )
+    sections.sort(key=lambda item: (item["startAlignedUs"], item["id"]))
+    for left, right in zip(sections, sections[1:]):
+        if int(left["endAlignedUs"]) > int(right["startAlignedUs"]):
+            raise DomainError("VALIDATION_FAILED", "Timeline sections may not overlap")
+    project["timelineSections"] = sections
+
+
+def generate_program_draft(
+    project: dict[str, Any], assets: dict[str, dict[str, Any]], payload: dict[str, Any]
+) -> dict[str, Any]:
+    if str(payload.get("alignmentDigest", "")) != alignment_digest(project):
+        raise DomainError("PLAN_STALE", "Alignment changed after the program draft was prepared")
+    selection = project.get("selectionSnapshot") or {}
+    if str(payload.get("selectionDigest", "")) != str(selection.get("digest", "")):
+        raise DomainError("PLAN_STALE", "Project selection changed after the program draft was prepared")
+    if project.get("videoBlocks") and not payload.get("replaceExisting"):
+        raise DomainError("VALIDATION_FAILED", "replaceExisting is required to replace an existing program")
+    unresolved = [
+        clip["id"]
+        for clip in project.get("clips", [])
+        if clip.get("alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED") != "ACCEPTED"
+    ]
+    if unresolved:
+        raise DomainError(
+            "COVERAGE_INVALID",
+            "Every required clip must have accepted timing before a first cut is generated",
+            {"unresolvedClipIds": unresolved},
+        )
+    result = initialize_program(project, assets)
+    result["programDraft"] = {
+        "id": opaque_id("draft"),
+        "selectionDigest": selection.get("digest"),
+        "alignmentDigest": alignment_digest(project),
+        "generatedAt": now_iso(),
+        "strategy": "coverage-continuity-v1",
+    }
+    return result
 
 
 def _video_boundary_uses_clip(
@@ -766,16 +1044,24 @@ def _accept_suggestion(
     )
 
 
-def _clip_ranges(project: dict[str, Any], assets: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+def _clip_ranges(
+    project: dict[str, Any],
+    assets: dict[str, dict[str, Any]],
+    *,
+    include_provisional: bool = False,
+) -> list[dict[str, Any]]:
     ranges: list[dict[str, Any]] = []
     for clip in project.get("clips", []):
         asset = assets.get(clip["assetId"])
         if not asset or asset.get("missing"):
             continue
+        state = clip.get("alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED")
+        if state == "UNRESOLVED" or (not include_provisional and state != "ACCEPTED"):
+            continue
         duration_us = _asset_duration_us(asset)
         if duration_us <= 0:
             continue
-        transform = SyncTransform.from_dict(clip.get("sync"))
+        transform = _clip_alignment(clip)
         ranges.append(
             {
                 "clipId": clip["id"],
@@ -861,7 +1147,8 @@ def _compile_source_block(
                 ),
                 "sourceStartUs": transform.output_to_source(start_us),
                 "sourceEndUs": transform.output_to_source(end_us),
-                "sync": transform.to_dict(),
+                "sync": transform.to_legacy_sync_dict(),
+                "alignment": transform.to_dict(),
             }
         )
     return slices
