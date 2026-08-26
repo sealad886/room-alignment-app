@@ -127,6 +127,9 @@ def verify(wheel: Path) -> dict[str, object]:
         ).stdout.strip()
         if module_version != version:
             raise RuntimeError("Console and module entry points report different versions")
+        expected_system_version = version.removeprefix("room-alignment ")
+        if expected_system_version == version:
+            raise RuntimeError("Installed console version has an unexpected format")
         doctor = subprocess.run(
             [str(command), "doctor"],
             cwd=root,
@@ -150,7 +153,7 @@ def verify(wheel: Path) -> dict[str, object]:
             openapi = json.load(opener.open(f"{base}/api/v1/openapi.json", timeout=5))
             if "Room Alignment" not in index:
                 raise RuntimeError("Installed frontend did not load")
-            if not health.get("ok") or system.get("version") not in version:
+            if not health.get("ok") or system.get("version") != expected_system_version:
                 raise RuntimeError("Installed health/system version mismatch")
             if openapi.get("openapi") != "3.1.0":
                 raise RuntimeError("Installed OpenAPI contract did not load")
