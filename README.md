@@ -13,15 +13,46 @@ Every completed output is paired with a provenance manifest that identifies sour
 - one-time bootstrap, server-expiring local session, CSRF, Host/Origin/fetch-metadata checks, CSP, and session-bound short-lived SSE tokens
 - opaque grants for source and output directories; ordinary APIs do not accept source paths
 
-FFmpeg and FFprobe must be available on `PATH`. Python and JavaScript package installation is not required.
+FFmpeg and FFprobe 6.0 or newer must be available on `PATH`. They remain separate programs because FFmpeg redistribution terms depend on build configuration. Room Alignment itself ships as one Python wheel containing backend, frontend, contracts, license material, and command-line launcher.
 
-## Run
+## Install
 
 ```bash
-python3 -m room_alignment.server
+uv tool install /path/to/room_alignment-0.3.0-py3-none-any.whl
+room-alignment doctor
 ```
 
-The service prints and opens a one-time launch URL. The default state directory is `~/.room-alignment`; use `--data-dir` to choose another location and `--no-open` to avoid opening a browser. The supported service boundary is loopback only.
+`pipx install` or installation into a dedicated virtual environment is also supported. Do not install into system Python.
+
+Start the application:
+
+```bash
+room-alignment
+```
+
+The command starts the loopback service and opens a one-time secure browser URL. The default state directory is `~/.room-alignment`; use `room-alignment serve --data-dir PATH`, `--port`, and `--no-open` for explicit operation. The legacy `room-alignment --no-open ...` option shape remains supported. `python -m room_alignment` launches the same installed entry point.
+
+Administrative state operations use the same package:
+
+```bash
+room-alignment admin verify STATE.sqlite3
+room-alignment admin backup STATE.sqlite3 BACKUP.sqlite3
+room-alignment admin dry-run-migrate BACKUP.sqlite3
+room-alignment admin restore STATE.sqlite3 BACKUP.sqlite3 --replace
+```
+
+## Build and verify package
+
+Build tooling is isolated and build-only:
+
+```bash
+uv build
+python3 scripts/verify_package.py dist/room_alignment-0.3.0-py3-none-any.whl
+```
+
+Verification installs the wheel into a fresh temporary virtual environment with `--no-index --no-deps`, launches it from outside the repository, bootstraps a session, loads frontend and OpenAPI resources, checks health/version, sends SIGTERM, and relaunches against the same state directory to prove lock recovery. It does not scan source media or publish artifacts.
+
+Source development remains available through `python3 -m room_alignment` from a checkout.
 
 ## Connected workflow
 
@@ -56,15 +87,6 @@ Read-only corpus validation accepts paths only as runtime arguments so private p
 python3 scripts/validate_reference_corpus.py /path/to/corpus --state-dir /separate/state/directory
 ```
 
-Canonical-state administration:
-
-```bash
-python3 scripts/state_admin.py verify /path/to/room-alignment.sqlite3
-python3 scripts/state_admin.py backup /path/to/room-alignment.sqlite3 /separate/backup.sqlite3
-python3 scripts/state_admin.py dry-run-migrate /separate/backup.sqlite3
-python3 scripts/state_admin.py restore /path/to/room-alignment.sqlite3 /separate/backup.sqlite3 --replace
-```
-
 Restore refuses to run while the application owns the state directory and creates a verified rollback copy before replacement. Source media is never included in application-state backup.
 
 ## License
@@ -77,8 +99,8 @@ as part of Room Alignment. Their own license terms apply.
 
 ## Project status
 
-Current implementation provides real scanning, alignment/edit-decision persistence, preflight, manifest generation, FFmpeg rendering, render cancellation, and connected browser UI. See [runbook](docs/runbook.md), [architecture](docs/architecture.md), and [risk register](docs/risk-register.md).
+Current implementation provides an installable wheel/source archive, cohesive launcher and administration CLI, real scanning, alignment/edit-decision persistence, preflight, manifest generation, FFmpeg rendering, render cancellation, and connected browser UI. See [runbook](docs/runbook.md), [architecture](docs/architecture.md), and [risk register](docs/risk-register.md).
 
 ## Delivery state
 
-This repository is a local source release candidate only when the requirement ledger and verification report say so. Packaging, installation, signing, notarization, publication, deployment, and distribution are separate authority states.
+This repository can produce a locally verified installable package. Signing, notarization, publication, deployment, distribution, and installation outside isolated verification remain separate authority states.

@@ -9,19 +9,21 @@
 - MS-5 — Optional asynchronous timestamp/cluster suggestions with evidence, limitations, lifecycle, and invalidation; manual alignment remains complete without them.
 - MS-6 — Immutable full-hash plans, review attestations, compatible/lossless render profiles, source revalidation, crash-safe artifact pairs, and provenance manifests.
 - MS-7 — Legacy cutover, 150-requirement disposition ledger, full tests, browser/accessibility/visual checks, performance benchmark, real-corpus integrity validation, and adversarial remediation.
+- MS-8 — Reproducible wheel/source archive, bundled runtime resources, unified launcher/admin CLI, dependency doctor, and clean-install/runtime/shutdown verification.
 
 Critical path completed: source safety → canonical index/provenance → revisioned alignment/editing → immutable review → render/recovery → representative evidence.
 
-## Local release-candidate gate
+## Local installable-package gate
 
 The local source release candidate is accepted only when all of the following remain true:
 
-- `docs/requirements-ledger.md` maps every `REQ-001` through `REQ-150` without silent waiver.
+- `docs/requirements-ledger.md` maps every `REQ-001` through `REQ-158` without silent waiver.
 - `docs/verification-report.md` records a current full-suite, contract/static, browser, performance, render, and corpus result.
 - `docs/adversarial-audit.md` has no open critical/high correctness, security, data-integrity, contract, accessibility, migration, or recovery finding.
 - Source tree path, size, and modification-time metadata is unchanged and no private path/name/media is committed. The bounded corpus check does not claim a full-content hash of every source byte.
 - Frontend uses named command APIs and the generated client; backend remains the only compiler/preflight/render authority.
+- Wheel contains backend/frontend/contracts/license material, runs outside the source tree, and passes clean isolated install, bootstrap, health, contract, SIGTERM, and state-lock reuse checks.
 
 ## Delivery state
 
-Implementation is complete and locally verified in the isolated `codex/technology-agnostic-backend` worktree. The branch is published to `origin` and under automated review in pull request #2. No package, installation, signing, notarization, publication, deployment, distribution, merge, or production observation was performed or implied.
+Core product PR #2 is merged. Version 0.3.0 package work is locally built and verified in isolated `codex/installable-package` worktree. Build artifacts are local only. No signing, notarization, publication, deployment, distribution, system-wide installation, or production observation was performed or implied.

@@ -1,0 +1,118 @@
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import shutil
+import subprocess
+import sys
+
+from . import __version__
+from .server import CONTRACT, CONTRACTS, WEB, add_serve_arguments, serve
+from .state_admin import add_admin_arguments, run_admin
+
+
+TOOL_VERSION_PATTERN = re.compile(r"\bversion\s+n?(\d+)(?:\.(\d+))?", re.IGNORECASE)
+MINIMUM_MEDIA_TOOL_MAJOR = 6
+
+
+def _tool_status(name: str) -> dict[str, object]:
+    executable = shutil.which(name)
+    if not executable:
+        return {"available": False, "supported": False, "version": None}
+    try:
+        result = subprocess.run(
+            [executable, "-version"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return {"available": False, "supported": False, "version": None}
+    first_line = (result.stdout or result.stderr).splitlines()
+    version_line = first_line[0][:200] if first_line else None
+    match = TOOL_VERSION_PATTERN.search(version_line or "")
+    supported = bool(
+        result.returncode == 0
+        and match
+        and int(match.group(1)) >= MINIMUM_MEDIA_TOOL_MAJOR
+    )
+    return {
+        "available": result.returncode == 0,
+        "supported": supported,
+        "version": version_line,
+    }
+
+
+def doctor() -> int:
+    resources = {
+        "frontend": (WEB / "index.html").is_file(),
+        "openapi": CONTRACT.is_file(),
+        "schemas": all(
+            (CONTRACTS / name).is_file()
+            for name in (
+                "api.schema.json",
+                "commands.schema.json",
+                "domain.schema.json",
+                "manifest.schema.json",
+            )
+        ),
+    }
+    tools = {name: _tool_status(name) for name in ("ffmpeg", "ffprobe")}
+    ready = all(resources.values()) and all(bool(value["supported"]) for value in tools.values())
+    print(
+        json.dumps(
+            {
+                "application": "room-alignment",
+                "version": __version__,
+                "ready": ready,
+                "python": sys.version.split()[0],
+                "resources": resources,
+                "tools": tools,
+            },
+            sort_keys=True,
+        )
+    )
+    return 0 if ready else 1
+
+
+def parser() -> argparse.ArgumentParser:
+    root = argparse.ArgumentParser(
+        prog="room-alignment",
+        description="Installable local-first multi-camera video alignment application",
+    )
+    root.add_argument("--version", action="version", version=f"room-alignment {__version__}")
+    commands = root.add_subparsers(dest="command", required=True)
+
+    serve_parser = commands.add_parser("serve", help="start local application and open secure browser session")
+    add_serve_arguments(serve_parser)
+    commands.add_parser("doctor", help="check packaged resources and external media tools")
+    admin_parser = commands.add_parser("admin", help="verify, back up, migrate-check, or restore state")
+    add_admin_arguments(admin_parser)
+    return root
+
+
+def _normalized_argv(argv: list[str]) -> list[str]:
+    if not argv:
+        return ["serve"]
+    if argv[0] in {"serve", "doctor", "admin", "--help", "-h", "--version"}:
+        return argv
+    # Preserve the original `room-alignment --host ...` launch shape.
+    return ["serve", *argv]
+
+
+def main(argv: list[str] | None = None) -> int:
+    arguments = _normalized_argv(list(sys.argv[1:] if argv is None else argv))
+    args = parser().parse_args(arguments)
+    if args.command == "serve":
+        return serve(args)
+    if args.command == "doctor":
+        return doctor()
+    if args.command == "admin":
+        return run_admin(args)
+    raise AssertionError(f"Unhandled command: {args.command}")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

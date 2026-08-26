@@ -1,17 +1,29 @@
-# Local release-candidate verification report
+# Installable package verification report
 
-Date: 2026-08-25 (Europe/Dublin)
+Date: 2026-08-26 (Europe/Dublin)
 
-Scope: local source release candidate in the isolated `codex/technology-agnostic-backend` worktree. Evidence does not claim packaging, installation, publication, deployment, or production operation.
+Scope: version 0.3.0 package candidate in isolated `codex/installable-package` worktree, based on merged PR #2 commit `c27bca3`. Evidence covers local package build and temporary isolated installation. It does not claim signing, notarization, publication, distribution, system-wide installation, deployment, or production operation.
 
 ## Automated and contract verification
 
-- `PYTHONWARNINGS=error::ResourceWarning python3 -m unittest discover -v` — **56 tests passed**, 0 failed, 0 skipped outside the sandbox; includes loopback security/session tests and native FFmpeg renders.
+- `PYTHONWARNINGS=error::ResourceWarning python3 -m unittest discover -v` — **109 tests passed**, 0 failed, 0 skipped; includes package CLI/resource/port-lock cases, loopback security/session tests, and native FFmpeg renders.
 - `python3 scripts/generate_api_client.py --check` — generated browser client matches normative OpenAPI.
 - `python3 -m compileall -q room_alignment scripts tests` — passed.
 - `node --check web/api-client.js` and `node --check web/app.js` — passed.
 - `git diff --check` — passed.
 - Contract tests parse every normative JSON schema, enumerate required route families/error codes/commands, and verify generated-client currency.
+
+## Package build and clean-install evidence
+
+- `uv build --clear` produced `room_alignment-0.3.0-py3-none-any.whl` and `room_alignment-0.3.0.tar.gz` through pinned Hatchling 1.27.0 in an isolated PEP 517 environment.
+- Repeated independent builds were byte-for-byte identical for both wheel and source archive.
+- Wheel SHA-256: `0b91084db5a064703dcb702ca48553978ef8940e958621e32b1b828fc9ee574e`.
+- `scripts/verify_package.py` inspected required wheel members and license/entry-point metadata, created a fresh temporary virtual environment, installed with `--no-index --no-deps`, and launched from outside the repository.
+- Installed runtime loaded frontend, health, authenticated system/OpenAPI resources, and reported version 0.3.0 through both console and `python -m room_alignment` entry points. Installed state-administration command returned `integrity=ok`. `room-alignment doctor` confirmed packaged resources plus FFmpeg/FFprobe 9.0.1 against minimum major 6.
+- SIGTERM exited cleanly and immediate relaunch against the same state directory succeeded, proving application-lock release. Port-bind failure has a separate lock-release regression test.
+- Verifier never granted or scanned a media directory; no source media or private path entered either artifact.
+
+Pinned Ruff 0.16.3 reports 51 non-blocking style/modernization findings and pinned Pyright 1.1.411 reports 21 basic-mode findings, predominantly inherited from the merged baseline. No behavioral failure was reproduced; per P2 policy they are deferred to [issue #7](https://github.com/sealad886/room-alignment-app/issues/7), not silently accepted or expanded into this package milestone.
 
 ## Connected browser and accessibility evidence
 
@@ -60,4 +72,4 @@ The runtime path and identifying filenames are intentionally absent from this re
 
 ## Delivery-state boundary
 
-Implementation, local verification, browser observation, and representative-corpus observation are complete. The branch is pushed to `origin` and pull request #2 is open for automated review. Packaging, installation, merge, signing, notarization, publication, deployment, distribution, and production observation were not authorized or performed.
+Core implementation and PR #2 merge are complete. Local package build plus temporary clean installation/runtime verification are complete. Artifact files remain local and ignored by Git. No push/PR for package changes, signing, notarization, publication, deployment, distribution, system-wide installation, or production observation was authorized or performed.

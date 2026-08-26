@@ -7,8 +7,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from room_alignment.state_admin import backup, dry_run_migration, restore
 from room_alignment.store import Store
-from scripts.state_admin import backup, dry_run_migration, restore
 
 
 class StateAdministrationTests(unittest.TestCase):
@@ -57,7 +57,7 @@ class StateAdministrationTests(unittest.TestCase):
                 Path(f"{destination}-wal").write_bytes(b"stale wal")
                 Path(f"{destination}-shm").write_bytes(b"stale shm")
 
-            with patch("scripts.state_admin.os.replace", side_effect=replace_then_create_stale_sidecars):
+            with patch("room_alignment.state_admin.os.replace", side_effect=replace_then_create_stale_sidecars):
                 restore(state, backup_file, replace=True)
             for suffix, stale in (("-wal", b"stale wal"), ("-shm", b"stale shm")):
                 sidecar = Path(f"{state}{suffix}")

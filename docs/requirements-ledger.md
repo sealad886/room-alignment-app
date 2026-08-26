@@ -153,4 +153,12 @@
 | REQ-147 | Verified | Verified backup precedes irreversible schema/restore; failure retains prior/rollback DB. |
 | REQ-148 | Verified | Legacy whole-project HTTP writes removed; generated command client is sole frontend writer. |
 | REQ-149 | Implemented | Legacy reader/importer remains only as migration/recovery seam. |
-| REQ-150 | Verified | Baseline preserved in isolated worktree; branch pushed and pull request #2 opened under explicit authority; no merge/package/deploy. |
+| REQ-150 | Verified | Baseline was preserved through isolated implementation and PR review; PR #2 merged without losing user-owned work. |
+| REQ-151 | Implemented | Root declares a PEP 517 build system, complete metadata, console entry point, and explicit wheel/source-archive contents. |
+| REQ-152 | Implemented | Wheel contains backend, frontend, OpenAPI/JSON Schemas, license, and notices; runtime resolves installed resources without repository paths. |
+| REQ-153 | Implemented | One `room-alignment` CLI owns serve, doctor, and canonical-state administration; legacy direct serve arguments remain compatible. |
+| REQ-154 | Implemented | Installed package runs from any working directory with no third-party Python/browser runtime dependency; FFmpeg/FFprobe remain explicit external tools. |
+| REQ-155 | Implemented | Port-bind failure closes state ownership; SIGTERM performs canonical server/application cleanup and permits immediate state-directory reuse. |
+| REQ-156 | Implemented | Clean-wheel verifier installs with no index/dependencies, bootstraps session, loads UI/health/system/OpenAPI, stops, and relaunches from outside repository. |
+| REQ-157 | Implemented | Package diagnostics disclose bounded versions/resource readiness without absolute state, source, or package paths, and enforce FFmpeg/FFprobe major version 6 or newer. |
+| REQ-158 | Implemented | Build and verification never scan/bundle source media, publish artifacts, install globally, sign, notarize, or redistribute FFmpeg. |

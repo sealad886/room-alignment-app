@@ -1,10 +1,10 @@
 # Adversarial implementation audit
 
-Audit date: 2026-08-25
+Audit date: 2026-08-26
 
 ## Scope and done criteria
 
-Target: the complete local service, canonical domain/compiler, persistence/migration, scan/provenance, render/recovery pipeline, generated API client, and connected Library → Align → Cut → Review UI.
+Target: complete local service, installable distribution, canonical domain/compiler, persistence/migration, scan/provenance, render/recovery pipeline, generated API client, and connected Library → Align → Cut → Review UI.
 
 Failure meant any silent provenance/timing error, source/output mutation, cross-library authority confusion, stale UI state, unbounded representative workload, insecure local boundary, mixed/partial migration, false artifact success, inaccessible connected flow, or unsupported delivery claim. Closure required a reproducer or source-path proof, a minimal correction, focused regression evidence, a full-suite rerun, and a current disposition ledger.
 
@@ -30,14 +30,16 @@ Failure meant any silent provenance/timing error, source/output mutation, cross-
 | AUD-006 | Medium | A failure after one artifact promotion could remain a generic failed artifact until restart. | Mark any exception with one final member present as `FAILED_RECOVERABLE`; startup still quarantines/reconciles exact partials and never reports complete. | render recovery tests and artifact-state inspection | Fixed |
 | AUD-007 | Medium | Workflow step numbers used a 3.68:1 color and failed normal-text WCAG AA. | Use the established muted token, measured at 7.16:1 on the topbar. | Chromium audit: 0 contrast failures | Fixed |
 | AUD-008 | Low | An SSE-connected UI stopped fallback polling, and a disconnected browser could cause a server traceback. | Continuous safety polling plus safe HTTP connection-error handling without traceback/path disclosure. | Chromium: 0 errors; full loopback tests | Fixed |
-| AUD-009 | Low | Runtime/package version and delivery/risk documents had stale pre-implementation claims. | Align version at 0.2.0 and replace stale delivery, compliance, risk, audit, and verification reports with measured evidence. | version/source search and documentation review | Fixed |
+| AUD-009 | Low | Runtime/package version and delivery/risk documents had stale pre-implementation claims. | Align runtime/API/manifest/package version and replace stale delivery, risk, audit, and verification claims with measured evidence. | version/source search and documentation review | Fixed |
 | AUD-010 | High | Render, analysis, and synchronous full-hash plan creation were not all explicitly backpressured, permitting local resource amplification. | Reserve one render, permit two analyses, serialize full-hash plan creation, and return stable `JOB_STATE_CONFLICT` for excess work. | render/analysis backpressure tests and full suite | Fixed |
+| AUD-011 | High | Console entry referenced source-tree-only `web/` and `contracts/`, while `pyproject.toml` had no build backend or package-data rules, so an installed wheel could not serve the product. | Add pinned PEP 517 build, force-include resources inside package, resolve installed data first, and verify wheel from outside repository. | two byte-identical builds plus clean-wheel frontend/API smoke | Fixed |
+| AUD-012 | High | First package doctor draft treated any FFmpeg/FFprobe version as supported despite documented 6.0 floor. | Parse bounded first-line major version and fail readiness when absent or below 6. | `test_doctor_rejects_media_tool_below_supported_floor` and installed doctor result | Fixed |
 
 No critical finding was reproduced. No accepted in-scope finding remains open or blocked.
 
 ## Bounded residual risks
 
-- FFmpeg/FFprobe remain a complex native parser surface; the source-only web delivery does not add an OS sandbox. Bounds, current maintained tools, structured argv, local grants, and process ownership reduce but cannot eliminate that risk.
+- FFmpeg/FFprobe remain a complex native parser surface; Python wheel packaging does not add an OS sandbox. Bounds, current maintained tools, structured argv, local grants, and process ownership reduce but cannot eliminate that risk.
 - Same-OS-user malware may already have wider filesystem/process access than browser-origin controls can prevent.
 - Media compatibility evidence is representative, not exhaustive across every codec/container/build/hardware combination. Unsupported required transforms block rather than approximate.
 - Automatic timestamp/cluster suggestions are deliberately low-authority assistance; manual verification remains necessary.

@@ -12,6 +12,8 @@ flowchart LR
 
 The backend is the only business-rule authority. It owns grants, scan generations, evidence/resolution ledgers, logical-source identity, project revisions, synchronization math, video/audio compilation, issues, immutable plans, review binding, source hashes, rendering, artifacts, events, migrations, and recovery. The frontend presents provisional interaction feedback and submits named commands; it reloads canonical results after every mutation.
 
+Distribution is one Python wheel. Hatchling maps `web/` and `contracts/` into the `room_alignment` package at build time, so installed runtime never depends on repository-relative files. `room-alignment` and `python -m room_alignment` share one CLI dispatcher for service launch, dependency/resource diagnosis, and canonical-state administration. Source-checkout resource fallback exists only for development compatibility.
+
 ## Fixed semantics
 
 - `MediaAsset` is one file; `LogicalSource` is a user-confirmed viewpoint containing one or more `ProjectClip` records. Candidate labels never silently merge sources.

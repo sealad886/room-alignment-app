@@ -16,6 +16,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+from . import __version__
 from .domain import DomainError, compile_program, digest_json, now_iso, opaque_id
 from .scanner import full_digest
 from .store import Store
@@ -391,7 +392,7 @@ def build_render_plan(
         "estimatedBytes": estimate,
         "warningCodes": sorted(set(warning_codes)),
         "toolVersions": {
-            "application": "room-alignment/0.2.0",
+            "application": f"room-alignment/{__version__}",
             "ffmpeg": _tool_version("ffmpeg"),
             "ffprobe": _tool_version("ffprobe"),
         },

@@ -7,6 +7,7 @@ import json
 import mimetypes
 import os
 import secrets
+import signal
 import sys
 import threading
 import time
@@ -19,16 +20,29 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer as _Threadin
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
+from . import __version__
 from .domain import DomainError, digest_json, program_at
 from .render import CanonicalRenderManager, RenderManager, build_render_plan
 from .scanner import iter_scan_records
 from .store import Store, TERMINAL_JOB_STATES
 
 
-ROOT = Path(__file__).resolve().parent.parent
-WEB = ROOT / "web"
-CONTRACT = ROOT / "contracts" / "openapi.json"
-CONTRACTS = ROOT / "contracts"
+PACKAGE_ROOT = Path(__file__).resolve().parent
+SOURCE_ROOT = PACKAGE_ROOT.parent
+
+
+def _resource_directory(name: str) -> Path:
+    """Return installed package data, with a source-checkout fallback."""
+
+    installed = PACKAGE_ROOT / name
+    if installed.is_dir():
+        return installed
+    return SOURCE_ROOT / name
+
+
+WEB = _resource_directory("web")
+CONTRACTS = _resource_directory("contracts")
+CONTRACT = CONTRACTS / "openapi.json"
 MAX_BODY = 2_000_000
 SESSION_COOKIE = "ra_session"
 SESSION_TTL_SECONDS = 43_200
@@ -616,7 +630,7 @@ class Handler(BaseHTTPRequestHandler):
             if not _trusted_host(self.headers.get("Host", ""), self.server.server_port):
                 raise DomainError("FORBIDDEN", "Local Host header required")
             if path == "/api/health":
-                return self.respond({"ok": True, "version": "0.2.0"})
+                return self.respond({"ok": True, "version": __version__})
             if path.startswith("/bootstrap/"):
                 token = unquote(path.removeprefix("/bootstrap/"))
                 bootstrapped = APP.sessions.bootstrap(token)
@@ -644,7 +658,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/system":
             return self.respond(
                 {
-                    "version": "0.2.0",
+                    "version": __version__,
                     "apiVersion": "v1",
                     "timeUnit": "microseconds",
                     "intervals": "half-open",
@@ -981,13 +995,14 @@ def _timestamp_us(value: object) -> int | None:
         return None
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Run Room Alignment locally")
+def add_serve_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--data-dir", type=Path, default=Path.home() / ".room-alignment")
     parser.add_argument("--no-open", action="store_true")
-    args = parser.parse_args()
+
+
+def serve(args: argparse.Namespace) -> int:
     try:
         if not ipaddress.ip_address(args.host).is_loopback:
             raise SystemExit("Room Alignment only supports loopback addresses")
@@ -996,12 +1011,29 @@ def main() -> None:
             raise SystemExit("Room Alignment only supports loopback addresses")
     global APP
     APP = App(args.data_dir.expanduser())
-    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    try:
+        server = ThreadingHTTPServer((args.host, args.port), Handler)
+    except BaseException:
+        APP.close()
+        raise
     server.daemon_threads = True
-    bootstrap_url = f"http://{args.host}:{args.port}/bootstrap/{quote(APP.sessions.bootstrap_token, safe='')}"
-    print(f"Room Alignment secure launch: {bootstrap_url}")
+    actual_port = int(server.server_port)
+    bootstrap_url = f"http://{args.host}:{actual_port}/bootstrap/{quote(APP.sessions.bootstrap_token, safe='')}"
+    print(f"Room Alignment secure launch: {bootstrap_url}", flush=True)
+    browser_timer: threading.Timer | None = None
     if not args.no_open:
-        threading.Timer(0.4, lambda: webbrowser.open(bootstrap_url)).start()
+        browser_timer = threading.Timer(0.4, lambda: webbrowser.open(bootstrap_url))
+        browser_timer.daemon = True
+        browser_timer.start()
+
+    previous_sigterm = None
+
+    def request_shutdown(_signum: int, _frame: object) -> None:
+        raise KeyboardInterrupt
+
+    if threading.current_thread() is threading.main_thread():
+        previous_sigterm = signal.getsignal(signal.SIGTERM)
+        signal.signal(signal.SIGTERM, request_shutdown)
     try:
         server.serve_forever(poll_interval=0.25)
     except KeyboardInterrupt:
@@ -1011,6 +1043,15 @@ def main() -> None:
         # serve_forever(). At this point the serving loop has already exited.
         server.server_close()
         APP.close()
+        if previous_sigterm is not None:
+            signal.signal(signal.SIGTERM, previous_sigterm)
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run Room Alignment locally")
+    add_serve_arguments(parser)
+    return serve(parser.parse_args(argv))
 
 
 if __name__ == "__main__":
