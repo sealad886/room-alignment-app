@@ -105,6 +105,7 @@ class StoreV1Tests(unittest.TestCase):
         media = self.record("one", "one.mp4")
         self.scan("FULL", [media])
         project = self.store.create_project("Event", self.library["id"], ["one"])
+        other_project = self.store.create_project("Other event", self.library["id"], ["one"])
         envelope = {
             "commandId": "command-1",
             "expectedRevision": project["revision"],
@@ -118,6 +119,9 @@ class StoreV1Tests(unittest.TestCase):
         self.assertIn("affectedIntervals", first)
         self.assertEqual(self.store.project_revision(project["id"], 1)["name"], "Event")
         self.assertEqual(self.store.project_revision(project["id"], 2)["name"], "Renamed")
+        with self.assertRaisesRegex(DomainError, "already used"):
+            self.store.apply_project_command(other_project["id"], envelope)
+        self.assertEqual(self.store.project(other_project["id"])["name"], "Other event")
         with self.assertRaisesRegex(DomainError, "already used"):
             self.store.apply_project_command(
                 project["id"],

@@ -1073,10 +1073,10 @@ class Store:
         with self._lock, self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             previous = db.execute(
-                "SELECT payload_digest,result_json FROM command_records WHERE command_id=?", (command_id,)
+                "SELECT project_id,payload_digest,result_json FROM command_records WHERE command_id=?", (command_id,)
             ).fetchone()
             if previous:
-                if previous["payload_digest"] != payload_digest:
+                if previous["project_id"] != project_id or previous["payload_digest"] != payload_digest:
                     raise DomainError("IDEMPOTENCY_CONFLICT", "commandId was already used with different content")
                 return json.loads(previous["result_json"])
             row = db.execute("SELECT document_json,revision FROM projects WHERE id=?", (project_id,)).fetchone()
@@ -1548,8 +1548,8 @@ class Store:
             raise DomainError("NOT_FOUND", "Job not found")
         if row["status"] in TERMINAL_JOB_STATES and status != row["status"]:
             raise DomainError("JOB_STATE_CONFLICT", "Terminal job cannot transition")
-        if row["status"] == "CANCEL_REQUESTED" and status not in TERMINAL_JOB_STATES:
-            raise DomainError("JOB_STATE_CONFLICT", "Cancellation can only transition to a terminal state")
+        if row["status"] == "CANCEL_REQUESTED" and status not in {"CANCELED", "FAILED", "FAILED_RECOVERABLE"}:
+            raise DomainError("JOB_STATE_CONFLICT", "Cancellation can only finish as canceled or failed")
         next_progress = float(row["progress"] if progress is None else max(0, min(1, progress)))
         db.execute(
             "UPDATE jobs SET status=?,progress=?,message=?,result_json=?,error_code=?,updated_at=? WHERE id=?",
@@ -1903,6 +1903,43 @@ class Store:
         with self._lock, self.connect() as db:
             db.execute(f"UPDATE artifacts SET {assignments} WHERE id=?", params)
         return self.artifact(artifact_id)
+
+    def complete_render_artifact(
+        self,
+        job_id: str,
+        artifact_id: str,
+        video_digest: str,
+        manifest_digest: str,
+        details: dict[str, Any],
+    ) -> bool:
+        """Atomically publish durable success unless cancellation already owns the job."""
+        with self._lock, self.connect() as db:
+            job = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if not job:
+                raise DomainError("NOT_FOUND", "Job not found")
+            artifact = db.execute("SELECT * FROM artifacts WHERE id=?", (artifact_id,)).fetchone()
+            if not artifact:
+                raise DomainError("NOT_FOUND", "Artifact not found")
+            if artifact["job_id"] != job_id:
+                raise DomainError("JOB_STATE_CONFLICT", "Artifact does not belong to render job")
+            if job["status"] == "CANCEL_REQUESTED":
+                return False
+            if job["status"] != "RUNNING":
+                raise DomainError("JOB_STATE_CONFLICT", "Only a running render may complete an artifact")
+            db.execute(
+                "UPDATE artifacts SET status='COMPLETE',video_digest=?,manifest_digest=?,details_json=?,updated_at=? "
+                "WHERE id=?",
+                (video_digest, manifest_digest, json.dumps(details), now_iso(), artifact_id),
+            )
+            self._transition_job_db(
+                db,
+                job_id,
+                "SUCCEEDED",
+                1,
+                "Video and provenance manifest complete",
+                result={"artifactId": artifact_id},
+            )
+            return True
 
     def artifact(self, artifact_id: str) -> dict[str, Any]:
         with self.connect() as db:

@@ -12,7 +12,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from room_alignment.domain import digest_json
+from room_alignment.domain import DomainError, digest_json
 from room_alignment.models import MediaRecord
 from room_alignment.render import (
     CanonicalRenderManager,
@@ -167,6 +167,59 @@ class CanonicalRenderTests(unittest.TestCase):
         self.assertEqual(first["planDigest"], second["planDigest"])
         self.assertEqual(first["id"], second["id"])
 
+    def test_render_normalization_rejects_invalid_dimensions_and_frame_rates(self):
+        invalid_settings = [
+            {"width": 15},
+            {"height": 15},
+            {"frameRate": 0},
+            {"frameRate": 241},
+            {"frameRate": float("nan")},
+            {"width": "1920"},
+        ]
+        for index, invalid in enumerate(invalid_settings):
+            with self.subTest(invalid=invalid), self.assertRaises(DomainError) as raised:
+                build_render_plan(
+                    self.store,
+                    self.project["id"],
+                    {
+                        "outputGrantId": self.output_grant_id,
+                        "filename": f"invalid-{index}.mp4",
+                        "profile": "COMPATIBLE",
+                        **invalid,
+                    },
+                )
+            self.assertEqual(raised.exception.code, "VALIDATION_FAILED")
+
+    def test_reviewed_plan_rejects_a_source_rename_instead_of_following_asset_path(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "renamed.mp4", "profile": "COMPATIBLE"},
+        )
+        renamed_path = self.media_path.with_name("source-renamed.mp4")
+        self.media_path.rename(renamed_path)
+        values, evidence, warning = probe(renamed_path)
+        self.assertIsNone(warning)
+        scan = self.store.begin_scan(self.project["libraryId"], "FULL")
+        record = MediaRecord(
+            "path-derived-renamed-asset",
+            self.project["libraryId"],
+            renamed_path.name,
+            renamed_path.stat().st_size,
+            renamed_path.stat().st_mtime_ns,
+            camera="Door",
+            evidence=evidence,
+            fingerprint=quick_fingerprint(renamed_path),
+            **values,
+        )
+        self.store.save_media_batch(scan["id"], [record])
+        self.store.scan_progress(scan["id"])
+        self.store.finish_scan(scan["id"], "SUCCEEDED", {"videos": 1})
+        self.assertEqual(self.store.media_record("asset")["relative_path"], renamed_path.name)
+        with self.assertRaises(DomainError) as raised:
+            CanonicalRenderManager(self.store)._validate_sources(plan)
+        self.assertEqual(raised.exception.code, "SOURCE_CHANGED")
+
     def test_archival_profile_declares_and_builds_lossless_output(self):
         plan = build_render_plan(
             self.store,
@@ -210,6 +263,62 @@ class CanonicalRenderTests(unittest.TestCase):
         manager._run(started["job"]["id"], started["artifact"]["id"], plan)
         self.assertEqual(self.store.job(started["job"]["id"])["status"], "CANCELED")
         self.assertFalse((self.output / "cancel.mp4").exists())
+
+    def test_cancel_during_promotion_removes_the_output_pair(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "late-cancel.mp4", "profile": "COMPATIBLE"},
+        )
+        self.store.attest_review(plan["id"], plan["warningCodes"])
+        manager = CanonicalRenderManager(self.store)
+        with patch("room_alignment.render.threading.Thread.start"):
+            started = manager.start(plan["id"])
+        real_replace = __import__("os").replace
+        canceled = False
+
+        def cancel_then_replace(source, destination):
+            nonlocal canceled
+            if not canceled:
+                canceled = True
+                manager.cancel(started["job"]["id"])
+            return real_replace(source, destination)
+
+        with patch("room_alignment.render.os.replace", side_effect=cancel_then_replace):
+            manager._run(started["job"]["id"], started["artifact"]["id"], plan)
+        self.assertEqual(self.store.job(started["job"]["id"])["status"], "CANCELED")
+        self.assertEqual(self.store.artifact(started["artifact"]["id"])["status"], "CANCELED")
+        self.assertFalse((self.output / "late-cancel.mp4").exists())
+        self.assertFalse((self.output / "late-cancel.mp4.manifest.json").exists())
+
+    def test_output_grant_revocation_during_promotion_removes_the_output_pair(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "late-revoke.mp4", "profile": "COMPATIBLE"},
+        )
+        self.store.attest_review(plan["id"], plan["warningCodes"])
+        manager = CanonicalRenderManager(self.store)
+        with patch("room_alignment.render.threading.Thread.start"):
+            started = manager.start(plan["id"])
+        real_replace = __import__("os").replace
+        revoked = False
+
+        def revoke_then_replace(source, destination):
+            nonlocal revoked
+            if not revoked:
+                revoked = True
+                self.store.revoke_grant(self.output_grant_id)
+            return real_replace(source, destination)
+
+        with patch("room_alignment.render.os.replace", side_effect=revoke_then_replace):
+            manager._run(started["job"]["id"], started["artifact"]["id"], plan)
+        job = self.store.job(started["job"]["id"])
+        self.assertEqual(job["status"], "FAILED")
+        self.assertEqual(job["errorCode"], "GRANT_REQUIRED")
+        self.assertEqual(self.store.artifact(started["artifact"]["id"])["status"], "FAILED")
+        self.assertFalse((self.output / "late-revoke.mp4").exists())
+        self.assertFalse((self.output / "late-revoke.mp4.manifest.json").exists())
 
     def test_output_grant_revocation_stops_queued_render_as_failed(self):
         plan = build_render_plan(

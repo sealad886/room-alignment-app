@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import errno
 import json
+import math
 import os
 import signal
 import shutil
@@ -315,10 +316,25 @@ def build_render_plan(
                 }
             )
     first_video = assets.get(compiled["videoSlices"][0]["assetId"]) if compiled["videoSlices"] else {}
+    width = settings.get("width", first_video.get("width") or 1920)
+    height = settings.get("height", first_video.get("height") or 1080)
+    frame_rate = settings.get("frameRate", first_video.get("frame_rate") or 30)
+    if isinstance(width, bool) or not isinstance(width, int) or width < 16:
+        raise DomainError("VALIDATION_FAILED", "Render width must be an integer of at least 16 pixels")
+    if isinstance(height, bool) or not isinstance(height, int) or height < 16:
+        raise DomainError("VALIDATION_FAILED", "Render height must be an integer of at least 16 pixels")
+    if (
+        isinstance(frame_rate, bool)
+        or not isinstance(frame_rate, (int, float))
+        or not math.isfinite(float(frame_rate))
+        or float(frame_rate) <= 0
+        or float(frame_rate) > 240
+    ):
+        raise DomainError("VALIDATION_FAILED", "Render frameRate must be finite, positive, and at most 240")
     normalization = {
-        "width": int(settings.get("width") or first_video.get("width") or 1920),
-        "height": int(settings.get("height") or first_video.get("height") or 1080),
-        "frameRate": float(settings.get("frameRate") or first_video.get("frame_rate") or 30),
+        "width": width,
+        "height": height,
+        "frameRate": float(frame_rate),
         "frameRatePolicy": "CONSTANT",
         "aspectPolicy": "FIT_AND_PAD",
         "rotationPolicy": "APPLY_DISPLAY_ROTATION",
@@ -446,14 +462,13 @@ def build_v1_ffmpeg_command(store: Store, plan: dict[str, Any], output: Path) ->
         raise DomainError("COVERAGE_INVALID", "Render plan has blocking issues")
     project = store.project(plan["projectId"])
     root = store.library_root(project["libraryId"])
-    assets = store.media_records(item["assetId"] for item in project["clips"])
+    planned_paths = {item["assetId"]: item["libraryRelativePath"] for item in plan["sources"]}
     video = plan["compiledProgram"]["videoSlices"]
     audio = plan["compiledProgram"]["audioSlices"]
     command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
     filters: list[str] = []
     for item in video:
-        media = assets[item["assetId"]]
-        source = _safe_source(root, media["relative_path"])
+        source = _planned_source(root, planned_paths, item["assetId"])
         source_duration = (item["sourceEndUs"] - item["sourceStartUs"]) / 1_000_000
         command += ["-ss", _seconds(item["sourceStartUs"]), "-t", f"{source_duration:.6f}", "-i", str(source)]
     audio_base = len(video)
@@ -462,8 +477,7 @@ def build_v1_ffmpeg_command(store: Store, plan: dict[str, Any], output: Path) ->
         if item.get("synthetic"):
             command += ["-f", "lavfi", "-t", f"{output_duration:.6f}", "-i", "anullsrc=r=48000:cl=stereo"]
         else:
-            media = assets[item["assetId"]]
-            source = _safe_source(root, media["relative_path"])
+            source = _planned_source(root, planned_paths, item["assetId"])
             source_start = int(item["sourceStartUs"])
             source_duration = (item["sourceEndUs"] - item["sourceStartUs"]) / 1_000_000
             command += ["-ss", _seconds(source_start), "-t", f"{source_duration:.6f}", "-i", str(source)]
@@ -507,6 +521,13 @@ def build_v1_ffmpeg_command(store: Store, plan: dict[str, Any], output: Path) ->
         command += ["-movflags", "+faststart"]
     command.append(str(output))
     return command
+
+
+def _planned_source(root: Path, planned_paths: dict[str, str], asset_id: str) -> Path:
+    relative = planned_paths.get(asset_id)
+    if relative is None:
+        raise DomainError("PLAN_STALE", "Selected source is absent from the immutable render plan")
+    return _safe_source(root, relative)
 
 
 class CanonicalRenderManager:
@@ -575,6 +596,8 @@ class CanonicalRenderManager:
         token = artifact_id.rsplit("_", 1)[-1]
         partial = final.with_name(f".{final.stem}.partial.{token}{final.suffix}")
         manifest_partial = final.with_name(f".{manifest_final.name}.partial.{token}")
+        video_promoted = False
+        manifest_promoted = False
         try:
             if self.store.job(job_id)["status"] == "CANCEL_REQUESTED":
                 self._finish_cancellation(job_id, artifact_id, "before render process launch")
@@ -644,31 +667,58 @@ class CanonicalRenderManager:
             manifest_digest = full_digest(manifest_partial)
             if final.exists() or manifest_final.exists():
                 raise DomainError("DESTINATION_EXISTS", "Output destination changed during render")
+            if self._finalization_stopped(job_id, artifact, plan, final):
+                _unlink_exact(partial)
+                _unlink_exact(manifest_partial)
+                self._finish_cancellation(job_id, artifact_id, "before artifact promotion")
+                return
             os.replace(partial, final)
+            video_promoted = True
+            if self._finalization_stopped(job_id, artifact, plan, final):
+                _unlink_exact(final)
+                video_promoted = False
+                _unlink_exact(manifest_partial)
+                self._finish_cancellation(job_id, artifact_id, "after video promotion")
+                return
             os.replace(manifest_partial, manifest_final)
-            self.store.update_artifact(
-                artifact_id,
-                status="COMPLETE",
-                video_digest=video_digest,
-                manifest_digest=manifest_digest,
-                details_json={"videoBytes": final.stat().st_size, "manifestBytes": manifest_final.stat().st_size},
-            )
-            self.store.transition_job(
+            manifest_promoted = True
+            if self._finalization_stopped(job_id, artifact, plan, final):
+                _unlink_exact(final)
+                video_promoted = False
+                _unlink_exact(manifest_final)
+                manifest_promoted = False
+                self._finish_cancellation(job_id, artifact_id, "after manifest promotion")
+                return
+            completed = self.store.complete_render_artifact(
                 job_id,
-                "SUCCEEDED",
-                1,
-                "Video and provenance manifest complete",
-                result={"artifactId": artifact_id},
+                artifact_id,
+                video_digest,
+                manifest_digest,
+                {"videoBytes": final.stat().st_size, "manifestBytes": manifest_final.stat().st_size},
             )
+            if not completed:
+                _unlink_exact(final)
+                video_promoted = False
+                _unlink_exact(manifest_final)
+                manifest_promoted = False
+                self._finish_cancellation(job_id, artifact_id, "before durable completion")
         except DomainError as error:
             _unlink_exact(partial)
             _unlink_exact(manifest_partial)
+            if video_promoted:
+                _unlink_exact(final)
+            if manifest_promoted:
+                _unlink_exact(manifest_final)
             artifact_status = "FAILED_RECOVERABLE" if final.exists() or manifest_final.exists() else "FAILED"
             self.store.update_artifact(artifact_id, status=artifact_status, details_json={"errorCode": error.code})
             self.store.transition_job(job_id, "FAILED", 0, str(error), error_code=error.code)
         except Exception as error:
             _unlink_exact(partial)
             _unlink_exact(manifest_partial)
+            if video_promoted:
+                _unlink_exact(final)
+            if manifest_promoted:
+                _unlink_exact(manifest_final)
             artifact_status = "FAILED_RECOVERABLE" if final.exists() or manifest_final.exists() else "FAILED"
             self.store.update_artifact(artifact_id, status=artifact_status, details_json={"error": type(error).__name__})
             self.store.transition_job(job_id, "FAILED", 0, str(error)[:500], error_code="INTERNAL_ERROR")
@@ -688,12 +738,29 @@ class CanonicalRenderManager:
         self.store.update_artifact(artifact_id, status="CANCELED")
         self.store.transition_job(job_id, "CANCELED", 0, f"Canceled; {detail}")
 
+    def _finalization_stopped(
+        self,
+        job_id: str,
+        artifact: dict[str, Any],
+        plan: dict[str, Any],
+        expected_final: Path,
+    ) -> bool:
+        if self.store.job(job_id)["status"] == "CANCEL_REQUESTED":
+            return True
+        self._validate_sources(plan)
+        current_final = self.store.output_path(artifact["outputGrantId"], artifact["filename"])
+        if current_final != expected_final:
+            raise DomainError("PLAN_STALE", "Output destination changed during finalization")
+        return False
+
     def _validate_sources(self, plan: dict[str, Any]) -> None:
         project = self.store.project(plan["projectId"])
         root = self.store.library_root(project["libraryId"])
         for expected in plan["sources"]:
             media = self.store.media_record(expected["assetId"])
-            source = _safe_source(root, media["relative_path"])
+            if media["relative_path"] != expected["libraryRelativePath"]:
+                raise DomainError("SOURCE_CHANGED", "A selected source path changed after review")
+            source = _safe_source(root, expected["libraryRelativePath"])
             stat = source.stat()
             if stat.st_size != expected["size"] or full_digest(source) != expected["sha256"]:
                 raise DomainError("SOURCE_CHANGED", "A selected source changed after review")
