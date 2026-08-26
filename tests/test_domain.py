@@ -256,6 +256,162 @@ class CommandTests(unittest.TestCase):
         )
         self.assertEqual(changed["videoBlocks"][0]["startUs"], 500_000)
         self.assertEqual(changed["videoBlocks"][0]["endUs"], 5_500_000)
+        self.assertEqual(changed["audioBlocks"][0]["startUs"], 500_000)
+        self.assertEqual(changed["audioBlocks"][0]["endUs"], 5_500_000)
+        compiled = compile_program(changed, {"a": media})
+        self.assertEqual(
+            {(item["code"], item["startUs"], item["endUs"]) for item in compiled["issues"]},
+            {("VIDEO_GAP", 0, 500_000), ("AUDIO_GAP", 0, 500_000)},
+        )
+        self.assertEqual(compiled["audioSlices"][0]["sourceStartUs"], 0)
+        self.assertEqual(compiled["audioSlices"][0]["sourceEndUs"], 5_000_000)
+
+    def test_source_time_sync_moves_fixed_audio_but_keeps_silence_on_output_clock(self):
+        media = asset("a", "Door", 5_000_000)
+        for mode in ("FIXED_SOURCE", "FIXED_CLIP"):
+            with self.subTest(mode=mode):
+                project = new_project("Event", "lib", [media], "project")
+                project["anchorMode"] = "SOURCE_TIME"
+                project["audioBlocks"][0].update(
+                    mode=mode,
+                    logicalSourceId=project["logicalSources"][0]["id"] if mode == "FIXED_SOURCE" else None,
+                    clipId=project["clips"][0]["id"] if mode == "FIXED_CLIP" else None,
+                )
+                changed = apply_command(
+                    project,
+                    "SetSyncTransform",
+                    {
+                        "clipId": project["clips"][0]["id"],
+                        "sync": {"anchorSourceUs": 0, "anchorOutputUs": 250_000, "ratePpm": 0},
+                    },
+                    {"a": media},
+                )
+                self.assertEqual(
+                    (changed["audioBlocks"][0]["startUs"], changed["audioBlocks"][0]["endUs"]),
+                    (250_000, 5_250_000),
+                )
+                compiled = compile_program(changed, {"a": media})
+                self.assertEqual(
+                    {(item["code"], item["startUs"], item["endUs"]) for item in compiled["issues"]},
+                    {("VIDEO_GAP", 0, 250_000), ("AUDIO_GAP", 0, 250_000)},
+                )
+                self.assertEqual(
+                    (compiled["audioSlices"][0]["sourceStartUs"], compiled["audioSlices"][0]["sourceEndUs"]),
+                    (0, 5_000_000),
+                )
+
+        silence = new_project("Event", "lib", [media], "project-silence")
+        silence["anchorMode"] = "SOURCE_TIME"
+        silence["audioBlocks"][0].update(mode="SILENCE", logicalSourceId=None, clipId=None)
+        changed_silence = apply_command(
+            silence,
+            "SetSyncTransform",
+            {
+                "clipId": silence["clips"][0]["id"],
+                "sync": {"anchorSourceUs": 0, "anchorOutputUs": 250_000, "ratePpm": 0},
+            },
+            {"a": media},
+        )
+        self.assertEqual(
+            (changed_silence["audioBlocks"][0]["startUs"], changed_silence["audioBlocks"][0]["endUs"]),
+            (0, 5_000_000),
+        )
+
+    def test_source_time_sync_moves_only_boundaries_owned_by_selected_clip(self):
+        first = asset("a", "Door", 5_000_000)
+        second = asset("b", "Door", 5_000_000)
+        project = new_project("Event", "lib", [first, second], "project")
+        source_id = project["clips"][0]["logicalSourceId"]
+        second_source_id = project["clips"][1]["logicalSourceId"]
+        project["clips"][1]["logicalSourceId"] = source_id
+        project["logicalSources"] = [
+            source
+            for source in project["logicalSources"]
+            if source["id"] != second_source_id
+        ]
+        project["clips"][1]["sync"]["anchorOutputUs"] = 5_000_000
+        project["anchorMode"] = "SOURCE_TIME"
+        project["videoBlocks"] = [
+            {
+                "id": "video-a",
+                "startUs": 0,
+                "endUs": 5_000_000,
+                "logicalSourceId": source_id,
+                "pinnedClipId": project["clips"][0]["id"],
+            },
+            {
+                "id": "video-b",
+                "startUs": 5_000_000,
+                "endUs": 10_000_000,
+                "logicalSourceId": source_id,
+                "pinnedClipId": project["clips"][1]["id"],
+            },
+        ]
+        project["audioBlocks"] = [
+            {
+                "id": "audio-follow",
+                "startUs": 0,
+                "endUs": 10_000_000,
+                "mode": "FOLLOW_VIDEO",
+                "logicalSourceId": None,
+                "clipId": None,
+                "offsetUs": 0,
+                "ratePpm": 0,
+            }
+        ]
+
+        changed = apply_command(
+            project,
+            "SetSyncTransform",
+            {
+                "clipId": project["clips"][1]["id"],
+                "sync": {
+                    "anchorSourceUs": 0,
+                    "anchorOutputUs": 5_500_000,
+                    "ratePpm": 0,
+                },
+            },
+            {"a": first, "b": second},
+        )
+
+        self.assertEqual(
+            [(block["startUs"], block["endUs"]) for block in changed["videoBlocks"]],
+            [(0, 5_000_000), (5_500_000, 10_500_000)],
+        )
+        self.assertEqual(
+            (changed["audioBlocks"][0]["startUs"], changed["audioBlocks"][0]["endUs"]),
+            (0, 10_500_000),
+        )
+
+    def test_accepted_alignment_suggestion_uses_asset_aware_source_anchoring(self):
+        media = asset("a", "Door", 5_000_000)
+        project = new_project("Event", "lib", [media], "project")
+        project["anchorMode"] = "SOURCE_TIME"
+
+        changed = apply_command(
+            project,
+            "AcceptAlignmentSuggestion",
+            {
+                "suggestionId": "suggestion-1",
+                "clipId": project["clips"][0]["id"],
+                "sync": {
+                    "anchorSourceUs": 0,
+                    "anchorOutputUs": 125_000,
+                    "ratePpm": 0,
+                },
+                "confirmDrift": False,
+            },
+            {"a": media},
+        )
+
+        self.assertEqual(
+            (changed["videoBlocks"][0]["startUs"], changed["videoBlocks"][0]["endUs"]),
+            (125_000, 5_125_000),
+        )
+        self.assertEqual(
+            (changed["audioBlocks"][0]["startUs"], changed["audioBlocks"][0]["endUs"]),
+            (125_000, 5_125_000),
+        )
 
     def test_nonzero_drift_requires_explicit_confirmation(self):
         media = asset("a", "Door", 5_000_000)

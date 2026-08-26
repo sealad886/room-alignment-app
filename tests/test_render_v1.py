@@ -12,11 +12,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from room_alignment.domain import DomainError, digest_json
+from room_alignment.domain import DomainError, digest_json, opaque_id
 from room_alignment.models import MediaRecord
 from room_alignment.render import (
     CanonicalRenderManager,
     RunningJob,
+    _promote_no_replace,
     build_render_plan,
     build_v1_ffmpeg_command,
     build_v1_manifest,
@@ -267,6 +268,69 @@ class CanonicalRenderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Provenance"):
             self.store.attest_review(plan["id"], plan["warningCodes"])
 
+    def test_review_attestation_serializes_project_validation_and_update(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "atomic-review.mp4", "profile": "COMPATIBLE"},
+        )
+        attestation_entered = threading.Event()
+        release_attestation = threading.Event()
+        command_done = threading.Event()
+        failures: list[BaseException] = []
+
+        def blocking_id(prefix):
+            if prefix == "review":
+                attestation_entered.set()
+                if not release_attestation.wait(2):
+                    raise RuntimeError("test did not release attestation")
+            return opaque_id(prefix)
+
+        def attest():
+            try:
+                self.store.attest_review(plan["id"], plan["warningCodes"])
+            except BaseException as error:  # pragma: no cover - reported by the parent assertion
+                failures.append(error)
+
+        def edit_project():
+            try:
+                self.store.apply_project_command(
+                    self.project["id"],
+                    {
+                        "commandId": "edit-during-attestation",
+                        "expectedRevision": self.project["revision"],
+                        "commandType": "UpdateProjectMetadata",
+                        "payload": {"name": "Concurrent edit retained"},
+                    },
+                )
+            except BaseException as error:  # pragma: no cover - reported by the parent assertion
+                failures.append(error)
+            finally:
+                command_done.set()
+
+        with patch("room_alignment.store.opaque_id", side_effect=blocking_id):
+            attest_thread = threading.Thread(target=attest)
+            attest_thread.start()
+            self.assertTrue(attestation_entered.wait(1))
+            command_thread = threading.Thread(target=edit_project)
+            command_thread.start()
+            self.assertFalse(command_done.wait(0.2), "project edit bypassed attestation transaction")
+            release_attestation.set()
+            attest_thread.join(2)
+            command_thread.join(2)
+
+        self.assertFalse(attest_thread.is_alive())
+        self.assertFalse(command_thread.is_alive())
+        self.assertEqual(failures, [])
+        current = self.store.project(self.project["id"])
+        self.assertEqual(current["revision"], self.project["revision"] + 1)
+        self.assertEqual(current["name"], "Concurrent edit retained")
+        self.assertIsNone(current["review"])
+        self.assertEqual(
+            self.store.project_revision(self.project["id"], current["revision"])["name"],
+            "Concurrent edit retained",
+        )
+
     def test_cancel_before_process_launch_is_terminal_and_creates_no_output(self):
         plan = build_render_plan(
             self.store,
@@ -283,7 +347,7 @@ class CanonicalRenderTests(unittest.TestCase):
         self.assertEqual(self.store.job(started["job"]["id"])["status"], "CANCELED")
         self.assertFalse((self.output / "cancel.mp4").exists())
 
-    def test_cancel_during_promotion_removes_the_output_pair(self):
+    def test_cancel_during_promotion_preserves_recoverable_output(self):
         plan = build_render_plan(
             self.store,
             self.project["id"],
@@ -293,24 +357,24 @@ class CanonicalRenderTests(unittest.TestCase):
         manager = CanonicalRenderManager(self.store)
         with patch("room_alignment.render.threading.Thread.start"):
             started = manager.start(plan["id"])
-        real_replace = __import__("os").replace
+        real_promote = _promote_no_replace
         canceled = False
 
-        def cancel_then_replace(source, destination):
+        def cancel_then_promote(source, destination):
             nonlocal canceled
             if not canceled:
                 canceled = True
                 manager.cancel(started["job"]["id"])
-            return real_replace(source, destination)
+            return real_promote(source, destination)
 
-        with patch("room_alignment.render.os.replace", side_effect=cancel_then_replace):
+        with patch("room_alignment.render._promote_no_replace", side_effect=cancel_then_promote):
             manager._run(started["job"]["id"], started["artifact"]["id"], plan)
         self.assertEqual(self.store.job(started["job"]["id"])["status"], "CANCELED")
-        self.assertEqual(self.store.artifact(started["artifact"]["id"])["status"], "CANCELED")
-        self.assertFalse((self.output / "late-cancel.mp4").exists())
+        self.assertEqual(self.store.artifact(started["artifact"]["id"])["status"], "FAILED_RECOVERABLE")
+        self.assertTrue((self.output / "late-cancel.mp4").exists())
         self.assertFalse((self.output / "late-cancel.mp4.manifest.json").exists())
 
-    def test_output_grant_revocation_during_promotion_removes_the_output_pair(self):
+    def test_output_grant_revocation_during_promotion_preserves_recoverable_output(self):
         plan = build_render_plan(
             self.store,
             self.project["id"],
@@ -320,24 +384,115 @@ class CanonicalRenderTests(unittest.TestCase):
         manager = CanonicalRenderManager(self.store)
         with patch("room_alignment.render.threading.Thread.start"):
             started = manager.start(plan["id"])
-        real_replace = __import__("os").replace
+        real_promote = _promote_no_replace
         revoked = False
 
-        def revoke_then_replace(source, destination):
+        def revoke_then_promote(source, destination):
             nonlocal revoked
             if not revoked:
                 revoked = True
                 self.store.revoke_grant(self.output_grant_id)
-            return real_replace(source, destination)
+            return real_promote(source, destination)
 
-        with patch("room_alignment.render.os.replace", side_effect=revoke_then_replace):
+        with patch("room_alignment.render._promote_no_replace", side_effect=revoke_then_promote):
             manager._run(started["job"]["id"], started["artifact"]["id"], plan)
         job = self.store.job(started["job"]["id"])
         self.assertEqual(job["status"], "FAILED")
         self.assertEqual(job["errorCode"], "GRANT_REQUIRED")
-        self.assertEqual(self.store.artifact(started["artifact"]["id"])["status"], "FAILED")
-        self.assertFalse((self.output / "late-revoke.mp4").exists())
+        self.assertEqual(self.store.artifact(started["artifact"]["id"])["status"], "FAILED_RECOVERABLE")
+        self.assertTrue((self.output / "late-revoke.mp4").exists())
         self.assertFalse((self.output / "late-revoke.mp4.manifest.json").exists())
+
+    def test_late_video_collision_is_never_overwritten(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "video-collision.mp4", "profile": "COMPATIBLE"},
+        )
+        self.store.attest_review(plan["id"], plan["warningCodes"])
+        manager = CanonicalRenderManager(self.store)
+        with patch("room_alignment.render.threading.Thread.start"):
+            started = manager.start(plan["id"])
+        final = self.output / "video-collision.mp4"
+        sentinel = b"external video"
+        real_promote = _promote_no_replace
+
+        def collide_then_promote(source, destination):
+            final.write_bytes(sentinel)
+            return real_promote(source, destination)
+
+        with patch("room_alignment.render._promote_no_replace", side_effect=collide_then_promote):
+            manager._run(started["job"]["id"], started["artifact"]["id"], plan)
+        self.assertEqual(final.read_bytes(), sentinel)
+        self.assertEqual(self.store.job(started["job"]["id"])["errorCode"], "DESTINATION_EXISTS")
+        self.assertEqual(self.store.artifact(started["artifact"]["id"])["status"], "FAILED")
+        self.assertFalse((self.output / "video-collision.mp4.manifest.json").exists())
+
+    def test_late_manifest_collision_preserves_both_visible_files_as_recoverable(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "manifest-collision.mp4", "profile": "COMPATIBLE"},
+        )
+        self.store.attest_review(plan["id"], plan["warningCodes"])
+        manager = CanonicalRenderManager(self.store)
+        with patch("room_alignment.render.threading.Thread.start"):
+            started = manager.start(plan["id"])
+        manifest = self.output / "manifest-collision.mp4.manifest.json"
+        sentinel = b"external manifest"
+        real_promote = _promote_no_replace
+        calls = 0
+
+        def collide_on_manifest(source, destination):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                manifest.write_bytes(sentinel)
+            return real_promote(source, destination)
+
+        with patch("room_alignment.render._promote_no_replace", side_effect=collide_on_manifest):
+            manager._run(started["job"]["id"], started["artifact"]["id"], plan)
+        self.assertTrue((self.output / "manifest-collision.mp4").exists())
+        self.assertEqual(manifest.read_bytes(), sentinel)
+        self.assertEqual(self.store.job(started["job"]["id"])["errorCode"], "DESTINATION_EXISTS")
+        self.assertEqual(
+            self.store.artifact(started["artifact"]["id"])["status"], "FAILED_RECOVERABLE"
+        )
+
+    def test_published_output_mutation_before_completion_is_detected(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {
+                "outputGrantId": self.output_grant_id,
+                "filename": "mutated-after-publish.mp4",
+                "profile": "COMPATIBLE",
+            },
+        )
+        self.store.attest_review(plan["id"], plan["warningCodes"])
+        manager = CanonicalRenderManager(self.store)
+        with patch("room_alignment.render.threading.Thread.start"):
+            started = manager.start(plan["id"])
+        final = self.output / "mutated-after-publish.mp4"
+        real_stopped = manager._finalization_stopped
+        checks = 0
+
+        def mutate_after_manifest(*args, **kwargs):
+            nonlocal checks
+            checks += 1
+            stopped = real_stopped(*args, **kwargs)
+            if checks == 3:
+                final.write_bytes(b"external replacement")
+            return stopped
+
+        with patch.object(manager, "_finalization_stopped", side_effect=mutate_after_manifest):
+            manager._run(started["job"]["id"], started["artifact"]["id"], plan)
+
+        self.assertEqual(self.store.job(started["job"]["id"])["errorCode"], "DESTINATION_EXISTS")
+        self.assertEqual(
+            self.store.artifact(started["artifact"]["id"])["status"], "FAILED_RECOVERABLE"
+        )
+        self.assertEqual(final.read_bytes(), b"external replacement")
 
     def test_output_grant_revocation_stops_queued_render_as_failed(self):
         plan = build_render_plan(

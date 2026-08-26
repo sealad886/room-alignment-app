@@ -1830,26 +1830,42 @@ class Store:
             return json.loads(row[0])
 
     def attest_review(self, plan_id: str, warnings: list[str]) -> dict[str, Any]:
-        plan = self.render_plan(plan_id)
-        project = self.project(plan["projectId"])
-        if project["revision"] != plan["projectRevision"]:
-            raise DomainError("PLAN_STALE", "Project changed after render plan was created")
-        if int(project.get("provenanceRevision", 0)) != int(plan["provenanceRevision"]):
-            raise DomainError("PLAN_STALE", "Provenance resolution changed after render plan was created")
-        if set(plan.get("warningCodes", [])) - set(warnings):
-            raise DomainError("VALIDATION_FAILED", "Every render-plan warning must be acknowledged")
-        attestation = {
-            "id": opaque_id("review"),
-            "renderPlanId": plan_id,
-            "projectId": plan["projectId"],
-            "projectRevision": plan["projectRevision"],
-            "planDigest": plan["planDigest"],
-            "sourceSetDigest": plan["sourceSetDigest"],
-            "provenanceRevision": plan["provenanceRevision"],
-            "acknowledgedWarnings": sorted(set(warnings)),
-            "createdAt": now_iso(),
-        }
+        acknowledged = sorted(set(warnings))
         with self._lock, self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            plan_row = db.execute(
+                "SELECT plan_json FROM render_plans WHERE id=?", (plan_id,)
+            ).fetchone()
+            if not plan_row:
+                raise DomainError("NOT_FOUND", "Render plan not found")
+            plan = json.loads(plan_row["plan_json"])
+            project_row = db.execute(
+                "SELECT revision,document_json FROM projects WHERE id=?", (plan["projectId"],)
+            ).fetchone()
+            if not project_row:
+                raise DomainError("NOT_FOUND", "Project not found")
+            project = self._migrate_legacy_project(json.loads(project_row["document_json"]))
+            current_revision = int(project_row["revision"])
+            if int(project["revision"]) != current_revision:
+                raise DomainError("INTERNAL_ERROR", "Project revision storage is inconsistent")
+            if current_revision != int(plan["projectRevision"]):
+                raise DomainError("PLAN_STALE", "Project changed after render plan was created")
+            if int(project.get("provenanceRevision", 0)) != int(plan["provenanceRevision"]):
+                raise DomainError("PLAN_STALE", "Provenance resolution changed after render plan was created")
+            if set(plan.get("warningCodes", [])) - set(acknowledged):
+                raise DomainError("VALIDATION_FAILED", "Every render-plan warning must be acknowledged")
+            created_at = now_iso()
+            attestation = {
+                "id": opaque_id("review"),
+                "renderPlanId": plan_id,
+                "projectId": plan["projectId"],
+                "projectRevision": plan["projectRevision"],
+                "planDigest": plan["planDigest"],
+                "sourceSetDigest": plan["sourceSetDigest"],
+                "provenanceRevision": plan["provenanceRevision"],
+                "acknowledgedWarnings": acknowledged,
+                "createdAt": created_at,
+            }
             db.execute(
                 "INSERT INTO review_attestations(id,render_plan_id,project_id,project_revision,plan_digest,source_set_digest,"
                 "provenance_revision,warnings_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -1866,10 +1882,13 @@ class Store:
                 ),
             )
             project["review"] = attestation
-            db.execute(
-                "UPDATE projects SET document_json=?,updated_at=? WHERE id=?",
-                (json.dumps(project), now_iso(), project["id"]),
+            project["updatedAt"] = created_at
+            updated = db.execute(
+                "UPDATE projects SET document_json=?,updated_at=? WHERE id=? AND revision=?",
+                (json.dumps(project), created_at, project["id"], current_revision),
             )
+            if updated.rowcount != 1:
+                raise DomainError("PLAN_STALE", "Project changed while review was being recorded")
         return attestation
 
     def review_for_plan(self, plan_id: str) -> dict[str, Any] | None:

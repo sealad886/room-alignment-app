@@ -20,6 +20,7 @@ const state = {
   compiled: null,
   sources: [],
   selectedSource: 0,
+  selectedClipId: null,
   selectedSegment: 0,
   playhead: 30,
   playing: false,
@@ -36,6 +37,8 @@ const state = {
   suggestions: [],
   outputGrantByDirectory: new Map(),
   eventReconnectAttempts: 0,
+  reviewPreparationVersion: 0,
+  reviewPreparationPromise: null,
 };
 
 function safe(value) {
@@ -116,6 +119,22 @@ function sourceForBlock(block) {
 
 function clipById(clipId) {
   return state.project?.clips.find(clip => clip.id === clipId);
+}
+
+function selectedAlignmentClip(source = state.sources[state.selectedSource]) {
+  const clip = source?.clips.find(item => item.id === state.selectedClipId) || source?.clips[0] || null;
+  state.selectedClipId = clip?.id || null;
+  return clip;
+}
+
+function invalidateReviewPreparation() {
+  state.reviewPreparationVersion += 1;
+  state.renderPlan = null;
+  state.artifact = null;
+  const reviewed = $("#reviewed-check");
+  if (reviewed) reviewed.checked = false;
+  const renderButton = $("#render-video");
+  if (renderButton) renderButton.disabled = true;
 }
 
 function showView(view) {
@@ -292,9 +311,9 @@ async function openProject(projectSummary) {
     state.compiled = await client.getCompiledProgram({projectId: project.id});
     state.durationUs = Math.max(1, state.compiled.durationUs);
     state.selectedSource = 0;
+    state.selectedClipId = null;
     state.selectedSegment = 0;
-    state.renderPlan = null;
-    state.artifact = null;
+    invalidateReviewPreparation();
     state.suggestions = await client.listSuggestions({projectId: project.id});
     deriveSources();
     $$(".workflow").forEach(button => { button.disabled = false; });
@@ -325,6 +344,7 @@ function deriveSources() {
     };
   });
   if (state.selectedSource >= state.sources.length) state.selectedSource = 0;
+  selectedAlignmentClip();
 }
 
 function renderSources() {
@@ -347,7 +367,9 @@ function renderSources() {
   $("#audio-source").innerHTML = `<option value="follow">Follow Program Video</option><option value="silence">Intentional silence</option>${state.sources.map(source => `<option value="source:${safe(source.id)}">Fixed source · ${safe(source.label)}</option>`).join("")}${fixedClipOptions}`;
   $$('[data-source]').forEach(button => {
     button.onclick = () => {
-      state.selectedSource = Number(button.dataset.source);
+      const nextSource = Number(button.dataset.source);
+      if (nextSource !== state.selectedSource) state.selectedClipId = null;
+      state.selectedSource = nextSource;
       renderSources();
       renderSourceInspector();
       renderProgram();
@@ -359,7 +381,9 @@ function renderSources() {
       event.preventDefault();
       const index = state.sources.findIndex(source => source.id === track.dataset.dragSource);
       if (index < 0) return;
+      if (index !== state.selectedSource) state.selectedClipId = null;
       state.selectedSource = index;
+      renderClipSelector(state.sources[index]);
       renderSourceInspector();
       const direction = event.key === "ArrowLeft" ? -1 : 1;
       $("#sync-offset").value = Number($("#sync-offset").value) + direction * (event.shiftKey ? 100 : 10);
@@ -368,7 +392,9 @@ function renderSources() {
     track.onpointerdown = event => {
       const index = state.sources.findIndex(source => source.id === track.dataset.dragSource);
       if (index < 0) return;
+      if (index !== state.selectedSource) state.selectedClipId = null;
       state.selectedSource = index;
+      renderClipSelector(state.sources[index]);
       renderSourceInspector();
       const startX = event.clientX;
       const startMs = Number($("#sync-offset").value);
@@ -392,14 +418,24 @@ function renderSources() {
   const selected = state.sources[state.selectedSource];
   if (selected) {
     $("#source-label").value = selected.label;
-    const clipOptions = selected.clips.map((clip, index) => `<option value="${safe(clip.id)}">Clip ${index + 1} · ${safe(state.mediaById.get(clip.assetId)?.relative_path || clip.id)}</option>`).join("");
-    $("#manage-clip").innerHTML = clipOptions || '<option value="">No clips assigned</option>';
+    renderClipSelector(selected);
     $("#assign-source").innerHTML = state.sources.filter(source => source.id !== selected.id).map(source => `<option value="${safe(source.id)}">${safe(source.label)}</option>`).join("") || '<option value="">No other source</option>';
     $("#merge-source").innerHTML = $("#assign-source").innerHTML;
     $("#archive-source").disabled = Boolean(selected.clips.length || state.project.videoBlocks.some(block => block.logicalSourceId === selected.id) || state.project.audioBlocks.some(block => block.logicalSourceId === selected.id));
   }
   renderSourceInspector();
   renderSuggestions();
+}
+
+function renderClipSelector(source) {
+  const clipOptions = source.clips.map((clip, index) => `<option value="${safe(clip.id)}">Clip ${index + 1} · ${safe(state.mediaById.get(clip.assetId)?.relative_path || clip.id)}</option>`).join("");
+  $("#manage-clip").innerHTML = clipOptions || '<option value="">No clips assigned</option>';
+  const selectedClip = selectedAlignmentClip(source);
+  $("#manage-clip").value = selectedClip?.id || "";
+  $("#manage-clip").onchange = event => {
+    state.selectedClipId = event.target.value || null;
+    renderSourceInspector();
+  };
 }
 
 function trackMarkup(source) {
@@ -418,15 +454,18 @@ function trackMarkup(source) {
 function renderSourceInspector() {
   const source = state.sources[state.selectedSource];
   if (!source) return;
+  const clip = selectedAlignmentClip(source);
+  const sync = clip?.sync || {anchorOutputUs: 0, ratePpm: 0};
+  const media = clip ? state.mediaById.get(clip.assetId) : null;
   $("#selected-source-name").textContent = source.label;
-  $("#sync-offset").value = Math.round(source.offsetUs / 1000);
-  $("#sync-rate").value = source.ratePpm;
-  const media = source.media[0];
+  $("#source-label").value = source.label;
+  $("#sync-offset").value = Math.round(Number(sync.anchorOutputUs || 0) / 1000);
+  $("#sync-rate").value = Number(sync.ratePpm || 0);
   $("#confidence-label").textContent = media?.captured_at
-    ? `${source.clips.length} clips · timestamp evidence available`
-    : `${source.clips.length} clips · manual timing required`;
-  $("#provenance-panel").innerHTML = source.media.map(provenanceMarkup).join("") + (source.media[0] ? `<form id="provenance-correction"><p class="eyebrow">Revisioned correction</p><label class="field"><span>Field</span><input id="resolution-field" required maxlength="100" placeholder="capturedAt"></label><label class="field"><span>Resolved value</span><input id="resolution-value" required maxlength="500"></label><label class="field"><span>Rationale (optional)</span><input id="resolution-rationale" maxlength="500"></label><button class="btn wide" type="submit">Record correction</button></form>` : "");
-  if ($("#provenance-correction")) $("#provenance-correction").onsubmit = event => recordProvenanceCorrection(event, source.media[0]);
+    ? `Selected clip · timestamp evidence available`
+    : `Selected clip · manual timing required`;
+  $("#provenance-panel").innerHTML = provenanceMarkup(media) + (media ? `<form id="provenance-correction"><p class="eyebrow">Revisioned correction</p><label class="field"><span>Field</span><input id="resolution-field" required maxlength="100" placeholder="capturedAt"></label><label class="field"><span>Resolved value</span><input id="resolution-value" required maxlength="500"></label><label class="field"><span>Rationale (optional)</span><input id="resolution-rationale" maxlength="500"></label><button class="btn wide" type="submit">Record correction</button></form>` : "");
+  if ($("#provenance-correction")) $("#provenance-correction").onsubmit = event => recordProvenanceCorrection(event, media);
 }
 
 function renderSuggestions() {
@@ -459,7 +498,7 @@ async function recordProvenanceCorrection(event, media) {
     state.mediaById.set(media.id, refreshed);
     state.project = await client.getProject({projectId: state.project.id});
     state.compiled = await client.getCompiledProgram({projectId: state.project.id});
-    state.renderPlan = null;
+    invalidateReviewPreparation();
     deriveSources();
     renderSources();
     renderProgram();
@@ -590,7 +629,7 @@ async function command(commandType, payload, {preview = false} = {}) {
     if (preview) return result;
     state.project = result.project;
     state.compiled = await client.getCompiledProgram({projectId: state.project.id});
-    state.renderPlan = null;
+    invalidateReviewPreparation();
     deriveSources();
     renderSources();
     renderProgram();
@@ -707,32 +746,53 @@ function togglePlay() {
 }
 
 async function prepareReview({provisionGrant = false} = {}) {
-  state.renderPlan = null;
-  state.artifact = null;
-  $("#reviewed-check").checked = false;
-  $("#render-video").disabled = true;
+  invalidateReviewPreparation();
+  const request = {
+    version: state.reviewPreparationVersion,
+    provisionGrant,
+    projectId: state.project.id,
+    rawPath: $("#output-path").value.trim(),
+    profile: $("#lossless-check").checked ? "ARCHIVAL_LOSSLESS" : "COMPATIBLE",
+  };
   $("#preflight-heading").textContent = "Building immutable render plan";
   $("#preflight-status").innerHTML = "<strong>Hashing selected sources</strong><p>Review will bind exact source bytes, decisions, transformations, destination, and warnings.</p>";
+  const predecessor = state.reviewPreparationPromise || Promise.resolve();
+  const operation = predecessor.catch(() => {}).then(() => performReviewPreparation(request));
+  let tracked;
+  tracked = operation.finally(() => {
+    if (state.reviewPreparationPromise === tracked) state.reviewPreparationPromise = null;
+  });
+  state.reviewPreparationPromise = tracked;
+  return tracked;
+}
+
+async function performReviewPreparation(request) {
+  if (request.version !== state.reviewPreparationVersion) return;
   try {
-    const rawPath = $("#output-path").value.trim();
-    const separator = rawPath.lastIndexOf("/");
-    if (separator <= 0 || separator === rawPath.length - 1) throw new Error("Output must be an absolute file path");
-    const directory = rawPath.slice(0, separator) || "/";
-    let filename = rawPath.slice(separator + 1);
-    const profile = $("#lossless-check").checked ? "ARCHIVAL_LOSSLESS" : "COMPATIBLE";
-    const suffix = profile === "ARCHIVAL_LOSSLESS" ? ".mkv" : ".mp4";
-    if (!filename.toLowerCase().endsWith(suffix)) throw new Error(`${profile} output filename must end with ${suffix}`);
+    const separator = request.rawPath.lastIndexOf("/");
+    if (separator <= 0 || separator === request.rawPath.length - 1) throw new Error("Output must be an absolute file path");
+    const directory = request.rawPath.slice(0, separator) || "/";
+    const filename = request.rawPath.slice(separator + 1);
+    const suffix = request.profile === "ARCHIVAL_LOSSLESS" ? ".mkv" : ".mp4";
+    if (!filename.toLowerCase().endsWith(suffix)) throw new Error(`${request.profile} output filename must end with ${suffix}`);
     let grant = state.outputGrantByDirectory.get(directory);
     if (!grant || grant.revoked) {
-      if (!provisionGrant) {
+      if (!request.provisionGrant) {
         throw new Error("Confirm the output path to grant write access to its directory");
       }
       grant = await client.createGrant({}, {path: directory, role: "WRITE_OUTPUT"});
       state.outputGrantByDirectory.set(directory, grant);
     }
-    state.renderPlan = await client.createRenderPlan({projectId: state.project.id}, {outputGrantId: grant.id, filename, profile});
+    if (request.version !== state.reviewPreparationVersion) return;
+    const plan = await client.createRenderPlan(
+      {projectId: request.projectId},
+      {outputGrantId: grant.id, filename, profile: request.profile},
+    );
+    if (request.version !== state.reviewPreparationVersion) return;
+    state.renderPlan = plan;
     renderReviewPlan();
   } catch (error) {
+    if (request.version !== state.reviewPreparationVersion) return;
     $("#preflight-heading").textContent = "Output plan needs attention";
     $("#preflight-status").innerHTML = `<strong>△ Preflight unavailable</strong><p>${safe(error.message)}</p>`;
     $("#manifest-preview").textContent = "No immutable plan has been created.";
@@ -764,11 +824,16 @@ function updateRenderButton() {
 }
 
 async function renderVideo() {
-  if (!state.renderPlan) return;
+  const plan = state.renderPlan;
+  const preparationVersion = state.reviewPreparationVersion;
+  if (!plan) return;
   try {
     $("#render-video").disabled = true;
-    await client.attestReview({planId: state.renderPlan.id}, {acknowledgedWarnings: state.renderPlan.warningCodes});
-    const result = await client.startRender({planId: state.renderPlan.id}, {});
+    await client.attestReview({planId: plan.id}, {acknowledgedWarnings: plan.warningCodes});
+    if (preparationVersion !== state.reviewPreparationVersion || state.renderPlan?.id !== plan.id) {
+      throw new Error("Output settings changed while review was being recorded; review the current plan again");
+    }
+    const result = await client.startRender({planId: plan.id}, {});
     state.renderJob = result.job;
     state.artifact = result.artifact;
     const panel = $("#render-progress");
@@ -928,7 +993,7 @@ function setupEvents() {
   };
   async function applySelectedSync(anchorOutputUs, ratePpm) {
     const source = state.sources[state.selectedSource];
-    const clip = source?.clips[0];
+    const clip = selectedAlignmentClip(source);
     if (!clip) return;
     const sync = {...clip.sync, anchorOutputUs, ratePpm};
     const preview = await command("SetSyncTransform", {clipId: clip.id, sync, confirmDrift: Boolean(sync.ratePpm)}, {preview: true});
@@ -1060,6 +1125,9 @@ function setupEvents() {
   $("#reviewed-check").onchange = updateRenderButton;
   $("#render-video").onclick = renderVideo;
   $("#output-path").oninput = () => {
+    invalidateReviewPreparation();
+    $("#preflight-heading").textContent = "Output settings changed";
+    $("#preflight-status").innerHTML = "<strong>Preparing a new immutable plan</strong><p>The prior plan can no longer authorize rendering.</p>";
     clearTimeout(prepareReview.inputTimer);
     prepareReview.inputTimer = setTimeout(() => { if (state.view === "review") prepareReview(); }, 350);
   };

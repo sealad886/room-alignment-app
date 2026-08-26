@@ -348,7 +348,7 @@ def apply_command(
         "ArchiveLogicalSource": _archive_source,
         "AssignClip": _assign_clip,
         "SetReferenceSource": _set_reference,
-        "SetSyncTransform": _set_sync,
+        "SetSyncTransform": lambda p, command_payload: _set_sync(p, command_payload, assets),
         "InitializeProgram": lambda p, _payload: _replace(p, initialize_program(p, assets)),
         "AddVideoBlock": _add_video_block,
         "SplitVideoBlock": _split_video_block,
@@ -365,7 +365,9 @@ def apply_command(
         "SetAnchoringMode": _set_anchor_mode,
         "ReconcileBoundary": _reconcile_boundary,
         "ArchiveProject": lambda p, _payload: p.update(archived=True),
-        "AcceptAlignmentSuggestion": _accept_suggestion,
+        "AcceptAlignmentSuggestion": lambda p, command_payload: _accept_suggestion(
+            p, command_payload, assets
+        ),
         "RejectAlignmentSuggestion": lambda _p, _payload: None,
     }
     handler = handlers.get(command_type)
@@ -466,22 +468,93 @@ def _set_reference(project: dict[str, Any], payload: dict[str, Any]) -> None:
         source["reference"] = source["id"] == payload["sourceId"]
 
 
-def _set_sync(project: dict[str, Any], payload: dict[str, Any]) -> None:
+def _set_sync(
+    project: dict[str, Any], payload: dict[str, Any], assets: dict[str, dict[str, Any]]
+) -> None:
     clip = _find(project["clips"], payload["clipId"], "project clip")
     old = SyncTransform.from_dict(clip.get("sync"))
     new = SyncTransform.from_dict(payload.get("sync"))
     if new.rate_ppm and not payload.get("confirmDrift"):
         raise DomainError("VALIDATION_FAILED", "Non-zero ratePpm requires confirmDrift")
     if project["anchorMode"] == "SOURCE_TIME":
-        affected_source = clip["logicalSourceId"]
+        original_video = copy.deepcopy(project["videoBlocks"])
+        clip_ranges = _clip_ranges(project, assets)
+
+        def remap(value_us: int) -> int:
+            return new.source_to_output(old.output_to_source(int(value_us)))
+
         for block in project["videoBlocks"]:
-            if block["logicalSourceId"] != affected_source:
+            if _video_boundary_uses_clip(clip_ranges, block, "startUs", clip):
+                block["startUs"] = remap(block["startUs"])
+            if _video_boundary_uses_clip(clip_ranges, block, "endUs", clip):
+                block["endUs"] = remap(block["endUs"])
+        for block in project["audioBlocks"]:
+            if block["mode"] == "SILENCE":
                 continue
-            source_start = old.output_to_source(int(block["startUs"]))
-            source_end = old.output_to_source(int(block["endUs"]))
-            block["startUs"] = new.source_to_output(source_start)
-            block["endUs"] = new.source_to_output(source_end)
+            if _audio_boundary_uses_clip(clip_ranges, original_video, block, "startUs", clip):
+                block["startUs"] = remap(block["startUs"])
+            if _audio_boundary_uses_clip(clip_ranges, original_video, block, "endUs", clip):
+                block["endUs"] = remap(block["endUs"])
     clip["sync"] = new.to_dict()
+
+
+def _video_boundary_uses_clip(
+    clip_ranges: list[dict[str, Any]],
+    block: dict[str, Any],
+    boundary: str,
+    clip: dict[str, Any],
+) -> bool:
+    if block.get("logicalSourceId") != clip["logicalSourceId"]:
+        return False
+    pinned = block.get("pinnedClipId")
+    if pinned is not None:
+        return pinned == clip["id"]
+    output_us = int(block[boundary])
+    candidates = [
+        item
+        for item in clip_ranges
+        if item["logicalSourceId"] == block["logicalSourceId"]
+        and (
+            item["startUs"] <= output_us < item["endUs"]
+            if boundary == "startUs"
+            else item["startUs"] < output_us <= item["endUs"]
+        )
+    ]
+    return len(candidates) == 1 and candidates[0]["clipId"] == clip["id"]
+
+
+def _audio_boundary_uses_clip(
+    clip_ranges: list[dict[str, Any]],
+    original_video: list[dict[str, Any]],
+    block: dict[str, Any],
+    boundary: str,
+    clip: dict[str, Any],
+) -> bool:
+    if block["mode"] == "FIXED_CLIP":
+        return block.get("clipId") == clip["id"]
+    if block["mode"] == "FIXED_SOURCE":
+        synthetic = {
+            "startUs": block["startUs"],
+            "endUs": block["endUs"],
+            "logicalSourceId": block.get("logicalSourceId"),
+            "pinnedClipId": None,
+        }
+        return _video_boundary_uses_clip(clip_ranges, synthetic, boundary, clip)
+    if block["mode"] != "FOLLOW_VIDEO":
+        return False
+    output_us = int(block[boundary])
+    providers = [
+        video
+        for video in original_video
+        if (
+            int(video["startUs"]) <= output_us < int(video["endUs"])
+            if boundary == "startUs"
+            else int(video["startUs"]) < output_us <= int(video["endUs"])
+        )
+    ]
+    return len(providers) == 1 and _video_boundary_uses_clip(
+        clip_ranges, providers[0], boundary, clip
+    )
 
 
 def _add_video_block(project: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -637,7 +710,9 @@ def _reconcile_boundary(project: dict[str, Any], payload: dict[str, Any]) -> Non
     raise DomainError("VALIDATION_FAILED", "Unknown reconciliation operation")
 
 
-def _accept_suggestion(project: dict[str, Any], payload: dict[str, Any]) -> None:
+def _accept_suggestion(
+    project: dict[str, Any], payload: dict[str, Any], assets: dict[str, dict[str, Any]]
+) -> None:
     _set_sync(
         project,
         {
@@ -645,6 +720,7 @@ def _accept_suggestion(project: dict[str, Any], payload: dict[str, Any]) -> None
             "sync": payload["sync"],
             "confirmDrift": bool(payload.get("confirmDrift")),
         },
+        assets,
     )
 
 
@@ -806,11 +882,20 @@ def _compile_audio_block(
                 }
             )
         return _apply_audio_timing(slices, block, assets, issues)
+    selected_clip = (
+        _find(project["clips"], block.get("clipId"), "project clip")
+        if mode == "FIXED_CLIP"
+        else None
+    )
     synthetic_block = {
         "id": block["id"],
         "startUs": block["startUs"],
         "endUs": block["endUs"],
-        "logicalSourceId": block.get("logicalSourceId"),
+        "logicalSourceId": (
+            selected_clip["logicalSourceId"]
+            if selected_clip
+            else block.get("logicalSourceId")
+        ),
         "pinnedClipId": block.get("clipId") if mode == "FIXED_CLIP" else None,
     }
     slices = _compile_source_block(project, assets, synthetic_block, issues, require_audio=True)

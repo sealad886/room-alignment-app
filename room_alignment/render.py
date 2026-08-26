@@ -671,23 +671,25 @@ class CanonicalRenderManager:
                 _unlink_exact(manifest_partial)
                 self._finish_cancellation(job_id, artifact_id, "before artifact promotion")
                 return
-            os.replace(partial, final)
+            _promote_no_replace(partial, final)
             video_promoted = True
+            _unlink_exact(partial)
             if self._finalization_stopped(job_id, artifact, plan, final, revalidate_sources=False):
-                _unlink_exact(final)
-                video_promoted = False
                 _unlink_exact(manifest_partial)
-                self._finish_cancellation(job_id, artifact_id, "after video promotion")
+                self._finish_cancellation(
+                    job_id, artifact_id, "after video promotion", recoverable=True
+                )
                 return
-            os.replace(manifest_partial, manifest_final)
+            _promote_no_replace(manifest_partial, manifest_final)
             manifest_promoted = True
+            _unlink_exact(manifest_partial)
             if self._finalization_stopped(job_id, artifact, plan, final, revalidate_sources=False):
-                _unlink_exact(final)
-                video_promoted = False
-                _unlink_exact(manifest_final)
-                manifest_promoted = False
-                self._finish_cancellation(job_id, artifact_id, "after manifest promotion")
+                self._finish_cancellation(
+                    job_id, artifact_id, "after manifest promotion", recoverable=True
+                )
                 return
+            _verify_published_file(final, video_digest)
+            _verify_published_file(manifest_final, manifest_digest)
             completed = self.store.complete_render_artifact(
                 job_id,
                 artifact_id,
@@ -696,36 +698,32 @@ class CanonicalRenderManager:
                 {"videoBytes": final.stat().st_size, "manifestBytes": manifest_final.stat().st_size},
             )
             if not completed:
-                _unlink_exact(final)
-                video_promoted = False
-                _unlink_exact(manifest_final)
-                manifest_promoted = False
-                self._finish_cancellation(job_id, artifact_id, "before durable completion")
+                self._finish_cancellation(
+                    job_id, artifact_id, "before durable completion", recoverable=True
+                )
         except DomainError as error:
             _unlink_exact(partial)
             _unlink_exact(manifest_partial)
-            if video_promoted:
-                _unlink_exact(final)
-            if manifest_promoted:
-                _unlink_exact(manifest_final)
-            artifact_status = "FAILED_RECOVERABLE" if final.exists() or manifest_final.exists() else "FAILED"
+            artifact_status = "FAILED_RECOVERABLE" if video_promoted or manifest_promoted else "FAILED"
             self.store.update_artifact(artifact_id, status=artifact_status, details_json={"errorCode": error.code})
             self.store.transition_job(job_id, "FAILED", 0, str(error), error_code=error.code)
         except Exception as error:
             _unlink_exact(partial)
             _unlink_exact(manifest_partial)
-            if video_promoted:
-                _unlink_exact(final)
-            if manifest_promoted:
-                _unlink_exact(manifest_final)
-            artifact_status = "FAILED_RECOVERABLE" if final.exists() or manifest_final.exists() else "FAILED"
+            artifact_status = "FAILED_RECOVERABLE" if video_promoted or manifest_promoted else "FAILED"
             self.store.update_artifact(artifact_id, status=artifact_status, details_json={"error": type(error).__name__})
             self.store.transition_job(job_id, "FAILED", 0, str(error)[:500], error_code="INTERNAL_ERROR")
 
-    def _finish_cancellation(self, job_id: str, artifact_id: str, detail: str) -> None:
+    def _finish_cancellation(
+        self, job_id: str, artifact_id: str, detail: str, *, recoverable: bool = False
+    ) -> None:
         job = self.store.job(job_id)
         if job.get("errorCode") == "GRANT_REQUIRED":
-            self.store.update_artifact(artifact_id, status="FAILED", details_json={"errorCode": "GRANT_REQUIRED"})
+            self.store.update_artifact(
+                artifact_id,
+                status="FAILED_RECOVERABLE" if recoverable else "FAILED",
+                details_json={"errorCode": "GRANT_REQUIRED", "recoverableOutput": recoverable},
+            )
             self.store.transition_job(
                 job_id,
                 "FAILED",
@@ -734,7 +732,11 @@ class CanonicalRenderManager:
                 error_code="GRANT_REQUIRED",
             )
             return
-        self.store.update_artifact(artifact_id, status="CANCELED")
+        self.store.update_artifact(
+            artifact_id,
+            status="FAILED_RECOVERABLE" if recoverable else "CANCELED",
+            details_json={"recoverableOutput": recoverable} if recoverable else {},
+        )
         self.store.transition_job(job_id, "CANCELED", 0, f"Canceled; {detail}")
 
     def _finalization_stopped(
@@ -935,3 +937,37 @@ def _unlink_exact(path: Path) -> None:
         path.unlink()
     except FileNotFoundError:
         pass
+
+
+def _promote_no_replace(partial: Path, final: Path) -> None:
+    """Atomically publish one same-filesystem output without replacing a peer file.
+
+    Canonical render partials and their final names are siblings. A hard link
+    therefore gives us an atomic create-if-absent operation on filesystems that
+    support safe local promotion. Unsupported filesystems fail closed instead
+    of exposing a partially copied final or falling back to overwrite behavior.
+    """
+
+    try:
+        os.link(partial, final, follow_symlinks=False)
+    except FileExistsError as error:
+        raise DomainError("DESTINATION_EXISTS", "Output destination changed during render") from error
+    except OSError as error:
+        if error.errno == errno.EEXIST:
+            raise DomainError("DESTINATION_EXISTS", "Output destination changed during render") from error
+        raise DomainError(
+            "INTERNAL_ERROR",
+            "Output filesystem does not support safe exclusive artifact promotion",
+            {"errno": error.errno},
+        ) from error
+
+
+def _verify_published_file(path: Path, expected_digest: str) -> None:
+    try:
+        actual_digest = full_digest(path)
+    except OSError as error:
+        raise DomainError(
+            "DESTINATION_EXISTS", "Published output changed during finalization"
+        ) from error
+    if actual_digest != expected_digest:
+        raise DomainError("DESTINATION_EXISTS", "Published output changed during finalization")
