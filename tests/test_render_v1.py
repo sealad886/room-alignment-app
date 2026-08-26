@@ -14,7 +14,13 @@ from unittest.mock import Mock, patch
 
 from room_alignment.domain import digest_json
 from room_alignment.models import MediaRecord
-from room_alignment.render import CanonicalRenderManager, RunningJob, build_render_plan, build_v1_ffmpeg_command
+from room_alignment.render import (
+    CanonicalRenderManager,
+    RunningJob,
+    build_render_plan,
+    build_v1_ffmpeg_command,
+    build_v1_manifest,
+)
 from room_alignment.scanner import probe, quick_fingerprint
 from room_alignment.store import Store
 
@@ -87,6 +93,11 @@ class CanonicalRenderTests(unittest.TestCase):
             {"outputGrantId": self.output_grant_id, "filename": "program.mp4", "profile": "COMPATIBLE"},
         )
         self.assertEqual(plan["status"], "READY", plan["issues"])
+        manifest_preview = build_v1_manifest(
+            plan,
+            {"id": "artifact", "videoDigest": "a" * 64, "manifestDigest": "b" * 64},
+        )
+        self.assertIsNone(manifest_preview["artifact"]["manifestSha256"])
         self.store.attest_review(plan["id"], plan["warningCodes"])
         manager = CanonicalRenderManager(self.store)
         started = manager.start(plan["id"])

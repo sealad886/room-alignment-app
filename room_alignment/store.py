@@ -1497,6 +1497,37 @@ class Store:
             self._transition_job_db(db, job_id, status, progress, message, details, result, error_code)
             return self.job(job_id, db)
 
+    def finish_job_error(self, job_id: str, message: str, error_code: str) -> dict[str, Any]:
+        """Atomically preserve cancellation or finish the current job as failed."""
+        with self._lock, self.connect() as db:
+            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if not row:
+                raise DomainError("NOT_FOUND", "Job not found")
+            if row["status"] in TERMINAL_JOB_STATES:
+                return self.job(job_id, db)
+            if row["status"] == "CANCEL_REQUESTED":
+                if row["error_code"] == "GRANT_REQUIRED":
+                    status = "FAILED"
+                    final_message = "Directory grant was revoked"
+                    final_error = "GRANT_REQUIRED"
+                else:
+                    status = "CANCELED"
+                    final_message = "Analysis canceled"
+                    final_error = None
+            else:
+                status = "FAILED"
+                final_message = message
+                final_error = error_code
+            self._transition_job_db(
+                db,
+                job_id,
+                status,
+                float(row["progress"]),
+                final_message,
+                error_code=final_error,
+            )
+            return self.job(job_id, db)
+
     def _transition_job_db(
         self,
         db: sqlite3.Connection,
@@ -1715,11 +1746,24 @@ class Store:
             rows = list(db.execute("SELECT id,kind FROM jobs WHERE status IN ('QUEUED','RUNNING','CANCEL_REQUESTED')"))
             for row in rows:
                 status = "FAILED_RECOVERABLE" if row["kind"] == "RENDER" else "INTERRUPTED"
+                message = "Application restarted before or while the job was active"
                 db.execute(
                     "UPDATE jobs SET status=?,message=?,updated_at=? WHERE id=?",
-                    (status, "Application restarted while job was active", now_iso(), row["id"]),
+                    (status, message, now_iso(), row["id"]),
                 )
-                self._event_db(db, row["id"], "RECOVERY", status, None, "Application restarted while job was active", {})
+                if row["kind"] == "SCAN":
+                    db.execute(
+                        "UPDATE scan_generations SET status='INTERRUPTED',message=?,updated_at=? WHERE id=? "
+                        "AND status IN ('QUEUED','RUNNING','CANCEL_REQUESTED')",
+                        (message, now_iso(), row["id"]),
+                    )
+                elif row["kind"] == "RENDER":
+                    db.execute(
+                        "UPDATE artifacts SET status='FAILED_RECOVERABLE',details_json=?,updated_at=? "
+                        "WHERE job_id=? AND status IN ('QUEUED','RENDERING')",
+                        (json.dumps({"error": "APPLICATION_RESTARTED"}), now_iso(), row["id"]),
+                    )
+                self._event_db(db, row["id"], "RECOVERY", status, None, message, {})
 
     def upsert_job(self, job: dict[str, Any]) -> None:
         """Compatibility seam for legacy render tests."""

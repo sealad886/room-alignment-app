@@ -143,11 +143,30 @@ class StoreV1Tests(unittest.TestCase):
         self.assertEqual(events[-1]["eventType"], "RECOVERY")
 
     def test_restart_reconciles_jobs_orphaned_while_queued(self):
+        self.scan("FULL", [self.record("queued-media", "queued.mp4")])
+        project = self.store.create_project("Queued", self.library["id"], ["queued-media"])
+        output_grant = self.store.create_grant(self.output, "WRITE_OUTPUT")
+        plan = self.store.save_render_plan(
+            {
+                "id": "queued-plan",
+                "projectId": project["id"],
+                "projectRevision": project["revision"],
+                "planDigest": "queued-plan-digest",
+                "sourceSetDigest": "queued-sources",
+                "provenanceRevision": 0,
+                "status": "READY",
+            }
+        )
         analysis = self.store.create_job("ALIGNMENT_ANALYSIS")
         render = self.store.create_job("RENDER")
+        artifact = self.store.create_artifact(plan["id"], output_grant["id"], "queued.mp4")
+        self.store.update_artifact(artifact["id"], job_id=render["id"], status="QUEUED")
+        scan = self.store.begin_scan(self.library["id"], "INCREMENTAL")
         reopened = Store(self.store.path)
         self.assertEqual(reopened.job(analysis["id"])["status"], "INTERRUPTED")
         self.assertEqual(reopened.job(render["id"])["status"], "FAILED_RECOVERABLE")
+        self.assertEqual(reopened.scan(scan["id"])["status"], "INTERRUPTED")
+        self.assertEqual(reopened.artifact(artifact["id"])["status"], "FAILED_RECOVERABLE")
 
     def test_grant_revocation_stops_dependent_scan_with_diagnostic(self):
         scan = self.store.begin_scan(self.library["id"], "FULL")

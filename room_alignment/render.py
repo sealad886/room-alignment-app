@@ -396,7 +396,7 @@ def build_v1_manifest(plan: dict[str, Any], artifact: dict[str, Any] | None = No
         "artifact": {
             "id": artifact.get("id") if artifact else None,
             "videoSha256": artifact.get("videoDigest") if artifact else None,
-            "manifestSha256": artifact.get("manifestDigest") if artifact else None,
+            "manifestSha256": None,
             "manifestFileDigestRecordedInArtifactState": True,
         },
         "project": {

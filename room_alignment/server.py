@@ -453,27 +453,10 @@ class App:
             raise DomainError(code, message)
 
     def _finish_analysis_error(self, job_id: str, error: Exception) -> None:
-        job = self.store.job(job_id)
-        if job["status"] in TERMINAL_JOB_STATES:
-            return
-        if job["status"] == "CANCEL_REQUESTED":
-            if job.get("errorCode") == "GRANT_REQUIRED":
-                self.store.transition_job(
-                    job_id,
-                    "FAILED",
-                    job["progress"],
-                    "Directory grant was revoked",
-                    error_code="GRANT_REQUIRED",
-                )
-            else:
-                self.store.transition_job(job_id, "CANCELED", job["progress"], "Analysis canceled")
-            return
-        self.store.transition_job(
+        self.store.finish_job_error(
             job_id,
-            "FAILED",
-            job["progress"],
             _safe_error(error),
-            error_code=getattr(error, "code", "INTERNAL_ERROR"),
+            getattr(error, "code", "INTERNAL_ERROR"),
         )
 
 
