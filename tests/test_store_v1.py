@@ -423,6 +423,41 @@ class StoreV1Tests(unittest.TestCase):
         self.assertIn("revision changed", suggestion["invalidationReason"])
         self.assertEqual(self.store.suggestions(project["id"])[0]["status"], "STALE")
 
+    def test_alignment_acceptance_rejects_client_tampering(self):
+        self.scan("FULL", [self.record("suggestion-media", "suggestion.mp4")])
+        project = self.store.create_project("Suggestion", self.library["id"], ["suggestion-media"])
+        clip = project["clips"][0]
+        suggestion = self.store.save_suggestion(
+            {
+                "projectId": project["id"],
+                "libraryId": self.library["id"],
+                "kind": "ALIGNMENT",
+                "inputDigest": "current-project-input",
+                "algorithm": "test-alignment",
+                "projectRevision": project["revision"],
+                "confidence": 0.5,
+                "clipId": clip["id"],
+                "sync": {"anchorSourceUs": 0, "anchorOutputUs": 100_000, "ratePpm": 0},
+                "evidence": [],
+                "limitations": [],
+            }
+        )
+        with self.assertRaisesRegex(DomainError, "canonical evidence"):
+            self.store.apply_project_command(
+                project["id"],
+                {
+                    "commandId": "tampered-suggestion",
+                    "expectedRevision": project["revision"],
+                    "commandType": "AcceptAlignmentSuggestion",
+                    "payload": {
+                        "suggestionId": suggestion["id"],
+                        "clipId": clip["id"],
+                        "sync": {"anchorSourceUs": 0, "anchorOutputUs": 999_000, "ratePpm": 0},
+                        "confirmDrift": False,
+                    },
+                },
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,11 +7,35 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from room_alignment.models import MediaRecord
+from room_alignment.models import MediaRecord, ProvenanceEvidence
 from room_alignment.scanner import iter_scan_records, quick_fingerprint
 
 
 class ScannerSafetyTests(unittest.TestCase):
+    def test_source_candidate_uses_normalized_camera_evidence_not_per_file_origin(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = root / "one" / "clip-a.mp4"
+            second = root / "two" / "clip-b.mp4"
+            first.parent.mkdir()
+            second.parent.mkdir()
+            first.write_bytes(b"media-a")
+            second.write_bytes(b"media-b")
+
+            def inferred(_path, relative):
+                return (
+                    {"camera": "Front Door"},
+                    [ProvenanceEvidence("filename", "camera", "Front Door", 0.7, relative.as_posix())],
+                )
+
+            with patch("room_alignment.scanner.infer_from_path", side_effect=inferred), patch(
+                "room_alignment.scanner.read_sidecar", return_value=({}, [])
+            ), patch("room_alignment.scanner.probe", return_value=({}, [], None)):
+                records = list(iter_scan_records(root, "library", probe_workers=1))
+
+            self.assertEqual(len(records), 2)
+            self.assertEqual(records[0].source_candidate_id, records[1].source_candidate_id)
+
     def test_unknown_extension_with_media_signature_is_admitted_for_probe(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

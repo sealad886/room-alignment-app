@@ -48,6 +48,7 @@ COMMAND_PAYLOAD_FIELDS = {
     "ReconcileBoundary": {"operation", "leftBlockId", "rightBlockId", "atUs", "startUs", "endUs"},
     "ArchiveProject": set(),
     "AcceptAlignmentSuggestion": {"suggestionId", "clipId", "sync", "confirmDrift"},
+    "AcceptAlignmentSuggestions": {"suggestions"},
     "RejectAlignmentSuggestion": {"suggestionId"},
 }
 
@@ -148,34 +149,55 @@ def new_project(
     library_id: str,
     assets: Iterable[dict[str, Any]],
     project_id: str | None = None,
+    source_groups: Iterable[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     chosen = list(assets)
     if not chosen:
         raise DomainError("VALIDATION_FAILED", "Project requires at least one media asset")
     created = now_iso()
+    assets_by_id = {str(asset["id"]): asset for asset in chosen}
+    groups = list(source_groups or [])
+    if source_groups is not None and not groups:
+        raise DomainError("VALIDATION_FAILED", "Confirmed source groups may not be empty")
+    if groups:
+        grouped_ids = [str(asset_id) for group in groups for asset_id in group.get("assetIds", [])]
+        if len(grouped_ids) != len(set(grouped_ids)) or set(grouped_ids) != set(assets_by_id):
+            raise DomainError(
+                "VALIDATION_FAILED",
+                "Confirmed source groups must contain every selected asset exactly once",
+            )
+    else:
+        groups = [
+            {"label": asset.get("camera") or f"Source {index + 1}", "assetIds": [asset["id"]]}
+            for index, asset in enumerate(chosen)
+        ]
     sources: list[dict[str, Any]] = []
     clips: list[dict[str, Any]] = []
-    for asset in chosen:
-        candidate = str(asset.get("sourceCandidateId") or asset.get("camera") or asset["id"])
+    for group in groups:
+        group_assets = [assets_by_id[str(asset_id)] for asset_id in group["assetIds"]]
+        candidate_keys = sorted(
+            {str(asset.get("sourceCandidateId") or asset.get("camera") or asset["id"]) for asset in group_assets}
+        )
         source_id = opaque_id("src")
         sources.append(
             {
                 "id": source_id,
-                "label": asset.get("camera") or f"Source {len(sources) + 1}",
+                "label": str(group.get("label") or group_assets[0].get("camera") or f"Source {len(sources) + 1}"),
                 "reference": not sources,
                 "archived": False,
-                "candidateKey": candidate,
-                "identityState": "USER_REVIEW_REQUIRED",
+                "candidateKey": candidate_keys[0] if len(candidate_keys) == 1 else digest_json(candidate_keys),
+                "identityState": "USER_CONFIRMED" if source_groups is not None else "USER_REVIEW_REQUIRED",
             }
         )
-        clips.append(
-            {
-                "id": opaque_id("clip"),
-                "assetId": asset["id"],
-                "logicalSourceId": source_id,
-                "sync": SyncTransform().to_dict(),
-            }
-        )
+        for asset in group_assets:
+            clips.append(
+                {
+                    "id": opaque_id("clip"),
+                    "assetId": asset["id"],
+                    "logicalSourceId": source_id,
+                    "sync": SyncTransform().to_dict(),
+                }
+            )
     project = {
         "id": project_id or opaque_id("project"),
         "name": name.strip() or "Untitled alignment",
@@ -368,6 +390,9 @@ def apply_command(
         "AcceptAlignmentSuggestion": lambda p, command_payload: _accept_suggestion(
             p, command_payload, assets
         ),
+        "AcceptAlignmentSuggestions": lambda p, command_payload: _accept_suggestions(
+            p, command_payload, assets
+        ),
         "RejectAlignmentSuggestion": lambda _p, _payload: None,
     }
     handler = handlers.get(command_type)
@@ -385,6 +410,23 @@ def apply_command(
     result["updatedAt"] = now_iso()
     validate_project(result)
     return result
+
+
+def _accept_suggestions(
+    project: dict[str, Any], payload: dict[str, Any], assets: dict[str, dict[str, Any]]
+) -> None:
+    suggestions = payload.get("suggestions")
+    if not isinstance(suggestions, list) or not suggestions:
+        raise DomainError("VALIDATION_FAILED", "suggestions must be a non-empty list")
+    seen: set[str] = set()
+    for suggestion in suggestions:
+        if not isinstance(suggestion, dict):
+            raise DomainError("VALIDATION_FAILED", "Every accepted suggestion must be an object")
+        suggestion_id = str(suggestion.get("suggestionId", ""))
+        if not suggestion_id or suggestion_id in seen:
+            raise DomainError("VALIDATION_FAILED", "Suggestion IDs must be present and unique")
+        seen.add(suggestion_id)
+        _accept_suggestion(project, suggestion, assets)
 
 
 def _replace(target: dict[str, Any], source: dict[str, Any]) -> None:

@@ -49,7 +49,7 @@ PROGRAM_AFFECTING_COMMANDS = {
     "SetSyncTransform", "InitializeProgram", "AddVideoBlock", "SplitVideoBlock", "MoveVideoBoundary",
     "DeleteVideoBlock", "AssignVideoSource", "PinVideoClip", "CutToSource", "AddAudioBlock",
     "SplitAudioBlock", "MoveAudioBoundary", "DeleteAudioBlock", "SetAudioMode", "SetAnchoringMode",
-    "ReconcileBoundary", "AcceptAlignmentSuggestion",
+    "ReconcileBoundary", "AcceptAlignmentSuggestion", "AcceptAlignmentSuggestions",
 }
 
 
@@ -980,14 +980,25 @@ class Store:
 
     # Projects and commands
 
-    def create_project(self, name: str, library_id: str, asset_ids: list[str]) -> dict[str, Any]:
+    def create_project(
+        self,
+        name: str,
+        library_id: str,
+        asset_ids: list[str],
+        source_groups: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         self.library_root(library_id)
         assets = self.media_records(asset_ids)
         if len(assets) != len(set(asset_ids)):
             raise DomainError("NOT_FOUND", "One or more selected media assets are unavailable")
         if any(asset.get("library_id") != library_id for asset in assets.values()):
             raise DomainError("VALIDATION_FAILED", "Every selected media asset must belong to the project library")
-        project = new_project(name, library_id, [assets[item] for item in asset_ids])
+        project = new_project(
+            name,
+            library_id,
+            [assets[item] for item in asset_ids],
+            source_groups=source_groups,
+        )
         with self._lock, self.connect() as db:
             db.execute(
                 "INSERT INTO projects(id,name,library_id,revision,archived,created_at,updated_at,document_json) "
@@ -1090,6 +1101,10 @@ class Store:
                     "Project changed since this command was prepared",
                     {"currentRevision": current_revision, "project": project},
                 )
+            if command_type in {"AcceptAlignmentSuggestion", "AcceptAlignmentSuggestions"}:
+                self._validate_alignment_acceptance_db(
+                    db, project_id, current_revision, command_type, payload
+                )
             assets = self._media_records_db(db, [item["assetId"] for item in project.get("clips", [])])
             previous_compiled = compile_program(project, assets) if command_type in PROGRAM_AFFECTING_COMMANDS else None
             changed = apply_command(project, command_type, payload, assets)
@@ -1140,7 +1155,57 @@ class Store:
                 suggestion_id = str(payload.get("suggestionId", ""))
                 next_status = "ACCEPTED" if command_type == "AcceptAlignmentSuggestion" else "REJECTED"
                 self._set_suggestion_status_db(db, suggestion_id, next_status)
+            elif command_type == "AcceptAlignmentSuggestions":
+                for suggestion in payload.get("suggestions", []):
+                    self._set_suggestion_status_db(db, str(suggestion.get("suggestionId", "")), "ACCEPTED")
             return result
+
+    def _validate_alignment_acceptance_db(
+        self,
+        db: sqlite3.Connection,
+        project_id: str,
+        project_revision: int,
+        command_type: str,
+        payload: dict[str, Any],
+    ) -> None:
+        requested = (
+            [payload]
+            if command_type == "AcceptAlignmentSuggestion"
+            else payload.get("suggestions", [])
+        )
+        if not isinstance(requested, list) or not requested:
+            raise DomainError("VALIDATION_FAILED", "At least one alignment suggestion is required")
+        for item in requested:
+            if not isinstance(item, dict):
+                raise DomainError("VALIDATION_FAILED", "Every accepted suggestion must be an object")
+            row = db.execute(
+                "SELECT project_id,status,project_revision,suggestion_json FROM suggestions WHERE id=?",
+                (str(item.get("suggestionId", "")),),
+            ).fetchone()
+            if not row:
+                raise DomainError("NOT_FOUND", "Suggestion not found")
+            canonical = json.loads(row["suggestion_json"])
+            if (
+                row["project_id"] != project_id
+                or row["status"] != "PENDING"
+                or int(row["project_revision"] or -1) != project_revision
+            ):
+                raise DomainError("VALIDATION_FAILED", "Suggestion is not pending for this project revision")
+            if item.get("clipId") != canonical.get("clipId") or item.get("sync") != canonical.get("sync"):
+                raise DomainError("VALIDATION_FAILED", "Suggestion payload does not match canonical evidence")
+
+    def media_source_path(self, media_id: str) -> Path:
+        media = self.media_record(media_id)
+        if media.get("missing"):
+            raise DomainError("SOURCE_MISSING", "Source media is missing")
+        try:
+            root = self.library_root(str(media["library_id"])).resolve(strict=True)
+            target = (root / str(media["relative_path"])).resolve(strict=True)
+        except FileNotFoundError as error:
+            raise DomainError("SOURCE_MISSING", "Source media is missing") from error
+        if not target.is_relative_to(root) or not target.is_file():
+            raise DomainError("FORBIDDEN", "Source media resolves outside its directory grant")
+        return target
 
     def compiled_project(self, project_id: str) -> dict[str, Any]:
         project = self.project(project_id)

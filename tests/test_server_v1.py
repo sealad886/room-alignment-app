@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 from room_alignment import server as server_module
 from room_alignment.domain import DomainError
+from room_alignment.models import MediaRecord
 
 
 class ServerBoundaryTests(unittest.TestCase):
@@ -62,6 +63,7 @@ class ServerBoundaryTests(unittest.TestCase):
         csrf: str | None = None,
         origin: str | None = None,
         host: str | None = None,
+        range_header: str | None = None,
     ) -> tuple[int, dict[str, str], object]:
         connection = http.client.HTTPConnection("127.0.0.1", self.port, timeout=3)
         headers = {"Host": host or f"127.0.0.1:{self.port}"}
@@ -76,6 +78,8 @@ class ServerBoundaryTests(unittest.TestCase):
         if origin:
             headers["Origin"] = origin
             headers["Sec-Fetch-Site"] = "same-origin" if origin.endswith(str(self.port)) else "cross-site"
+        if range_header:
+            headers["Range"] = range_header
         connection.request(method, path, body=encoded, headers=headers)
         response = connection.getresponse()
         raw = response.read()
@@ -200,6 +204,39 @@ class ServerBoundaryTests(unittest.TestCase):
         status, _headers, schema = self.request("GET", "/api/v1/contracts/manifest.schema.json", cookie=cookie)
         self.assertEqual(200, status)
         self.assertEqual(schema["title"], "Room Alignment provenance manifest v1")
+
+    def test_source_preview_is_authenticated_read_only_and_range_capable(self) -> None:
+        source_file = self.source / "clip.mp4"
+        source_file.write_bytes(b"0123456789")
+        grant = self.app.store.create_grant(self.source, "READ_ONLY_SOURCE")
+        library = self.app.store.create_library(grant["id"])
+        scan = self.app.store.begin_scan(library["id"], "FULL")
+        self.app.store.save_media_batch(
+            scan["id"],
+            [MediaRecord("media", library["id"], "clip.mp4", 10, source_file.stat().st_mtime_ns)],
+        )
+        self.app.store.finish_scan(scan["id"], "SUCCEEDED", {"videos": 1})
+
+        status, _headers, payload = self.request("GET", "/api/v1/media/media/preview")
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["error"]["code"], "UNAUTHENTICATED")
+
+        cookie, _csrf = self.bootstrap()
+        status, headers, payload = self.request(
+            "GET", "/api/v1/media/media/preview", cookie=cookie, range_header="bytes=2-5"
+        )
+        self.assertEqual(status, 206)
+        self.assertEqual(headers["content-range"], "bytes 2-5/10")
+        self.assertEqual(headers["accept-ranges"], "bytes")
+        self.assertEqual(payload, "2345")
+        self.assertEqual(source_file.read_bytes(), b"0123456789")
+
+        status, headers, payload = self.request(
+            "HEAD", "/api/v1/media/media/preview", cookie=cookie, range_header="bytes=0-3"
+        )
+        self.assertEqual(status, 206)
+        self.assertEqual(headers["content-range"], "bytes 0-3/10")
+        self.assertEqual(payload, "")
 
     def test_malformed_client_values_return_stable_validation_errors(self) -> None:
         cookie, csrf = self.bootstrap()

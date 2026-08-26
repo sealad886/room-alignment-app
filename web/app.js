@@ -2,6 +2,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const colors = ["#74c9bd", "#dda96a", "#8faed2", "#b58ccc", "#91bd7c", "#d28282"];
 const MEDIA_TABLE_LIMIT = 500;
+const EVENT_GAP_US = 120_000_000;
 const {RoomAlignmentAPIClient, APIError} = window.RoomAlignmentAPI;
 const client = new RoomAlignmentAPIClient();
 
@@ -78,6 +79,53 @@ function groupKey(media) {
   return (media.captured_at || "Undated").slice(0, 10);
 }
 
+function capturedUs(media) {
+  const milliseconds = Date.parse(media.captured_at || "");
+  return Number.isFinite(milliseconds) ? milliseconds * 1000 : null;
+}
+
+function eventGroups(items) {
+  const timed = items.filter(item => capturedUs(item) !== null)
+    .sort((left, right) => capturedUs(left) - capturedUs(right) || left.id.localeCompare(right.id));
+  const groups = [];
+  let current = [];
+  let coveredUntilUs = 0;
+  for (const item of timed) {
+    const startUs = capturedUs(item);
+    const endUs = startUs + Math.max(0, Number(item.durationUs || 0));
+    if (current.length && startUs > coveredUntilUs + EVENT_GAP_US) {
+      groups.push(current);
+      current = [];
+    }
+    current.push(item);
+    coveredUntilUs = Math.max(coveredUntilUs, endUs);
+  }
+  if (current.length) groups.push(current);
+  const untimed = items.filter(item => capturedUs(item) === null);
+  if (untimed.length) groups.push(untimed);
+  return groups.map((group, index) => {
+    const first = group[0];
+    const last = group.at(-1);
+    const firstDate = capturedUs(first) === null ? null : new Date(capturedUs(first) / 1000);
+    const lastDate = capturedUs(last) === null ? null : new Date(capturedUs(last) / 1000);
+    const label = firstDate
+      ? `${firstDate.toLocaleDateString([], {year: "numeric", month: "short", day: "numeric"})} · ${firstDate.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"})}${lastDate && lastDate.getTime() !== firstDate.getTime() ? `–${lastDate.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"})}` : ""}`
+      : `Undated clips ${index + 1}`;
+    return [label, group];
+  });
+}
+
+function proposedSourceGroups(items) {
+  return groupBy(items, item => {
+    const resolvedLabel = String(item.camera || "").trim().toLocaleLowerCase();
+    return resolvedLabel ? `label-evidence:${resolvedLabel}` : (item.sourceCandidateId || `asset:${item.id}`);
+  }).map(([candidateKey, assets], index) => ({
+    candidateKey,
+    label: mediaLabel(assets[0]) || `Source ${index + 1}`,
+    assetIds: assets.map(item => item.id),
+  }));
+}
+
 function groupBy(items, keyFunction) {
   const groups = new Map();
   for (const item of items) {
@@ -127,6 +175,46 @@ function selectedAlignmentClip(source = state.sources[state.selectedSource]) {
   const clip = source?.clips.find(item => item.id === state.selectedClipId) || source?.clips[0] || null;
   state.selectedClipId = clip?.id || null;
   return clip;
+}
+
+function sourceClipAt(source, outputUs = currentOutputUs()) {
+  const covering = source?.clips.filter(clip => {
+    const media = state.mediaById.get(clip.assetId);
+    const sync = clip.sync || {};
+    const rate = (1_000_000 + Number(sync.ratePpm || 0)) / 1_000_000;
+    const startUs = Number(sync.anchorOutputUs || 0);
+    const endUs = startUs + Number(media?.durationUs || 0) * rate;
+    return startUs <= outputUs && outputUs < endUs;
+  }) || [];
+  return covering[0] || source?.clips.find(item => item.id === state.selectedClipId) || source?.clips[0] || null;
+}
+
+function sourceTimeSeconds(clip, outputUs = currentOutputUs()) {
+  const sync = clip?.sync || {};
+  const numerator = 1_000_000 + Number(sync.ratePpm || 0);
+  const deltaUs = outputUs - Number(sync.anchorOutputUs || 0);
+  return Math.max(0, (Number(sync.anchorSourceUs || 0) + (deltaUs * 1_000_000) / numerator) / 1_000_000);
+}
+
+function syncSourceMonitors(shouldPlay = state.playing) {
+  $$("#source-monitors video").forEach(video => {
+    const source = sourceById(video.dataset.sourceId);
+    const clip = sourceClipAt(source);
+    if (!clip) return;
+    if (video.dataset.assetId !== clip.assetId) {
+      video.dataset.assetId = clip.assetId;
+      video.src = `/api/v1/media/${encodeURIComponent(clip.assetId)}/preview`;
+    }
+    const target = sourceTimeSeconds(clip);
+    const seek = () => {
+      if (Number.isFinite(video.duration) && Math.abs(video.currentTime - target) > 0.18) {
+        video.currentTime = Math.min(target, Math.max(0, video.duration - 0.02));
+      }
+    };
+    if (video.readyState >= 1) seek(); else video.addEventListener("loadedmetadata", seek, {once: true});
+    video.muted = source?.id !== state.sources[state.selectedSource]?.id;
+    if (shouldPlay) video.play().catch(() => {}); else video.pause();
+  });
 }
 
 function invalidateReviewPreparation() {
@@ -214,11 +302,11 @@ function renderLibrary(total = state.media.length) {
   $("#library-empty").classList.toggle("hidden", state.media.length > 0);
   $("#library-content").classList.toggle("hidden", state.media.length === 0);
   $("#library-count").textContent = `${state.media.length.toLocaleString()} of ${Number(total).toLocaleString()} clips loaded · generation ${state.mediaGeneration}`;
-  state.groups = groupBy(state.media, groupKey);
-  $("#library-list").innerHTML = state.groups.slice(0, 18).map(([date, items], index) => `
+  state.groups = eventGroups(state.media);
+  $("#library-list").innerHTML = state.groups.slice(0, 40).map(([date, items], index) => `
     <button class="library-card${index === 0 ? " active" : ""}" data-group-index="${index}">
       <strong>${safe(date)}</strong>
-      <small>${items.length} clips · ${new Set(items.map(item => item.sourceCandidateId || item.id)).size} source candidates</small>
+      <small>${items.length} clips · ${proposedSourceGroups(items).length} proposed sources</small>
     </button>`).join("");
   if (!state.group.length && state.groups.length) selectGroup(0);
   else if (state.groupName) {
@@ -258,12 +346,23 @@ function selectGroup(index) {
       const count = state.presentedGroup.filter(item => state.selectedMedia.has(item.id)).length;
       $("#select-group").checked = count === state.presentedGroup.length;
       $("#select-group").indeterminate = count > 0 && count < state.presentedGroup.length;
-      $("#open-event").disabled = count === 0;
+      updateSourceGroupingConfirmation();
     };
   });
   $("#event-title").textContent = state.group.length > state.presentedGroup.length
     ? `${state.groupName} · showing ${state.presentedGroup.length} of ${state.group.length} clips; unshown clips are excluded`
     : `${state.groupName} · ${state.group.length} clips`;
+  updateSourceGroupingConfirmation();
+}
+
+function updateSourceGroupingConfirmation() {
+  const selected = state.group.filter(item => state.selectedMedia.has(item.id));
+  const groups = proposedSourceGroups(selected);
+  $("#source-group-summary").textContent = selected.length
+    ? `${groups.length} proposed logical source${groups.length === 1 ? "" : "s"} across ${selected.length} selected clip${selected.length === 1 ? "" : "s"}. Confirm to keep repeated clips from the same candidate together.`
+    : "Select clips to review proposed logical sources.";
+  $("#confirm-source-groups").checked = false;
+  $("#open-event").disabled = !selected.length || !$("#confirm-source-groups").checked;
 }
 
 async function ensureProjectMedia(project) {
@@ -286,11 +385,14 @@ async function ensureProjectMedia(project) {
 async function createProjectFromGroup() {
   const selected = state.group.filter(item => state.selectedMedia.has(item.id));
   if (!selected.length) return toast("Select at least one exact media asset");
+  if (!$("#confirm-source-groups").checked) return toast("Confirm the proposed logical sources before creating the project");
   try {
+    const sourceGroups = proposedSourceGroups(selected).map(({label, assetIds}) => ({label, assetIds}));
     const project = await client.createProject({}, {
       name: `${state.groupName} alignment`,
       libraryId: state.library.id,
       assetIds: selected.map(item => item.id),
+      sourceGroups,
     });
     state.projects = await client.listProjects();
     renderRecentProjects();
@@ -360,10 +462,17 @@ function renderSources() {
     </button>`).join("");
   $("#source-list").innerHTML = rows;
   $("#cut-source-list").innerHTML = rows;
-  $("#source-monitors").innerHTML = state.sources.map((source, index) => `
-    <button class="source-monitor${index === state.selectedSource ? " active" : ""}" data-source="${index}" style="--source-color:${source.color};--source-dark:${source.color}22">
-      <span>${safe(source.label)}</span><small>${source.clips.length} clips · ${source.offsetUs >= 0 ? "+" : ""}${Math.round(source.offsetUs / 1000)} ms</small>
-    </button>`).join("");
+  const monitorSources = [...state.sources]
+    .sort((left, right) => Number(right.id === state.sources[state.selectedSource]?.id) - Number(left.id === state.sources[state.selectedSource]?.id) || Number(right.reference) - Number(left.reference))
+    .slice(0, 6);
+  $("#source-monitors").innerHTML = monitorSources.map(source => {
+    const index = state.sources.findIndex(item => item.id === source.id);
+    const clip = sourceClipAt(source);
+    return `<article class="source-monitor${index === state.selectedSource ? " active" : ""}" data-source="${index}" tabindex="0" role="button" aria-label="Select ${safe(source.label)} source" style="--source-color:${source.color};--source-dark:${source.color}22">
+      ${clip ? `<video muted playsinline preload="metadata" data-source-id="${safe(source.id)}" data-asset-id="${safe(clip.assetId)}" src="/api/v1/media/${encodeURIComponent(clip.assetId)}/preview"></video>` : ""}
+      <div><span>${safe(source.label)}</span><small>${source.clips.length} clips · ${source.offsetUs >= 0 ? "+" : ""}${Math.round(source.offsetUs / 1000)} ms</small></div>
+    </article>`;
+  }).join("");
   $("#alignment-tracks").innerHTML = state.sources.map(source => trackMarkup(source)).join("");
   $("#source-evidence-tracks").innerHTML = `<div class="timeline-shell">${state.sources.map(source => trackMarkup(source)).join("")}</div>`;
   const videoOptions = state.sources.map(source => `<option value="${safe(source.id)}">${safe(source.label)}</option>`).join("");
@@ -378,6 +487,14 @@ function renderSources() {
       renderSources();
       renderSourceInspector();
       renderProgram();
+    };
+  });
+  $$("#source-monitors [data-source]").forEach(monitor => {
+    monitor.onkeydown = event => {
+      if (["Enter", " "].includes(event.key)) {
+        event.preventDefault();
+        monitor.click();
+      }
     };
   });
   $$('#alignment-tracks [data-drag-source]').forEach(track => {
@@ -430,6 +547,7 @@ function renderSources() {
   }
   renderSourceInspector();
   renderSuggestions();
+  syncSourceMonitors();
 }
 
 function renderClipSelector(source) {
@@ -476,9 +594,24 @@ function renderSourceInspector() {
 function renderSuggestions() {
   const container = $("#suggestion-list");
   const rows = state.suggestions.filter(item => item.kind === "ALIGNMENT").slice(0, 8);
-  container.innerHTML = rows.length ? rows.map(item => `<div class="confidence"><strong>${safe(item.status)} · ${Math.round(Number(item.confidence || 0) * 100)}%</strong><p>${safe(item.evidence?.join("; ") || "No supporting evidence")}</p><small>${safe(item.algorithm)} v${safe(item.algorithmVersion)} · ${safe(item.limitations?.join("; ") || "No limitations recorded")}</small>${item.status === "PENDING" ? `<div class="link-row"><button class="btn" data-accept-suggestion="${safe(item.id)}">Accept</button><button class="btn" data-reject-suggestion="${safe(item.id)}">Reject</button></div>` : ""}</div>`).join("") : '<p class="muted">No alignment suggestions. Manual decisions remain authoritative.</p>';
+  const pending = state.suggestions.filter(item => item.kind === "ALIGNMENT" && item.status === "PENDING");
+  container.innerHTML = rows.length ? `${pending.length > 1 ? `<button class="btn wide" id="accept-pending-suggestions">Preview and apply ${pending.length} timestamp suggestions</button>` : ""}${rows.map(item => `<div class="confidence"><strong>${safe(item.status)} · ${Math.round(Number(item.confidence || 0) * 100)}%</strong><p>${safe(item.evidence?.join("; ") || "No supporting evidence")}</p><small>${safe(item.algorithm)} v${safe(item.algorithmVersion)} · ${safe(item.limitations?.join("; ") || "No limitations recorded")}</small>${item.status === "PENDING" ? `<div class="link-row"><button class="btn" data-accept-suggestion="${safe(item.id)}">Accept</button><button class="btn" data-reject-suggestion="${safe(item.id)}">Reject</button></div>` : ""}</div>`).join("")}` : '<p class="muted">No alignment suggestions. Manual decisions remain authoritative.</p>';
   $$('[data-accept-suggestion]').forEach(button => { button.onclick = () => resolveSuggestion(button.dataset.acceptSuggestion, true); });
   $$('[data-reject-suggestion]').forEach(button => { button.onclick = () => resolveSuggestion(button.dataset.rejectSuggestion, false); });
+  if ($("#accept-pending-suggestions")) $("#accept-pending-suggestions").onclick = acceptPendingSuggestions;
+}
+
+async function acceptPendingSuggestions() {
+  const pending = state.suggestions.filter(item => item.kind === "ALIGNMENT" && item.status === "PENDING");
+  if (!pending.length) return;
+  const introduced = pending.map(item => `${mediaLabel(state.mediaById.get(clipById(item.clipId)?.assetId))}: ${Math.round(Number(item.sync?.anchorOutputUs || 0) / 1000)} ms`).slice(0, 8).join("\n");
+  if (!window.confirm(`Apply ${pending.length} timestamp-based offsets as one reversible project revision?\n\n${introduced}${pending.length > 8 ? "\n…" : ""}\n\nCamera clocks may differ; verify against the synchronized previews.`)) return;
+  const suggestions = pending.map(item => ({suggestionId: item.id, clipId: item.clipId, sync: item.sync, confirmDrift: Boolean(item.sync?.ratePpm)}));
+  if (await command("AcceptAlignmentSuggestions", {suggestions})) {
+    state.suggestions = await client.listSuggestions({projectId: state.project.id});
+    renderSuggestions();
+    toast("Timestamp offsets applied together; verify them against source video and audio");
+  }
 }
 
 async function resolveSuggestion(suggestionId, accept) {
@@ -725,6 +858,7 @@ async function setPlayhead(value) {
   const index = sortedVideoBlocks().findIndex(block => block.startUs <= currentOutputUs() && currentOutputUs() < block.endUs);
   if (index >= 0) state.selectedSegment = index;
   renderProgram();
+  syncSourceMonitors();
   clearTimeout(setPlayhead.pointTimer);
   setPlayhead.pointTimer = setTimeout(async () => {
     try {
@@ -742,6 +876,7 @@ function togglePlay() {
   state.playing = !state.playing;
   $$('[data-action="play"]').forEach(button => { button.textContent = state.playing ? "Ⅱ" : "▶"; });
   clearInterval(state.timer);
+  syncSourceMonitors(state.playing);
   if (state.playing) {
     state.timer = setInterval(() => {
       setPlayhead(state.playhead + (10_000_000 / state.durationUs));
@@ -984,7 +1119,10 @@ function setupEvents() {
       : new Set();
     $$(".media-select").forEach(input => { input.checked = event.target.checked; });
     event.target.indeterminate = false;
-    $("#open-event").disabled = !event.target.checked;
+    updateSourceGroupingConfirmation();
+  };
+  $("#confirm-source-groups").onchange = event => {
+    $("#open-event").disabled = !event.target.checked || !state.selectedMedia.size;
   };
   $("#open-event").onclick = createProjectFromGroup;
   $("#sync-offset").onchange = async event => {

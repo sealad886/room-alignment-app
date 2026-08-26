@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Library selection now presents timestamp-overlap event windows instead of whole-day clip batches
+- Project creation requires explicit confirmation of proposed logical sources and can group repeated clips into one source
+- Align now plays up to six authenticated read-only source previews on the shared output clock
+- Pending timestamp suggestions can be previewed and accepted as one atomic, reversible project command
+
+### Fixed
+
+- Source-candidate fingerprints no longer include per-file evidence origins that made every clip appear to be a different camera
+
 ## 0.3.0 — Installable local application package
 
 ### Added

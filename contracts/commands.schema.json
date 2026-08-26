@@ -15,7 +15,7 @@
         "SetSyncTransform", "InitializeProgram", "AddVideoBlock", "SplitVideoBlock",
         "MoveVideoBoundary", "DeleteVideoBlock", "AssignVideoSource", "PinVideoClip", "CutToSource",
         "AddAudioBlock", "SplitAudioBlock", "MoveAudioBoundary", "DeleteAudioBlock", "SetAudioMode",
-        "SetAnchoringMode", "ReconcileBoundary", "ArchiveProject", "AcceptAlignmentSuggestion",
+        "SetAnchoringMode", "ReconcileBoundary", "ArchiveProject", "AcceptAlignmentSuggestion", "AcceptAlignmentSuggestions",
         "RejectAlignmentSuggestion"
       ]
     },
@@ -50,6 +50,7 @@
         {"$ref": "#/$defs/ReconcileBoundary"},
         {"$ref": "#/$defs/ArchiveProject"},
         {"$ref": "#/$defs/AcceptAlignmentSuggestion"},
+        {"$ref": "#/$defs/AcceptAlignmentSuggestions"},
         {"$ref": "#/$defs/RejectAlignmentSuggestion"}
       ]
     }
@@ -125,6 +126,9 @@
     "ArchiveProject": {"properties": {"commandType": {"const": "ArchiveProject"}, "payload": {"$ref": "#/$defs/Empty"}}},
     "AcceptAlignmentSuggestion": {
       "properties": {"commandType": {"const": "AcceptAlignmentSuggestion"}, "payload": {"type": "object", "additionalProperties": false, "required": ["suggestionId", "clipId", "sync"], "properties": {"suggestionId": {"$ref": "#/$defs/Id"}, "clipId": {"$ref": "#/$defs/Id"}, "sync": {"$ref": "./domain.schema.json#/$defs/SyncTransform"}, "confirmDrift": {"type": "boolean"}}}}
+    },
+    "AcceptAlignmentSuggestions": {
+      "properties": {"commandType": {"const": "AcceptAlignmentSuggestions"}, "payload": {"type": "object", "additionalProperties": false, "required": ["suggestions"], "properties": {"suggestions": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "object", "additionalProperties": false, "required": ["suggestionId", "clipId", "sync"], "properties": {"suggestionId": {"$ref": "#/$defs/Id"}, "clipId": {"$ref": "#/$defs/Id"}, "sync": {"$ref": "./domain.schema.json#/$defs/SyncTransform"}, "confirmDrift": {"type": "boolean"}}}}}}}
     },
     "RejectAlignmentSuggestion": {
       "properties": {"commandType": {"const": "RejectAlignmentSuggestion"}, "payload": {"type": "object", "additionalProperties": false, "required": ["suggestionId"], "properties": {"suggestionId": {"$ref": "#/$defs/Id"}}}}

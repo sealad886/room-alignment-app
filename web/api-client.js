@@ -139,6 +139,15 @@
     ],
     "queryParameters": {}
   },
+  "getMediaPreview": {
+    "binary": true,
+    "method": "GET",
+    "path": "/media/{mediaId}/preview",
+    "pathParameters": [
+      "mediaId"
+    ],
+    "queryParameters": {}
+  },
   "getOpenApiContract": {
     "binary": false,
     "method": "GET",

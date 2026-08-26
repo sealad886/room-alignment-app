@@ -347,14 +347,18 @@ def _scan_path(
         sidecar = read_sidecar(resolved_path, relative)
         probed_values, probed_evidence, warning = probe(resolved_path, canceled=canceled)
         values, evidence = merge_evidence(inferred, (probed_values, probed_evidence), sidecar)
-        candidate_material = {
-            "cameraEvidence": [
-                {"kind": item.kind, "value": item.value, "origin": item.origin}
+        camera_evidence = sorted(
+            {
+                (item.kind, str(item.normalized_value if item.normalized_value is not None else item.value).strip().casefold())
                 for item in evidence
-                if item.field == "camera"
-            ],
-            "parent": relative.parent.as_posix(),
-        }
+                if item.field == "camera" and (item.normalized_value is not None or item.value is not None)
+            }
+        )
+        candidate_material = (
+            {"cameraEvidence": camera_evidence}
+            if camera_evidence
+            else {"parent": relative.parent.as_posix().casefold()}
+        )
         stat = resolved_path.stat()
         return MediaRecord(
             id=stable_media_id(library_id, relative_text),

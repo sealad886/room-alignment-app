@@ -34,10 +34,10 @@
 | REQ-028 | Verified | Evidence merge retains conflicts; resolution is separate ledger. |
 | REQ-029 | Verified | Revisioned correction records previous/new/rationale/actor/time. |
 | REQ-030 | Verified | Namespaced custom sidecar fields retained internally; manifest exports only selected resolution/provenance fields. |
-| REQ-031 | Verified | Distinct `MediaAsset`, `LogicalSource`, `ProjectClip`; same-candidate separation test. |
-| REQ-032 | Verified | `SourceCandidate` evidence remains `USER_REVIEW_REQUIRED`; never final identity automatically. |
+| REQ-031 | Verified | Distinct `MediaAsset`, `LogicalSource`, `ProjectClip`; unconfirmed candidates remain separate, while an explicit exact source-group partition creates one user-confirmed source. |
+| REQ-032 | Verified | `SourceCandidate` evidence remains advisory; event UI requires confirmation before candidate/label evidence becomes logical-source identity. |
 | REQ-033 | Implemented | Connected create/rename/merge/split/archive/reassign controls use commands. |
-| REQ-034 | Implemented | Library checkboxes select exact project assets; clusters remain suggestions. |
+| REQ-034 | Implemented | Event-window checkboxes select exact project assets; source grouping requires separate confirmation and clusters remain suggestions. |
 | REQ-035 | Verified | Candidate/source IDs, not labels, drive source distinction and coverage. |
 | REQ-036 | Verified | Manifest uses stable IDs, relative paths, SHA-256; excludes roots/unrelated custom fields. |
 | REQ-037 | Verified | Canonical public/editorial time uses integer `*Us`; schema/property tests. |
@@ -53,14 +53,14 @@
 | REQ-047 | Verified | Monotonic deterministic inverse round-trip property within one microsecond. |
 | REQ-048 | Verified | Rescans/suggestions do not overwrite manual sync or timestamp resolutions. |
 | REQ-049 | Implemented | Reference command preserves mappings; previews return affected ranges/issues. |
-| REQ-050 | Implemented | Numeric offset/rate, keyboard nudges, playhead, selection, pointer track movement. |
+| REQ-050 | Verified | Numeric offset/rate, keyboard nudges, playhead, selection, pointer track movement, and authenticated real-video seeking on the shared output clock. |
 | REQ-051 | Implemented | Align contains canonical Program Video and Program Audio lanes. |
 | REQ-052 | Verified | Alignment analysis is durable asynchronous job; editing remains available. |
 | REQ-053 | Verified | Suggestions persist algorithm/version/config/input digest/revision/transform/confidence/evidence/limits. |
-| REQ-054 | Verified | Pending/accepted/rejected/stale/superseded contract; accept/reject named commands/UI. |
+| REQ-054 | Verified | Pending/accepted/rejected/stale/superseded contract; single and atomic reviewed-batch accept plus reject commands/UI. |
 | REQ-055 | Verified | Asset/source/provenance/time-policy/project/algorithm inputs stale dependent suggestions. |
 | REQ-056 | Implemented | UI displays evidence, limitations, incomplete/manual authority; fixture tests cover fields. |
-| REQ-057 | Implemented | Timestamp method is optional assistive algorithm; manual alignment complete without it. |
+| REQ-057 | Verified | Timestamp priors remain optional/non-mutating; explicit batch acceptance plus synchronized media previews make manual verification authoritative and usable. |
 | REQ-058 | Verified | Preview command returns exact affected intervals and introduced issues before commit. |
 | REQ-059 | Verified | Video block selects logical source with optional exact clip pin. |
 | REQ-060 | Verified | One logical block compiles across consecutive clips into exact source slices. |
@@ -113,8 +113,8 @@
 | REQ-107 | Verified | SQLite immediate transaction commits project/revision/issues/event-linked result or rolls back. |
 | REQ-108 | Verified | Result includes authoritative project/issues/review/affected ranges/event cursor. |
 | REQ-109 | Verified | Command union contains all required metadata/source/clip/sync/provenance/program/audio/anchor/suggestion/archive mutations. |
-| REQ-110 | Implemented | Read resources expose capabilities/grants/libraries/scans/media/evidence/projects/program/suggestions/jobs/plans/reviews/artifacts. |
-| REQ-111 | Verified | OpenAPI route-family contract test enumerates minimum surface. |
+| REQ-110 | Implemented | Read resources expose capabilities/grants/libraries/scans/media/preview/evidence/projects/program/suggestions/jobs/plans/reviews/artifacts. |
+| REQ-111 | Verified | OpenAPI route-family contract test enumerates minimum surface; generated client includes authenticated media preview. |
 | REQ-112 | Verified | Stable safe error envelope with request ID/retryable/details. |
 | REQ-113 | Verified | Required stable error-code enum in API schema and mapped HTTP statuses. |
 | REQ-114 | Verified | Durable job states exactly implement required state machine. |

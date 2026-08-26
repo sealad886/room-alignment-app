@@ -6,6 +6,7 @@ import ipaddress
 import json
 import mimetypes
 import os
+import re
 import secrets
 import signal
 import sys
@@ -649,7 +650,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.enforce_request_boundary()
                 return self.get_api(path, query)
             return self.serve_static(path)
-        except BrokenPipeError:
+        except (BrokenPipeError, ConnectionResetError):
+            return
+        except Exception as error:
+            self.error(error)
+
+    def do_HEAD(self) -> None:
+        self._set_request_id()
+        try:
+            parsed = urlparse(self.path)
+            path = parsed.path
+            if not _trusted_host(self.headers.get("Host", ""), self.server.server_port):
+                raise DomainError("FORBIDDEN", "Local Host header required")
+            self.enforce_request_boundary()
+            parts = [part for part in path.split("/") if part]
+            if len(parts) == 5 and parts[2] == "media" and parts[4] == "preview":
+                return self.stream_source_preview(APP.store.media_source_path(parts[3]))
+            raise DomainError("NOT_FOUND", "API resource not found")
+        except (BrokenPipeError, ConnectionResetError):
             return
         except Exception as error:
             self.error(error)
@@ -710,6 +728,8 @@ class Handler(BaseHTTPRequestHandler):
             media = APP.store.media_record(parts[3])
             media["resolutions"] = APP.store.provenance_resolutions(parts[3])
             return self.respond(media)
+        if len(parts) == 5 and parts[2] == "media" and parts[4] == "preview":
+            return self.stream_source_preview(APP.store.media_source_path(parts[3]))
         if len(parts) == 6 and parts[2] == "media" and parts[4:] == ["provenance", "resolutions"]:
             return self.respond(APP.store.provenance_resolutions(parts[3], query.get("field", [None])[0]))
         if len(parts) == 4 and parts[2] == "projects":
@@ -768,6 +788,58 @@ class Handler(BaseHTTPRequestHandler):
             while chunk := source.read(1024 * 1024):
                 self.wfile.write(chunk)
 
+    def stream_source_preview(self, path: Path) -> None:
+        size = path.stat().st_size
+        start, end = 0, max(0, size - 1)
+        range_header = self.headers.get("Range")
+        status = HTTPStatus.OK
+        if range_header:
+            match = re.fullmatch(r"bytes=(\d*)-(\d*)", range_header.strip())
+            if not match or not any(match.groups()):
+                raise DomainError("VALIDATION_FAILED", "Only one bounded byte range is supported")
+            first, last = match.groups()
+            if first:
+                start = int(first)
+                end = int(last) if last else end
+            else:
+                suffix = int(last)
+                if suffix <= 0:
+                    raise DomainError("VALIDATION_FAILED", "Byte-range suffix must be positive")
+                start = max(0, size - suffix)
+            if start >= size or end < start:
+                self.send_response(HTTPStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                self._security_headers()
+                self.send_header("Content-Range", f"bytes */{size}")
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Request-ID", self.request_id())
+                self.end_headers()
+                return
+            end = min(end, size - 1)
+            status = HTTPStatus.PARTIAL_CONTENT
+        length = end - start + 1 if size else 0
+        self.send_response(status)
+        self._security_headers()
+        self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
+        self.send_header("Content-Length", str(length))
+        self.send_header("Accept-Ranges", "bytes")
+        if status == HTTPStatus.PARTIAL_CONTENT:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
+        self.send_header("Content-Disposition", "inline")
+        self.send_header("Cache-Control", "private, no-store")
+        self.send_header("X-Request-ID", self.request_id())
+        self.end_headers()
+        if self.command == "HEAD" or not length:
+            return
+        with path.open("rb") as source:
+            source.seek(start)
+            remaining = length
+            while remaining:
+                chunk = source.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                remaining -= len(chunk)
+
     def do_POST(self) -> None:
         self._set_request_id()
         try:
@@ -800,11 +872,33 @@ class Handler(BaseHTTPRequestHandler):
                 HTTPStatus.CREATED,
             )
         if path == "/api/v1/projects":
+            source_groups = body.get("sourceGroups")
+            if source_groups is not None and not isinstance(source_groups, list):
+                raise DomainError("VALIDATION_FAILED", "sourceGroups must be an array")
+            normalized_groups = None
+            if source_groups is not None:
+                normalized_groups = []
+                for item in source_groups:
+                    if not isinstance(item, dict):
+                        raise DomainError("VALIDATION_FAILED", "Every source group must be an object")
+                    label = str(_required(item, "label")).strip()
+                    if not label:
+                        raise DomainError("VALIDATION_FAILED", "Source group labels may not be empty")
+                    normalized_groups.append(
+                        {
+                            "label": label,
+                            "assetIds": [
+                                str(asset_id)
+                                for asset_id in _list_input(item.get("assetIds", []), "assetIds")
+                            ],
+                        }
+                    )
             return self.respond(
                 APP.store.create_project(
                     str(body.get("name", "Untitled alignment")),
                     str(_required(body, "libraryId")),
                     [str(item) for item in _list_input(body.get("assetIds", []), "assetIds")],
+                    normalized_groups,
                 ),
                 HTTPStatus.CREATED,
             )

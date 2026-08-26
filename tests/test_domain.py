@@ -123,6 +123,30 @@ class ProgramCompilerTests(unittest.TestCase):
         self.assertEqual(len(project["logicalSources"]), 2)
         self.assertNotEqual(project["clips"][0]["logicalSourceId"], project["clips"][1]["logicalSourceId"])
 
+    def test_explicit_source_groups_create_one_confirmed_logical_source(self):
+        assets = [asset("a", "Door", 5_000_000), asset("b", "Door", 5_000_000)]
+        assets[0]["sourceCandidateId"] = assets[1]["sourceCandidateId"] = "candidate-door"
+        project = new_project(
+            "Event",
+            "lib",
+            assets,
+            "project",
+            source_groups=[{"label": "Door", "assetIds": ["a", "b"]}],
+        )
+        self.assertEqual(len(project["logicalSources"]), 1)
+        self.assertEqual(project["logicalSources"][0]["identityState"], "USER_CONFIRMED")
+        self.assertEqual({clip["logicalSourceId"] for clip in project["clips"]}, {project["logicalSources"][0]["id"]})
+
+    def test_source_groups_must_partition_selected_assets_exactly_once(self):
+        assets = [asset("a", "Door", 5_000_000), asset("b", "Entry", 5_000_000)]
+        with self.assertRaisesRegex(DomainError, "exactly once"):
+            new_project(
+                "Event",
+                "lib",
+                assets,
+                source_groups=[{"label": "Door", "assetIds": ["a"]}],
+            )
+
     def test_follow_video_without_audio_blocks_instead_of_inventing_silence(self):
         media = asset("a", "Door", 5_000_000, audio=False)
         project = new_project("Event", "lib", [media], "project")
@@ -412,6 +436,32 @@ class CommandTests(unittest.TestCase):
             (changed["audioBlocks"][0]["startUs"], changed["audioBlocks"][0]["endUs"]),
             (125_000, 5_125_000),
         )
+
+    def test_batch_alignment_suggestions_apply_as_one_project_change(self):
+        assets = [asset("a", "Door", 5_000_000), asset("b", "Entry", 5_000_000)]
+        project = new_project("Event", "lib", assets, "project")
+        changed = apply_command(
+            project,
+            "AcceptAlignmentSuggestions",
+            {
+                "suggestions": [
+                    {
+                        "suggestionId": "suggestion-a",
+                        "clipId": project["clips"][0]["id"],
+                        "sync": {"anchorSourceUs": 0, "anchorOutputUs": 0, "ratePpm": 0},
+                        "confirmDrift": False,
+                    },
+                    {
+                        "suggestionId": "suggestion-b",
+                        "clipId": project["clips"][1]["id"],
+                        "sync": {"anchorSourceUs": 0, "anchorOutputUs": 750_000, "ratePpm": 0},
+                        "confirmDrift": False,
+                    },
+                ]
+            },
+            {item["id"]: item for item in assets},
+        )
+        self.assertEqual(changed["clips"][1]["sync"]["anchorOutputUs"], 750_000)
 
     def test_nonzero_drift_requires_explicit_confirmation(self):
         media = asset("a", "Door", 5_000_000)

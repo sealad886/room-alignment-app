@@ -4,6 +4,20 @@ Date: 2026-08-26 (Europe/Dublin)
 
 Scope: version 0.3.0 package candidate in isolated `codex/installable-package` worktree, based on merged PR #2 commit `c27bca3`. Evidence covers local package build and temporary isolated installation. It does not claim signing, notarization, publication, distribution, system-wide installation, deployment, or production operation.
 
+## Unreleased alignment usability correction on `main`
+
+On 2026-08-26, the live loopback app was restarted from the current `main` working tree against its existing local state and inspected in the user-selected Brave browser with the indexed reference corpus. Evidence for this unreleased correction is separate from the 0.3.0 package artifact evidence below.
+
+- `python -m unittest discover -s tests` — **115 tests passed**, including explicit source-partition validation, atomic multi-suggestion application, canonical suggestion-tampering rejection, stable source candidates across per-file evidence origins, authenticated source-preview range reads, and source-byte preservation.
+- `python scripts/generate_api_client.py --check`, `python -m compileall -q room_alignment scripts tests`, `node --check web/app.js`, `node --check web/api-client.js`, and `git diff --check` passed.
+- Brave displayed loaded-media event windows: the first observed window contained 10 clips and 3 proposed logical sources instead of a whole-day 500-clip project.
+- Project creation remained disabled until the proposed source grouping was explicitly confirmed.
+- Six real source videos loaded through authenticated `/api/v1/media/{mediaId}/preview` requests with no media errors. Seeking the shared playhead to 50% placed all six previews at 30.550 seconds; only the selected source was audible.
+- The final Brave trace showed successful preview metadata probes (`HEAD 200`) and byte-range playback (`GET 206`) with no preview 5xx responses; disconnected range clients are handled without false server errors.
+- Existing legacy projects are not rewritten automatically. The previously created 500-source project remains available exactly as saved; creating a new project through the corrected Library flow applies the explicit grouped-source contract.
+- A wheel and source archive were built into a temporary directory after the final integrity fix. Clean-wheel verification reported frontend loaded, health/OpenAPI/state administration ready, clean SIGTERM, reusable state lock, checkout-independent resources, and wheel SHA-256 `3b2b472ba92f1912bdb73dab35e5a0bf7e1167cc505efbcc2c0110399902f4b2`. They were not installed system-wide or published.
+- Pinned Ruff 0.16.3 reports 52 non-blocking findings and pinned Pyright 1.1.411 reports the same 21 baseline type findings. Per the P2 policy these remain deferred under issue #7; this milestone did not auto-fix or accept them.
+
 ## Automated and contract verification
 
 - `PYTHONWARNINGS=error::ResourceWarning python3 -m unittest discover -v` — **109 tests passed**, 0 failed, 0 skipped; includes package CLI/resource/port-lock cases, loopback security/session tests, and native FFmpeg renders.
