@@ -1,33 +1,39 @@
-# Runbook
+# Local operation and recovery runbook
 
-## Start
+## Start and stop
 
 ```bash
-python3 -m room_alignment.server --no-open
+python3 -m room_alignment.server --no-open --data-dir /path/to/state
 ```
 
-Health: `GET http://127.0.0.1:8765/api/health`.
+Health is intentionally non-sensitive at `/api/health`. A second process using the same state directory fails before scheduling work. Graceful shutdown rejects new work, requests scan cancellation, terminates owned render process trees, persists job transitions, and releases ownership. On restart, in-flight analyses/scans are `INTERRUPTED`; renders are never blindly reattached and become `FAILED_RECOVERABLE` where appropriate.
 
-## State
+## Scan diagnosis
 
-Default database: `~/.room-alignment/room-alignment.sqlite3`. Back up by stopping service and copying SQLite file. Source media is not part of application backup.
+Individual unreadable/malformed assets remain warning-bearing records. Full scan alone may mark unobserved prior assets missing; bounded/incremental scans never do. Cancel is idempotent and retains visited records. Grant revocation interrupts dependent work without deleting project decisions. Re-grant/rescan is a new explicit action.
 
-## Scan failure
+## Render diagnosis
 
-Check folder exists and is readable. Individual malformed videos become record warnings. Whole-scan failure appears in scan status. Retry is safe and upserts stable media IDs.
+Resolve canonical blocker codes in Review. Existing output/manifest, insufficient initial or continuing free space, source hash change, stale review/plan, missing media/audio, coverage/ambiguity/sync issues, unsupported required transforms, and revoked grants prevent completion. Cancel terminates the process group and removes only the exact owned partials. Startup moves owned partials to `state/recovery` and records their names; one-file final pairs are never called complete.
 
-## Render failure
+## Backup and restore
 
-Review UI/status message. Source availability and segment coverage are revalidated immediately before FFmpeg launch. Failed/canceled jobs remove partial output. Existing successful final output is not removed.
+Application backup is canonical SQLite state only; source libraries and rendered outputs remain separate.
 
-## Recovery
+```bash
+python3 scripts/state_admin.py backup STATE.sqlite3 BACKUP.sqlite3
+python3 scripts/state_admin.py verify BACKUP.sqlite3
+python3 scripts/state_admin.py dry-run-migrate BACKUP.sqlite3
+```
 
-- Reopen same library: stable ID derives from canonical root.
-- Re-scan: records upsert by stable library-relative ID.
-- Restart after interrupted render: partial file may remain only after abrupt process kill; delete only exact `*.partial.<ext>` after verifying no render process owns it.
-- Database corruption: restore stopped-service backup or move exact DB aside and rescan. Never delete source library.
+Stop the application before restore. Restore verifies the input, refuses without `--replace`, takes the state lock, creates a verified `*.pre-restore-*` rollback copy, stages the replacement, and atomically replaces the DB.
 
-## Verification
+```bash
+python3 scripts/state_admin.py restore STATE.sqlite3 BACKUP.sqlite3 --replace
+```
 
-Run unit/static checks from README. For release candidate, index multiple vendor/layout corpora read-only, exercise both anchoring modes, render H.264/AAC and FFV1/PCM, inspect outputs with FFprobe, and compare manifest intervals to decoded frames/audio.
+After restore, start normally, inspect projects/jobs/grants, and regrant unavailable source/output directories as needed. Restore never assumes media was included.
 
+## Retention
+
+Canonical projects, evidence, corrections, plans/reviews, jobs, and artifacts are not cache entries. Recent job events are compacted to 100,000. Registered derived cache entries are limited to 10,000/2 GiB; only unpinned exact files under `state/cache` are evicted. Quarantined recovery files require user inspection before deletion.

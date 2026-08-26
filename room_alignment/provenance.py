@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import re
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .models import ProvenanceEvidence
 
@@ -18,6 +19,71 @@ TIME_ONLY = re.compile(r"(?<!\d)(?P<hour>\d{2})[-_.:](?P<minute>\d{2})[-_.:](?P<
 GENERIC_TOKENS = {
     "clip", "video", "camera", "cam", "motion", "recording", "record", "event", "mp4", "mov", "mkv"
 }
+
+
+def normalize_timestamp(
+    raw_value: object,
+    time_zone: str,
+    dst_fold: int = 0,
+    nonexistent_policy: str = "REJECT",
+) -> dict[str, Any]:
+    raw = str(raw_value)
+    result: dict[str, Any] = {
+        "rawValue": raw,
+        "timeZone": time_zone,
+        "timezoneExplicit": False,
+        "ambiguity": "UNRESOLVED",
+        "dstFold": int(bool(dst_fold)),
+        "nonexistentPolicy": nonexistent_policy,
+        "resolvedUtc": None,
+    }
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        result["ambiguity"] = "UNPARSEABLE"
+        return result
+    if parsed.tzinfo is not None:
+        result.update(
+            timezoneExplicit=True,
+            timeZone=str(parsed.tzinfo),
+            ambiguity="EXPLICIT_OFFSET",
+            resolvedUtc=parsed.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+        )
+        return result
+    try:
+        zone = ZoneInfo(time_zone)
+    except (ZoneInfoNotFoundError, ValueError):
+        result["ambiguity"] = "INVALID_TIME_ZONE"
+        return result
+
+    def valid_candidate(value: datetime, fold: int) -> datetime | None:
+        candidate = value.replace(tzinfo=zone, fold=fold)
+        round_trip = candidate.astimezone(UTC).astimezone(zone).replace(tzinfo=None)
+        return candidate if round_trip == value else None
+
+    first = valid_candidate(parsed, 0)
+    second = valid_candidate(parsed, 1)
+    candidates = [item for item in (first, second) if item is not None]
+    distinct_offsets = {item.utcoffset() for item in candidates}
+    if not candidates:
+        result["ambiguity"] = "NONEXISTENT_LOCAL_TIME"
+        if nonexistent_policy == "SHIFT_FORWARD":
+            shifted = parsed
+            for _ in range(180):
+                shifted += timedelta(minutes=1)
+                candidate = valid_candidate(shifted, int(bool(dst_fold)))
+                if candidate:
+                    result.update(
+                        ambiguity="NONEXISTENT_SHIFTED_FORWARD",
+                        shiftedLocalValue=shifted.isoformat(),
+                        resolvedUtc=candidate.astimezone(UTC).isoformat().replace("+00:00", "Z"),
+                    )
+                    break
+        return result
+    chosen = candidates[min(int(bool(dst_fold)), len(candidates) - 1)]
+    result["ambiguity"] = "AMBIGUOUS_FOLD" if len(distinct_offsets) > 1 else "UNAMBIGUOUS_LOCAL_TIME"
+    result["resolvedUtc"] = chosen.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    return result
 
 
 def _parse_datetime(raw_date: str, raw_time: str) -> str | None:
@@ -49,7 +115,12 @@ def infer_from_path(path: Path, relative: Path) -> tuple[dict[str, Any], list[Pr
         captured = _parse_datetime(match.group("date"), match.group("time"))
         if captured:
             values["captured_at"] = captured
-            evidence.append(ProvenanceEvidence("filename", "captured_at", captured, 0.8, relative.as_posix()))
+            evidence.append(
+                ProvenanceEvidence(
+                    "filename", "captured_at", captured, 0.8, relative.as_posix(), raw_value=match.group(0),
+                    normalized_value=captured, uncertainty="timezone absent"
+                )
+            )
         break
     if "captured_at" not in values:
         date_match = None
@@ -69,7 +140,13 @@ def infer_from_path(path: Path, relative: Path) -> tuple[dict[str, Any], list[Pr
                 values["captured_at"] = captured
                 evidence.append(ProvenanceEvidence("filesystem", "captured_at.date", captured[:10], 0.65, parent.as_posix()))
                 evidence.append(ProvenanceEvidence("filename", "captured_at.time", captured[11:], 0.7, relative.as_posix()))
-                evidence.append(ProvenanceEvidence("importer", "captured_at", captured, 0.68, "folder-date + filename-time"))
+                evidence.append(
+                    ProvenanceEvidence(
+                        "importer", "captured_at", captured, 0.68, "folder-date + filename-time",
+                        raw_value=f"{parent.name} {time_match.group(0)}", normalized_value=captured,
+                        uncertainty="timezone absent",
+                    )
+                )
                 matched_text = time_match.group(0)
             except ValueError:
                 pass

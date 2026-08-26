@@ -1,11 +1,14 @@
 # Risk register
 
-| ID | Risk | Probability / impact | Response | State |
+| ID | Risk | Probability / impact | Current response | State |
 |---|---|---|---|---|
-| RISK-001 | Timestamp inference is wrong or absent | Medium / High | Preserve evidence/confidence; require reversible user alignment | Mitigated in model; richer correction UI planned |
-| RISK-002 | Vendor-specific filename logic becomes hidden contract | Medium / High | Generic parsers; unknown valid; custom fields retained; corpus tests | Mitigated |
-| RISK-003 | FFmpeg parser vulnerability | Low / High | Current FFmpeg, local trusted corpus expectation, subprocess isolation boundary documented | Residual |
-| RISK-004 | Render overwrites existing output | Medium / Medium | Existing outputs rejected; temporary render and atomic promotion | Mitigated; desktop shell may add explicit recoverable overwrite flow |
-| RISK-005 | Very large scan is slow | High / Medium | Bounded initial scan, background progress, persistent SQLite | Partial: incremental fingerprint skip is next optimization |
-| RISK-006 | Differing video geometry breaks concat | Medium / High | Preflight metadata available | Open: renderer normalization policy needs broader corpus matrix |
-| RISK-007 | Local hostile page calls loopback API | Low / High | Loopback, local Host validation, same-origin mutation check | Residual: add per-launch origin token before packaged release |
+| RISK-001 | Timestamp evidence is wrong, absent, naïve, or DST-ambiguous | Medium / High | Preserve raw/conflicting evidence and uncertainty; explicit library policy/correction ledger; reversible manual sync remains authoritative. | Bounded residual |
+| RISK-002 | Vendor-specific filenames or labels become identity | Medium / High | Generic intake/signature probe; candidate IDs separate from logical sources; same-label/candidate tests; explicit merge/split/reassign only. | Mitigated |
+| RISK-003 | Native media parser/encoder vulnerability | Low / High | Maintained external tools, loopback/local boundary, bounded I/O/time/concurrency, structured argv, process groups, no shell, secret-safe diagnostics. | Bounded residual; OS sandboxing remains future packaging work |
+| RISK-004 | Source mutation, destination overwrite, or incomplete pair is reported successful | Medium / High | Full pre/post source hashes; no-overwrite; exact partials; disk floor; per-file atomic promotion; COMPLETE only after both files and digests; startup recovery. | Mitigated |
+| RISK-005 | Large library causes unbounded memory or unusable latency | Medium / High | Streaming discovery, eight-worker ceiling, two-batch pending queue, 50-record DB batches, stable pagination, bounded retention; 26,520-video validation and benchmark. | Mitigated on reference hardware |
+| RISK-006 | Mixed geometry/timing/color/audio produces misleading fidelity | Medium / High | Explicit normalization plan; synthetic media matrix; HDR blocks without declared conversion; rotation warnings; compatible re-encode and archival lossless-after-processing wording. | Bounded residual across untested codecs/builds |
+| RISK-007 | Hostile browser origin invokes local authority | Low / High | One-time bootstrap, server-expiring session, CSRF, Host/Origin/fetch-metadata, restrictive CORS/CSP, short-lived session-bound SSE token. | Mitigated for browser-origin threat; same-user malware remains residual |
+| RISK-008 | Revoked grant or shutdown leaves background work running | Medium / High | Revocation marks dependent scan/analysis/render cancellation with `GRANT_REQUIRED`; workers poll and terminate; shutdown joins workers before releasing state ownership and kills unsettled render groups. | Mitigated |
+| RISK-009 | Migration failure corrupts or mixes schema | Low / High | Verified pre-migration backup; migration on staged copy; integrity check; atomic replace; failed staging/WAL/SHM cleanup; restore rollback copy. | Mitigated |
+| RISK-010 | SSE race or retention gap leaves UI showing stale job state | Medium / Medium | Sequence replay/reset contract plus continuous low-frequency canonical job polling even while SSE is healthy. | Mitigated |

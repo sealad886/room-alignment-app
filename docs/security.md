@@ -1,31 +1,20 @@
 # Security and privacy
 
-## Assets
+## Boundary and assets
 
-- Private video/audio content
-- Location/camera labels and timestamps
-- Source paths and provenance
-- Editorial decisions and rendered outputs
+The supported deployment is a single local user and a loopback-only HTTP service. Sensitive assets are footage/audio, timestamps, source identities, relative/absolute paths, provenance, decisions, output, manifests, and local session capability. Core workflow makes no external network request and emits no telemetry.
 
-## Trust boundaries
+## Controls
 
-- Browser ↔ loopback HTTP service
-- Service ↔ selected source directories
-- Service ↔ FFprobe/FFmpeg subprocesses
-- Service ↔ output directory
+- A one-time bootstrap URL is redacted from request logs, becomes unusable immediately, and creates an HttpOnly/SameSite=Strict session with both browser and server 12-hour expiry.
+- Sensitive API reads and mutations validate loopback Host, same-origin Origin when present, and fetch metadata. Mutations require CSRF. CORS is not opened. CSP disallows remote/script-inline/object/frame/form destinations; inline style is permitted only because data-driven timeline geometry uses style properties.
+- SSE tokens are random, session-bound, expire within 60 seconds for opening a connection, and are never logged. Reconnection obtains another token.
+- Source/output roots require explicit role grants, may not overlap, and are absent from public grant resources. Every access resolves beneath the current root; traversal, symlink, alias, and mount/path changes fail closed.
+- Discovery does not follow directory symlinks. Unknown extensions require a recognized container signature before probe. Sidecars are capped at 1 MB; HTTP bodies at 2 MB; media-tool stdout/stderr, pagination, replay, names, and concurrency are bounded.
+- FFprobe/FFmpeg use argument arrays, `shell=False`, no stdin, process groups, timeouts/cancellation, and bounded persisted diagnostics. Media errors do not persist source paths or arbitrary tool output.
+- Full SHA-256 source identity is computed for render authorization and revalidated before and after processing. Existing output is never overwritten. Continuing disk-space floor, owned partial names, atomic promotion, pair reconciliation, and output/manifest digests protect artifact integrity.
+- Logs contain route templates/status only, not bodies, credentials, source roots, media contents, or sidecar payloads. Default manifests contain stable IDs, library-relative paths, selected evidence resolutions, and required provenance only.
 
-## Threats and controls
+## Residual risk
 
-| Threat | Control |
-|---|---|
-| Path traversal | Resolve path; require source remains beneath canonical library root |
-| Source mutation | Scanner/prober only read; rendering reads inputs and writes separate destination |
-| Symlink escape | Directory walk does not follow directory symlinks; render revalidates canonical containment |
-| Malformed media | FFprobe timeout, bounded error text, no shell invocation |
-| Command injection | FFmpeg launched as argument array, never shell string |
-| Partial/corrupt final output | Render to sibling `.partial` path, atomically replace only on success |
-| Privacy leakage | Loopback default; local Host and same-origin mutation checks; no external requests; manifests use relative source paths |
-| Oversized request | JSON request capped at 10 MB |
-| Unsafe render | Preflight blocks gaps, overlaps, missing files, provenance omissions, and source overruns |
-
-Residual risks: local processes running as same user can access service and SQLite; FFmpeg remains complex native parser. Existing output files are rejected. Desktop packaging should add per-launch origin token/capability binding and a recoverable overwrite-confirmation flow.
+Same-OS-user malware may already read the same files or process memory. FFmpeg/FFprobe remain a complex native parser surface. Loopback defenses protect browser-origin/application authority but do not create an OS sandbox. Non-loopback binding, remote collaboration, accounts, and cloud sync are unsupported without a new authenticated architecture and threat review.

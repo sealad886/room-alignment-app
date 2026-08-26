@@ -1,0 +1,106 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Room Alignment local API",
+    "version": "1.0.0",
+    "description": "Normative local-only contract. All editorial times are signed integer microseconds."
+  },
+  "servers": [{"url": "/api/v1"}],
+  "security": [{"sessionCookie": []}],
+  "paths": {
+    "/system": {"get": {"operationId": "getSystem", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Capabilities", "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/System"}}}}}}},
+    "/session": {"get": {"operationId": "getSession", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Authenticated local session", "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/Session"}}}}}}},
+    "/openapi.json": {"get": {"operationId": "getOpenApiContract", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Normative OpenAPI contract"}}}},
+    "/contracts/{contractName}": {"parameters": [{"$ref": "#/components/parameters/ContractName"}], "get": {"operationId": "getJsonSchemaContract", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Normative JSON Schema contract"}}}},
+    "/grants": {
+      "get": {"operationId": "listGrants", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Directory grants"}}},
+      "post": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "createGrant", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/GrantCreate"}}}}, "responses": {"default": {"$ref": "#/components/responses/Error"}, "201": {"description": "Directory grant", "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/domain.schema.json#/$defs/DirectoryGrant"}}}}}}
+    },
+    "/grants/{grantId}/revoke": {"parameters": [{"$ref": "#/components/parameters/GrantId"}], "post": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "revokeGrant", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Revoked grant"}}}},
+    "/libraries": {
+      "get": {"operationId": "listLibraries", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Libraries"}}},
+      "post": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "createLibrary", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/LibraryCreate"}}}}, "responses": {"default": {"$ref": "#/components/responses/Error"}, "201": {"description": "Library", "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/Library"}}}}}}
+    },
+    "/libraries/{libraryId}/scans": {"parameters": [{"$ref": "#/components/parameters/LibraryId"}], "post": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "startScan", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/ScanStart"}}}}, "responses": {"default": {"$ref": "#/components/responses/Error"}, "202": {"description": "Scan", "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/Scan"}}}}}}},
+    "/libraries/{libraryId}/time-policy": {"parameters": [{"$ref": "#/components/parameters/LibraryId"}], "post": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "updateLibraryTimePolicy", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/LibraryTimePolicy"}}}}, "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Library with re-normalized timestamp policy"}}}},
+    "/libraries/{libraryId}/cluster-jobs": {"parameters": [{"$ref": "#/components/parameters/LibraryId"}], "post": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "startClusterAnalysis", "responses": {"default": {"$ref": "#/components/responses/Error"}, "202": {"description": "Non-mutating cluster analysis job"}}}},
+    "/libraries/{libraryId}/cluster-suggestions": {"parameters": [{"$ref": "#/components/parameters/LibraryId"}], "get": {"operationId": "listClusterSuggestions", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Evidence-bearing project membership suggestions"}}}},
+    "/scans/{scanId}": {"parameters": [{"$ref": "#/components/parameters/ScanId"}], "get": {"operationId": "getScan", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Scan"}}}},
+    "/scans/{scanId}/cancel": {"parameters": [{"$ref": "#/components/parameters/ScanId"}], "post": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "cancelScan", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Scan"}}}},
+    "/libraries/{libraryId}/media": {"parameters": [{"$ref": "#/components/parameters/LibraryId"}], "get": {"operationId": "listMedia", "parameters": [{"$ref": "#/components/parameters/Cursor"}, {"$ref": "#/components/parameters/Generation"}, {"$ref": "#/components/parameters/Limit"}], "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Stable media page"}}}},
+    "/media/{mediaId}": {"parameters": [{"$ref": "#/components/parameters/MediaId"}], "get": {"operationId": "getMedia", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Media asset"}}}},
+    "/media/{mediaId}/provenance/resolutions": {
+      "parameters": [{"$ref": "#/components/parameters/MediaId"}],
+      "get": {"operationId": "listProvenanceResolutions", "parameters": [{"$ref": "#/components/parameters/Field"}], "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Resolution ledger"}}},
+      "post": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "resolveProvenance", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/ProvenanceResolutionCreate"}}}}, "responses": {"default": {"$ref": "#/components/responses/Error"}, "201": {"description": "Resolution"}}}
+    },
+    "/projects": {
+      "get": {"operationId": "listProjects", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Projects"}}},
+      "post": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "createProject", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/ProjectCreate"}}}}, "responses": {"default": {"$ref": "#/components/responses/Error"}, "201": {"description": "Project", "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/domain.schema.json#/$defs/Project"}}}}}}
+    },
+    "/projects/{projectId}": {"parameters": [{"$ref": "#/components/parameters/ProjectId"}], "get": {"operationId": "getProject", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Project"}}}},
+    "/projects/{projectId}/revisions/{revision}": {"parameters": [{"$ref": "#/components/parameters/ProjectId"}, {"$ref": "#/components/parameters/Revision"}], "get": {"operationId": "getProjectRevision", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Retained immutable project revision", "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/domain.schema.json#/$defs/Project"}}}}}}},
+    "/projects/{projectId}/commands": {
+      "parameters": [{"$ref": "#/components/parameters/ProjectId"}],
+      "post": {"security": [{"sessionCookie": [], "csrfToken": []}],
+        "operationId": "applyProjectCommand",
+        "parameters": [{"$ref": "#/components/parameters/Preview"}],
+        "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ProjectCommand"}}}},
+        "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Command result", "content": {"application/json": {"schema": {"$ref": "#/components/schemas/CommandResult"}}}}}
+      }
+    },
+    "/projects/{projectId}/program": {"parameters": [{"$ref": "#/components/parameters/ProjectId"}], "get": {"operationId": "getCompiledProgram", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Compiled program"}}}},
+    "/projects/{projectId}/program-at": {"parameters": [{"$ref": "#/components/parameters/ProjectId"}], "get": {"operationId": "getProgramAt", "parameters": [{"$ref": "#/components/parameters/OutputUs"}], "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Canonical program selection at outputUs"}}}},
+    "/projects/{projectId}/suggestions": {"parameters": [{"$ref": "#/components/parameters/ProjectId"}], "get": {"operationId": "listSuggestions", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Suggestions"}}}},
+    "/projects/{projectId}/alignment-jobs": {"parameters": [{"$ref": "#/components/parameters/ProjectId"}], "post": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "startAlignmentAnalysis", "responses": {"default": {"$ref": "#/components/responses/Error"}, "202": {"description": "Non-mutating alignment analysis job"}}}},
+    "/projects/{projectId}/render-plans": {"parameters": [{"$ref": "#/components/parameters/ProjectId"}], "post": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "createRenderPlan", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/RenderPlanCreate"}}}}, "responses": {"default": {"$ref": "#/components/responses/Error"}, "201": {"description": "Immutable render plan"}}}},
+    "/render-plans/{planId}": {"parameters": [{"$ref": "#/components/parameters/PlanId"}], "get": {"operationId": "getRenderPlan", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Render plan"}}}},
+    "/render-plans/{planId}/review": {"parameters": [{"$ref": "#/components/parameters/PlanId"}], "post": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "attestReview", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/ReviewCreate"}}}}, "responses": {"default": {"$ref": "#/components/responses/Error"}, "201": {"description": "Review attestation"}}}},
+    "/render-plans/{planId}/render": {"parameters": [{"$ref": "#/components/parameters/PlanId"}], "post": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "startRender", "responses": {"default": {"$ref": "#/components/responses/Error"}, "202": {"description": "Render job and artifact"}}}},
+    "/jobs/{jobId}": {"parameters": [{"$ref": "#/components/parameters/JobId"}], "get": {"operationId": "getJob", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Durable job"}}}},
+    "/jobs/{jobId}/cancel": {"parameters": [{"$ref": "#/components/parameters/JobId"}], "post": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "cancelJob", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Job"}}}},
+    "/jobs/event-token": {"post": {"security": [{"sessionCookie": [], "csrfToken": []}], "operationId": "createEventToken", "responses": {"default": {"$ref": "#/components/responses/Error"}, "201": {"description": "Short-lived SSE token", "content": {"application/json": {"schema": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/EventToken"}}}}}}},
+    "/events": {"get": {"operationId": "streamEvents", "security": [{"sessionCookie": [], "eventToken": []}], "parameters": [{"$ref": "#/components/parameters/EventToken"}, {"$ref": "#/components/parameters/After"}], "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "text/event-stream; see contracts/events.md"}}}},
+    "/artifacts/{artifactId}": {"parameters": [{"$ref": "#/components/parameters/ArtifactId"}], "get": {"operationId": "getArtifact", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Artifact state"}}}},
+    "/artifacts/{artifactId}/video": {"parameters": [{"$ref": "#/components/parameters/ArtifactId"}], "get": {"operationId": "getArtifactVideo", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Completed video artifact byte stream", "content": {"video/mp4": {"schema": {"type": "string", "format": "binary"}}, "video/x-matroska": {"schema": {"type": "string", "format": "binary"}}}}}}},
+    "/artifacts/{artifactId}/manifest": {"parameters": [{"$ref": "#/components/parameters/ArtifactId"}], "get": {"operationId": "getManifest", "responses": {"default": {"$ref": "#/components/responses/Error"}, "200": {"description": "Completed manifest"}}}}
+  },
+  "components": {
+    "responses": {
+      "Error": {
+        "description": "Stable non-success response; error.code identifies validation, authorization, concurrency, source, plan, job, destination, or internal failure semantics.",
+        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}}
+      }
+    },
+    "securitySchemes": {
+      "sessionCookie": {"type": "apiKey", "in": "cookie", "name": "ra_session"},
+      "csrfToken": {"type": "apiKey", "in": "header", "name": "X-CSRF-Token"},
+      "eventToken": {"type": "apiKey", "in": "query", "name": "token"}
+    },
+    "parameters": {
+      "ContractName": {"name": "contractName", "in": "path", "required": true, "schema": {"type": "string"}},
+      "GrantId": {"name": "grantId", "in": "path", "required": true, "schema": {"type": "string"}},
+      "LibraryId": {"name": "libraryId", "in": "path", "required": true, "schema": {"type": "string"}},
+      "ScanId": {"name": "scanId", "in": "path", "required": true, "schema": {"type": "string"}},
+      "MediaId": {"name": "mediaId", "in": "path", "required": true, "schema": {"type": "string"}},
+      "ProjectId": {"name": "projectId", "in": "path", "required": true, "schema": {"type": "string"}},
+      "Revision": {"name": "revision", "in": "path", "required": true, "schema": {"type": "integer", "minimum": 1}},
+      "PlanId": {"name": "planId", "in": "path", "required": true, "schema": {"type": "string"}},
+      "JobId": {"name": "jobId", "in": "path", "required": true, "schema": {"type": "string"}},
+      "ArtifactId": {"name": "artifactId", "in": "path", "required": true, "schema": {"type": "string"}},
+      "Cursor": {"name": "cursor", "in": "query", "schema": {"type": "string"}},
+      "Generation": {"name": "generation", "in": "query", "schema": {"type": "integer", "minimum": 0}},
+      "Limit": {"name": "limit", "in": "query", "schema": {"type": "integer", "minimum": 1, "maximum": 500}},
+      "Field": {"name": "field", "in": "query", "schema": {"type": "string"}},
+      "Preview": {"name": "preview", "in": "query", "schema": {"type": "boolean", "default": false}},
+      "OutputUs": {"name": "outputUs", "in": "query", "schema": {"type": "integer", "minimum": 0, "default": 0}},
+      "EventToken": {"name": "token", "in": "query", "required": true, "schema": {"type": "string"}},
+      "After": {"name": "after", "in": "query", "schema": {"type": "integer", "minimum": 0}}
+    },
+    "schemas": {
+      "ProjectCommand": {"$ref": "https://room-alignment.local/contracts/commands.schema.json"},
+      "CommandResult": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/CommandResult"},
+      "ErrorEnvelope": {"$ref": "https://room-alignment.local/contracts/api.schema.json#/$defs/ErrorEnvelope"}
+    }
+  }
+}
