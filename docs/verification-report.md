@@ -1,6 +1,41 @@
-# Installable package verification report
+# Verification report
 
 Date: 2026-08-26 (Europe/Dublin)
+
+## Comprehensive timeline source candidate
+
+Scope: isolated `codex/comprehensive-timeline` worktree. This evidence covers
+source implementation and local runtime validation for multi-root libraries,
+hierarchical sessions/events, exact multi-cluster selection, evidence-first
+alignment, explicit composition sections, optimized single-view first cuts,
+independent audio, immutable render provenance, and large-project operation.
+It does not claim a rebuilt package, installation, push, PR, merge, publication,
+deployment, or production observation.
+
+- Six milestone commits isolate contracts, multi-root scanning, hierarchical
+  selection, evidence-first alignment, large-project compilation, and render
+  provenance.
+- A connected synthetic run selected two non-adjacent events containing four
+  exact clips across two sources. Evidence span was 65 seconds; explicit
+  downtime exclusion produced a 9.083-second output with three optimized source
+  transitions. Cut and Review became available only after accepted alignment.
+- Program Video and Program Audio remained independent in Cut. Browser console
+  reported no warnings or errors through Review.
+- A fresh read-only reference-day scan indexed 726 videos and one non-video
+  file with zero warnings. Hierarchical clustering produced 21 sessions and
+  151 events with zero timed assets left unclustered. First session contained
+  116 clips, 12 events, and three source candidates across about 76 minutes.
+- Source-tree metadata digest remained unchanged before and after validation;
+  no identifying filename or absolute source path is committed.
+- `scripts/benchmark_large_project.py` compiled 10,000 contiguous clips into
+  10,000 video and 10,000 audio slices in under 0.5 seconds with under 100 MiB
+  tracked Python peak memory on reference hardware.
+- Existing schema-v6 UAT state migrated and reopened successfully. A Cut audio
+  decision changed to intentional silence through the delta endpoint, advanced
+  canonical revision, and remained Review-ready with zero browser warnings or
+  errors.
+- `python3 -m unittest discover -s tests` passed 153 tests. Generated-client
+  parity, Python byte-compilation, JavaScript syntax, and diff checks passed.
 
 Scope: version 0.3.0 package candidate in isolated `codex/installable-package` worktree, based on merged PR #2 commit `c27bca3`. Evidence covers local package build and temporary isolated installation. It does not claim signing, notarization, publication, distribution, system-wide installation, deployment, or production operation.
 

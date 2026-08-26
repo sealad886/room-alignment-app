@@ -44,7 +44,6 @@ COMMAND_PAYLOAD_FIELDS = {
     },
     "RejectAlignmentProposal": {"proposalSetId", "proposalId", "digest"},
     "RejectAlignmentProposalSet": {"proposalSetId", "digest"},
-    "InitializeProgram": set(),
     "SetTimelineSections": {"sections"},
     "GenerateProgramDraft": {
         "alignmentDigest", "selectionDigest", "gapMode", "sectionProposalDigest", "replaceExisting",
@@ -1022,7 +1021,6 @@ def apply_command(
         ),
         "RejectAlignmentProposal": lambda _p, _payload: None,
         "RejectAlignmentProposalSet": lambda _p, _payload: None,
-        "InitializeProgram": lambda p, _payload: _replace(p, initialize_program(p, assets)),
         "SetTimelineSections": _set_timeline_sections,
         "GenerateProgramDraft": lambda p, command_payload: _replace(
             p, generate_program_draft(p, assets, command_payload)

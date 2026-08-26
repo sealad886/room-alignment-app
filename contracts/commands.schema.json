@@ -14,7 +14,7 @@
         "SplitLogicalSource", "ArchiveLogicalSource", "AssignClip", "ConfirmSourceIdentities", "SetReferenceSource",
         "SetSyncTransform", "SetClipAlignment", "AlignMarkedMoments",
         "AcceptAlignmentProposalSet", "AcceptAlignmentProposal", "RejectAlignmentProposal",
-        "RejectAlignmentProposalSet", "InitializeProgram", "SetTimelineSections",
+        "RejectAlignmentProposalSet", "SetTimelineSections",
         "GenerateProgramDraft", "AddVideoBlock", "SplitVideoBlock",
         "MoveVideoBoundary", "DeleteVideoBlock", "AssignVideoSource", "PinVideoClip", "CutToSource",
         "AddAudioBlock", "SplitAudioBlock", "MoveAudioBoundary", "DeleteAudioBlock", "SetAudioMode",
@@ -43,7 +43,6 @@
         {"$ref": "#/$defs/AcceptAlignmentProposal"},
         {"$ref": "#/$defs/RejectAlignmentProposal"},
         {"$ref": "#/$defs/RejectAlignmentProposalSet"},
-        {"$ref": "#/$defs/InitializeProgram"},
         {"$ref": "#/$defs/SetTimelineSections"},
         {"$ref": "#/$defs/GenerateProgramDraft"},
         {"$ref": "#/$defs/AddVideoBlock"},
@@ -119,7 +118,6 @@
     "RejectAlignmentProposalSet": {
       "properties": {"commandType": {"const": "RejectAlignmentProposalSet"}, "payload": {"type": "object", "additionalProperties": false, "required": ["proposalSetId", "digest"], "properties": {"proposalSetId": {"$ref": "#/$defs/Id"}, "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}}
     },
-    "InitializeProgram": {"deprecated": true, "properties": {"commandType": {"const": "InitializeProgram"}, "payload": {"$ref": "#/$defs/Empty"}}},
     "SetTimelineSections": {
       "properties": {"commandType": {"const": "SetTimelineSections"}, "payload": {"type": "object", "additionalProperties": false, "required": ["sections"], "properties": {"sections": {"type": "array", "minItems": 1, "items": {"$ref": "./timeline.schema.json#/$defs/TimelineSection"}}}}}
     },

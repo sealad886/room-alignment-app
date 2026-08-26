@@ -54,7 +54,7 @@ JOB_STATES = {
 }
 PROGRAM_AFFECTING_COMMANDS = {
     "MergeLogicalSources", "SplitLogicalSource", "ArchiveLogicalSource", "AssignClip", "SetReferenceSource",
-    "SetSyncTransform", "SetClipAlignment", "InitializeProgram", "SetTimelineSections",
+    "SetSyncTransform", "SetClipAlignment", "SetTimelineSections",
     "GenerateProgramDraft", "AddVideoBlock", "SplitVideoBlock", "MoveVideoBoundary",
     "DeleteVideoBlock", "AssignVideoSource", "PinVideoClip", "CutToSource", "AddAudioBlock",
     "SplitAudioBlock", "MoveAudioBoundary", "DeleteAudioBlock", "SetAudioMode", "SetAnchoringMode",
@@ -492,6 +492,7 @@ class Store:
         staging = self.path.with_name(f".{self.path.name}.migration-{timestamp}")
         source = sqlite3.connect(f"{self.path.resolve().as_uri()}?mode=ro", uri=True)
         destination = sqlite3.connect(staging)
+        destination.row_factory = sqlite3.Row
         try:
             source.backup(destination)
             destination.executescript(SCHEMA)

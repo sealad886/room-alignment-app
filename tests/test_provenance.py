@@ -32,10 +32,10 @@ class ProvenanceTests(unittest.TestCase):
 
     def test_composes_parent_date_and_filename_time_without_vendor_contract(self):
         root = Path("archive")
-        path = root / "24-10" / "24-10-29" / "11-55-35_FrontdoorG8T1K00132550188_001.mp4"
+        path = root / "24-10" / "24-10-29" / "11-55-35_NorthA1BCDEF001_001.mp4"
         values, evidence = infer_from_path(path, path.relative_to(root))
         self.assertEqual(values["captured_at"], "2024-10-29T11:55:35")
-        self.assertEqual(values["camera"], "Frontdoor")
+        self.assertEqual(values["camera"], "North")
         self.assertEqual(values["sequence"], "001")
         self.assertEqual({item.kind for item in evidence if item.field.startswith("captured_at")}, {"filesystem", "filename", "importer"})
 

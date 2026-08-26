@@ -27,8 +27,9 @@ preparation evidence-first.
 - `contracts/timeline.schema.json`: roots, catalogs, clusters, selections,
   alignment, sections, windows, draft plans, and slates.
 - `contracts/domain.schema.json`: project and clip composition.
-- `contracts/commands.schema.json`: named alignment, section, and draft commands;
-  `InitializeProgram` is deprecated.
+- `contracts/commands.schema.json`: named alignment, section, and draft commands.
+  The legacy `InitializeProgram` write command is removed; first cuts require
+  accepted alignment plus `GenerateProgramDraft`.
 - `contracts/api.schema.json` and `contracts/openapi.json`: HTTP resources and
   generated-client operations.
 

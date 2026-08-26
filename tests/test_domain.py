@@ -213,6 +213,14 @@ class ProgramCompilerTests(unittest.TestCase):
 
 
 class CommandTests(unittest.TestCase):
+    def test_legacy_program_initialization_command_is_rejected(self):
+        media = asset("a", "Door", 5_000_000)
+        project = new_project(
+            "Event", "lib", [media], "project", initialize_legacy_program=False
+        )
+        with self.assertRaisesRegex(DomainError, "Unsupported commandType"):
+            apply_command(project, "InitializeProgram", {}, {"a": media})
+
     def test_new_evidence_project_accepts_manual_alignment_before_program_generation(self):
         media = asset("a", "Door", 5_000_000)
         media["captured_at"] = "2025-10-15T12:00:00+00:00"

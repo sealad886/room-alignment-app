@@ -490,6 +490,18 @@ class StoreV1Tests(unittest.TestCase):
                 if sidecar.exists():
                     self.assertNotEqual(sidecar.read_bytes(), stale)
 
+    def test_staged_migration_uses_named_rows_for_existing_canonical_state(self):
+        state = Path(self.temp.name) / "state.sqlite3"
+        connection = sqlite3.connect(state)
+        connection.execute("PRAGMA user_version=6")
+        connection.commit()
+        connection.close()
+
+        reopened = Store(state)
+
+        self.assertEqual(reopened.library(self.library["id"])["id"], self.library["id"])
+        self.assertTrue(list(Path(self.temp.name).glob("state.sqlite3.backup-v6-*")))
+
     def test_legacy_project_migration_preserves_unknowns_and_requires_explicit_silence(self):
         first = self.record("first", "first.mp4")
         second = self.record("second", "second.mp4")
