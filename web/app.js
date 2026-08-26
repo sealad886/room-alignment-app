@@ -138,10 +138,15 @@ async function loadLibraries() {
   renderRecentProjects();
   if (!libraries.length) return;
   state.library = libraries[0];
+  syncLibraryControls();
+  await loadMediaPage(true);
+}
+
+function syncLibraryControls() {
+  if (!state.library) return;
   $("#library-time-zone").value = state.library.timeZone || "UTC";
   $("#library-dst-fold").value = String(state.library.dstFold || 0);
   $("#library-nonexistent").value = state.library.nonexistentPolicy || "REJECT";
-  await loadMediaPage(true);
 }
 
 async function loadMediaPage(reset = false) {
@@ -151,6 +156,10 @@ async function loadMediaPage(reset = false) {
     state.mediaById.clear();
     state.mediaCursor = null;
     state.mediaGeneration = null;
+    state.groups = [];
+    state.group = [];
+    state.groupName = null;
+    state.selectedMedia = new Set();
   }
   const query = new URLSearchParams({limit: "500"});
   if (state.mediaCursor) query.set("cursor", state.mediaCursor);
@@ -234,12 +243,15 @@ function selectGroup(index) {
 }
 
 async function ensureProjectMedia(project) {
-  const missing = [...new Set(
-    project.clips.map(clip => clip.assetId).filter(assetId => !state.mediaById.has(assetId))
+  const missingDetails = [...new Set(
+    project.clips.map(clip => clip.assetId).filter(assetId => {
+      const media = state.mediaById.get(assetId);
+      return !media || !Array.isArray(media.resolutions);
+    })
   )];
-  for (let index = 0; index < missing.length; index += 8) {
+  for (let index = 0; index < missingDetails.length; index += 8) {
     const results = await Promise.allSettled(
-      missing.slice(index, index + 8).map(mediaId => client.getMedia({mediaId}))
+      missingDetails.slice(index, index + 8).map(mediaId => client.getMedia({mediaId}))
     );
     for (const result of results) {
       if (result.status === "fulfilled") state.mediaById.set(result.value.id, result.value);
@@ -269,7 +281,12 @@ async function openProject(projectSummary) {
   try {
     const project = await client.getProject({projectId: projectSummary.id});
     const libraries = await client.listLibraries();
-    state.library = libraries.find(item => item.id === project.libraryId) || state.library;
+    const projectLibrary = libraries.find(item => item.id === project.libraryId);
+    if (!projectLibrary) throw new Error("Project library is unavailable");
+    const libraryChanged = state.library?.id !== projectLibrary.id;
+    state.library = projectLibrary;
+    syncLibraryControls();
+    if (libraryChanged) await loadMediaPage(true);
     await ensureProjectMedia(project);
     state.project = project;
     state.compiled = await client.getCompiledProgram({projectId: project.id});
@@ -452,6 +469,15 @@ async function recordProvenanceCorrection(event, media) {
 
 function provenanceMarkup(media) {
   if (!media) return "<p>Source metadata unavailable.</p>";
+  const resolutions = media.resolutions || [];
+  const resolutionMarkup = resolutions.length
+    ? `<p class="eyebrow">Saved resolution ledger</p>${resolutions.map(item => `
+      <div class="confidence">
+        <strong>${safe(item.field)} · revision ${safe(item.revision)}</strong>
+        <p class="mono">${safe(JSON.stringify(item.resolution))}</p>
+        <small>Rationale: ${safe(item.rationale || "Not supplied")} · ${safe(item.actor)} · ${safe(item.createdAt)}</small>
+      </div>`).join("")}`
+    : '<p class="muted">No saved provenance resolutions.</p>';
   return `<p class="eyebrow">Inspectable source asset</p><h2>${safe(mediaLabel(media))}</h2>
     <div class="summary">
       <div class="summary-row"><span>Opaque asset ID</span><strong class="mono">${safe(media.id)}</strong></div>
@@ -459,7 +485,7 @@ function provenanceMarkup(media) {
       <div class="summary-row"><span>Captured evidence</span><strong>${safe(media.captured_at || "Unresolved")}</strong></div>
       <div class="summary-row"><span>Streams</span><strong>${media.streams?.length || 0}</strong></div>
       <div class="summary-row"><span>Evidence observations</span><strong>${media.evidence?.length || 0}</strong></div>
-    </div><pre>${safe(JSON.stringify(media.evidence || [], null, 2))}</pre>`;
+    </div>${resolutionMarkup}<p class="eyebrow">Retained raw evidence</p><pre>${safe(JSON.stringify(media.evidence || [], null, 2))}</pre>`;
 }
 
 function segmentMarkup(block, index, durationUs, audio = false) {

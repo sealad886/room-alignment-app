@@ -1365,6 +1365,16 @@ class Store:
             **suggestion,
         }
         with self._lock, self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if value.get("projectId") is not None:
+                project = db.execute(
+                    "SELECT revision FROM projects WHERE id=?", (value["projectId"],)
+                ).fetchone()
+                if not project:
+                    raise DomainError("NOT_FOUND", "Project not found")
+                if int(project["revision"]) != int(value.get("projectRevision", -1)):
+                    value["status"] = "STALE"
+                    value["invalidationReason"] = "Project revision changed before suggestion was saved"
             db.execute(
                 "INSERT INTO suggestions(id,project_id,library_id,kind,status,input_digest,algorithm,algorithm_version,"
                 "config_digest,project_revision,confidence,suggestion_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",

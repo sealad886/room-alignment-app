@@ -394,6 +394,35 @@ class StoreV1Tests(unittest.TestCase):
         self.assertEqual(first["id"], "plan-one")
         self.assertEqual(second["id"], "plan-one")
 
+    def test_suggestion_saved_after_project_edit_is_immediately_stale(self):
+        self.scan("FULL", [self.record("suggestion-media", "suggestion.mp4")])
+        project = self.store.create_project("Suggestion", self.library["id"], ["suggestion-media"])
+        self.store.apply_project_command(
+            project["id"],
+            {
+                "commandId": "advance-before-suggestion",
+                "expectedRevision": project["revision"],
+                "commandType": "UpdateProjectMetadata",
+                "payload": {"name": "Advanced"},
+            },
+        )
+        suggestion = self.store.save_suggestion(
+            {
+                "projectId": project["id"],
+                "libraryId": self.library["id"],
+                "kind": "ALIGNMENT",
+                "inputDigest": "old-project-input",
+                "algorithm": "test-alignment",
+                "projectRevision": project["revision"],
+                "confidence": 0.5,
+                "evidence": [],
+                "limitations": [],
+            }
+        )
+        self.assertEqual(suggestion["status"], "STALE")
+        self.assertIn("revision changed", suggestion["invalidationReason"])
+        self.assertEqual(self.store.suggestions(project["id"])[0]["status"], "STALE")
+
 
 if __name__ == "__main__":
     unittest.main()

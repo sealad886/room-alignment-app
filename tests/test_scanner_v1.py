@@ -113,14 +113,20 @@ class ScannerSafetyTests(unittest.TestCase):
             root = Path(directory)
             for index in range(4):
                 (root / f"{index}.mp4").write_bytes(b"media")
-            second_started = threading.Event()
+            another_started = threading.Event()
             stopped = threading.Event()
+            start_lock = threading.Lock()
+            started_count = 0
 
             def controlled_scan(_root, path, library_id, canceled):
-                if path.name == "0.mp4":
-                    second_started.wait(1)
+                nonlocal started_count
+                with start_lock:
+                    start_order = started_count
+                    started_count += 1
+                if start_order == 0:
+                    another_started.wait(1)
                 else:
-                    second_started.set()
+                    another_started.set()
                     while not canceled():
                         time.sleep(0.01)
                     stopped.set()
