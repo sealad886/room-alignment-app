@@ -132,6 +132,45 @@ class ScannerSafetyTests(unittest.TestCase):
             probe.assert_not_called()
             self.assertEqual([record.id for record in records], ["asset"])
 
+    def test_incremental_scan_bulk_loads_unchanged_assets_without_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            existing = {}
+            for name in ("one.mp4", "two.mp4"):
+                media = root / name
+                media.write_bytes(name.encode())
+                existing[name] = {
+                    "id": f"asset-{name}",
+                    "library_id": "library",
+                    "rootId": "root-a",
+                    "relative_path": name,
+                    "size": media.stat().st_size,
+                    "modified_ns": media.stat().st_mtime_ns,
+                    "fingerprint": quick_fingerprint(media),
+                    "evidence": [],
+                }
+            batch_calls = []
+
+            def lookup(paths):
+                batch_calls.append(list(paths))
+                return {path: existing[path] for path in paths}
+
+            with patch("room_alignment.scanner.probe") as probe:
+                records = list(
+                    iter_scan_records(
+                        root,
+                        "library",
+                        root_id="root-a",
+                        mode="INCREMENTAL",
+                        existing_batch_lookup=lookup,
+                        probe_workers=2,
+                    )
+                )
+            probe.assert_not_called()
+            self.assertEqual({record.id for record in records}, {"asset-one.mp4", "asset-two.mp4"})
+            self.assertTrue(all(record.root_id == "root-a" for record in records))
+            self.assertEqual(sum(len(paths) for paths in batch_calls), 2)
+
     def test_closing_scan_generator_stops_owned_probe_work_promptly(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

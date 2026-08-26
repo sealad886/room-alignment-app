@@ -205,6 +205,65 @@ class ServerBoundaryTests(unittest.TestCase):
         self.assertEqual(200, status)
         self.assertEqual(schema["title"], "Room Alignment provenance manifest v1")
 
+    def test_multi_root_library_routes_and_selected_root_scan(self) -> None:
+        cookie, csrf = self.bootstrap()
+        second_source = self.root / "second-source"
+        second_source.mkdir()
+        grants = []
+        for source in (self.source, second_source):
+            status, _headers, grant = self.request(
+                "POST",
+                "/api/v1/grants",
+                body={"path": str(source), "role": "READ_ONLY_SOURCE"},
+                cookie=cookie,
+                csrf=csrf,
+            )
+            self.assertEqual(status, 201)
+            grants.append(grant)
+        status, _headers, library = self.request(
+            "POST",
+            "/api/v1/libraries",
+            body={"name": "Several folders", "timeZone": "Europe/Dublin"},
+            cookie=cookie,
+            csrf=csrf,
+        )
+        self.assertEqual(status, 201)
+        roots = []
+        for index, grant in enumerate(grants):
+            status, _headers, root = self.request(
+                "POST",
+                f"/api/v1/libraries/{library['id']}/roots",
+                body={"grantId": grant["id"], "label": f"Folder {index + 1}"},
+                cookie=cookie,
+                csrf=csrf,
+            )
+            self.assertEqual(status, 201)
+            roots.append(root)
+        status, _headers, listed = self.request(
+            "GET", f"/api/v1/libraries/{library['id']}/roots", cookie=cookie
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual([item["id"] for item in listed], [item["id"] for item in roots])
+
+        status, _headers, scan = self.request(
+            "POST",
+            f"/api/v1/libraries/{library['id']}/scans",
+            body={"mode": "FULL", "rootIds": [roots[1]["id"]]},
+            cookie=cookie,
+            csrf=csrf,
+        )
+        self.assertEqual(status, 202)
+        deadline = time.monotonic() + 2
+        while scan["status"] not in {"SUCCEEDED", "FAILED", "CANCELED"} and time.monotonic() < deadline:
+            time.sleep(0.02)
+            status, _headers, scan = self.request(
+                "GET", f"/api/v1/scans/{scan['id']}", cookie=cookie
+            )
+            self.assertEqual(status, 200)
+        self.assertEqual(scan["status"], "SUCCEEDED")
+        self.assertEqual(scan["rootIds"], [roots[1]["id"]])
+        self.assertTrue(scan["roots"][0]["fullTraversalCompleted"])
+
     def test_source_preview_is_authenticated_read_only_and_range_capable(self) -> None:
         source_file = self.source / "clip.mp4"
         source_file.write_bytes(b"0123456789")

@@ -58,6 +58,13 @@ class StoreV1Tests(unittest.TestCase):
         output = self.store.create_grant(self.output, "WRITE_OUTPUT")
         self.assertEqual(output["role"], "WRITE_OUTPUT")
 
+    def test_grant_identity_change_fails_closed(self):
+        moved = Path(self.temp.name) / "moved-source"
+        self.root.rename(moved)
+        self.root.mkdir()
+        with self.assertRaisesRegex(DomainError, "identity changed"):
+            self.store.library_root(self.library["id"])
+
     def test_only_successful_full_scan_marks_unseen_assets_missing(self):
         one = self.record("one", "one.mp4")
         two = self.record("two", "two.mp4")
@@ -66,6 +73,117 @@ class StoreV1Tests(unittest.TestCase):
         self.assertFalse(self.store.media_record("two")["missing"])
         self.scan("FULL", [one])
         self.assertTrue(self.store.media_record("two")["missing"])
+
+    def test_multi_root_paths_are_distinct_and_missing_is_root_scoped(self):
+        second_root = Path(self.temp.name) / "second-source"
+        second_root.mkdir()
+        second_grant = self.store.create_grant(second_root, "READ_ONLY_SOURCE")
+        second = self.store.add_library_root(self.library["id"], second_grant["id"])
+        first = self.store.library(self.library["id"])["roots"][0]
+        (self.root / "same.mp4").write_bytes(b"first")
+        (second_root / "same.mp4").write_bytes(b"second")
+        first_record = MediaRecord(
+            "asset-first",
+            self.library["id"],
+            "same.mp4",
+            5,
+            1,
+            root_id=first["id"],
+            fingerprint={"size": 5, "modifiedNs": 1},
+        )
+        second_record = MediaRecord(
+            "asset-second",
+            self.library["id"],
+            "same.mp4",
+            6,
+            1,
+            root_id=second["id"],
+            fingerprint={"size": 6, "modifiedNs": 1},
+        )
+        scan = self.store.begin_scan(
+            self.library["id"], "FULL", root_ids=[first["id"], second["id"]]
+        )
+        self.store.save_media_batch(scan["id"], [first_record, second_record])
+        self.store.scan_progress(scan["id"], processed=1, root_id=first["id"])
+        self.store.scan_progress(scan["id"], processed=1, root_id=second["id"])
+        self.store.finish_scan_root(
+            scan["id"], first["id"], "SUCCEEDED", full_traversal_completed=True
+        )
+        self.store.finish_scan_root(
+            scan["id"], second["id"], "SUCCEEDED", full_traversal_completed=True
+        )
+        self.store.finish_scan(scan["id"], "SUCCEEDED", {"videos": 2})
+
+        page = self.store.media_page(self.library["id"])
+        self.assertEqual({item["id"] for item in page["items"]}, {"asset-first", "asset-second"})
+        self.assertEqual({item["rootId"] for item in page["items"]}, {first["id"], second["id"]})
+
+        root_only = self.store.begin_scan(self.library["id"], "FULL", root_ids=[first["id"]])
+        self.store.finish_scan_root(
+            root_only["id"], first["id"], "SUCCEEDED", full_traversal_completed=True
+        )
+        self.store.finish_scan(root_only["id"], "SUCCEEDED", {"videos": 0})
+        self.assertTrue(self.store.media_record("asset-first")["missing"])
+        self.assertFalse(self.store.media_record("asset-second")["missing"])
+
+    def test_library_rejects_duplicate_nested_and_overlapping_roots(self):
+        nested = self.root / "nested"
+        nested.mkdir()
+        nested_grant = self.store.create_grant(nested, "READ_ONLY_SOURCE")
+        with self.assertRaisesRegex(DomainError, "nested"):
+            self.store.add_library_root(self.library["id"], nested_grant["id"])
+
+    def test_revoking_one_library_root_preserves_other_root(self):
+        second_root = Path(self.temp.name) / "second-source"
+        second_root.mkdir()
+        second_grant = self.store.create_grant(second_root, "READ_ONLY_SOURCE")
+        second = self.store.add_library_root(self.library["id"], second_grant["id"])
+        first = self.store.library(self.library["id"])["roots"][0]
+        self.store.revoke_library_root(self.library["id"], first["id"])
+        active = self.store.active_library_root_paths(self.library["id"])
+        self.assertEqual([item[0] for item in active], [second["id"]])
+        self.assertFalse(self.store.library_roots(self.library["id"])[0]["active"])
+
+    def test_disconnected_root_reconnects_with_stable_root_identity(self):
+        root = self.store.library(self.library["id"])["roots"][0]
+        self.store.revoke_library_root(self.library["id"], root["id"])
+        replacement_grant = self.store.create_grant(self.root, "READ_ONLY_SOURCE")
+        reconnected = self.store.add_library_root(self.library["id"], replacement_grant["id"])
+        self.assertEqual(reconnected["id"], root["id"])
+        self.assertTrue(reconnected["active"])
+        self.assertEqual(self.store.active_library_root_paths(self.library["id"])[0][0], root["id"])
+
+    def test_root_time_policy_override_is_explicit_and_survives_library_policy_change(self):
+        second_root = Path(self.temp.name) / "second-source"
+        second_root.mkdir()
+        second_grant = self.store.create_grant(second_root, "READ_ONLY_SOURCE")
+        second = self.store.add_library_root(
+            self.library["id"],
+            second_grant["id"],
+            time_policy_override={
+                "timeZone": "America/New_York",
+                "dstFold": 0,
+                "nonexistentPolicy": "REJECT",
+            },
+        )
+        (second_root / "local.mp4").write_bytes(b"media")
+        record = MediaRecord(
+            "local-time",
+            self.library["id"],
+            "local.mp4",
+            5,
+            1,
+            root_id=second["id"],
+            captured_at="2025-10-15T12:00:00",
+        )
+        scan = self.store.begin_scan(self.library["id"], "FULL", root_ids=[second["id"]])
+        self.store.save_media_batch(scan["id"], [record])
+        self.store.finish_scan(scan["id"], "SUCCEEDED", {"videos": 1})
+        self.assertEqual(self.store.media_record("local-time")["captured_at"], "2025-10-15T16:00:00Z")
+        self.store.update_library_time_policy(self.library["id"], "Asia/Tokyo")
+        resolved = self.store.media_record("local-time")
+        self.assertEqual(resolved["captured_at"], "2025-10-15T16:00:00Z")
+        self.assertEqual(resolved["custom"]["timestampPolicy"]["timeZone"], "America/New_York")
 
     def test_canceled_full_scan_cannot_commit_success_or_reuse_generation(self):
         one = self.record("one", "one.mp4")

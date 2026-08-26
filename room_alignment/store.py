@@ -30,7 +30,7 @@ from .provenance import normalize_timestamp
 from .scanner import media_record_from_dict, quick_fingerprint
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 MAX_JOB_EVENTS = 100_000
 MAX_CACHE_ENTRIES = 10_000
 MAX_CACHE_BYTES = 2 * 1024 * 1024 * 1024
@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS directory_grants (
   id TEXT PRIMARY KEY,
   role TEXT NOT NULL CHECK(role IN ('READ_ONLY_SOURCE','WRITE_OUTPUT')),
   root TEXT NOT NULL,
+  device INTEGER,
+  inode INTEGER,
   revoked INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   revoked_at TEXT
@@ -75,13 +77,31 @@ CREATE TABLE IF NOT EXISTS libraries (
   id TEXT PRIMARY KEY,
   grant_id TEXT REFERENCES directory_grants(id),
   root TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL DEFAULT 'Video library',
   time_zone TEXT NOT NULL DEFAULT 'UTC',
   dst_fold INTEGER NOT NULL DEFAULT 0,
   nonexistent_policy TEXT NOT NULL DEFAULT 'REJECT',
   current_generation INTEGER NOT NULL DEFAULT 0,
+  catalog_revision INTEGER NOT NULL DEFAULT 0,
+  event_gap_us INTEGER NOT NULL DEFAULT 15000000,
+  session_gap_us INTEGER NOT NULL DEFAULT 120000000,
   last_scan TEXT,
   summary_json TEXT NOT NULL DEFAULT '{}'
 );
+CREATE TABLE IF NOT EXISTS library_roots (
+  id TEXT PRIMARY KEY,
+  library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+  grant_id TEXT NOT NULL REFERENCES directory_grants(id),
+  root TEXT NOT NULL,
+  label TEXT NOT NULL,
+  active INTEGER NOT NULL DEFAULT 1,
+  time_policy_json TEXT,
+  last_scan_at TEXT,
+  created_at TEXT NOT NULL,
+  revoked_at TEXT,
+  UNIQUE(library_id, root)
+);
+CREATE INDEX IF NOT EXISTS library_roots_library_active ON library_roots(library_id,active,id);
 CREATE TABLE IF NOT EXISTS scan_generations (
   id TEXT PRIMARY KEY,
   library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
@@ -95,15 +115,29 @@ CREATE TABLE IF NOT EXISTS scan_generations (
   cancel_requested INTEGER NOT NULL DEFAULT 0,
   message TEXT,
   summary_json TEXT NOT NULL DEFAULT '{}',
+  root_ids_json TEXT NOT NULL DEFAULT '[]',
+  root_progress_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(library_id, generation)
+);
+CREATE TABLE IF NOT EXISTS scan_roots (
+  scan_id TEXT NOT NULL REFERENCES scan_generations(id) ON DELETE CASCADE,
+  root_id TEXT NOT NULL REFERENCES library_roots(id),
+  status TEXT NOT NULL,
+  scanned INTEGER NOT NULL DEFAULT 0,
+  warnings INTEGER NOT NULL DEFAULT 0,
+  full_traversal_completed INTEGER NOT NULL DEFAULT 0,
+  message TEXT,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY(scan_id, root_id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS one_active_scan_per_library
   ON scan_generations(library_id) WHERE status IN ('QUEUED','RUNNING','CANCEL_REQUESTED');
 CREATE TABLE IF NOT EXISTS media (
   id TEXT PRIMARY KEY,
   library_id TEXT NOT NULL REFERENCES libraries(id) ON DELETE CASCADE,
+  root_id TEXT REFERENCES library_roots(id),
   relative_path TEXT NOT NULL,
   captured_at TEXT,
   camera TEXT,
@@ -116,6 +150,7 @@ CREATE TABLE IF NOT EXISTS media (
   UNIQUE(library_id, relative_path)
 );
 CREATE INDEX IF NOT EXISTS media_library_path ON media(library_id, relative_path, id);
+CREATE INDEX IF NOT EXISTS media_root_path ON media(root_id, relative_path, id);
 CREATE INDEX IF NOT EXISTS media_library_time ON media(library_id, captured_at);
 CREATE INDEX IF NOT EXISTS media_library_camera ON media(library_id, camera);
 CREATE TABLE IF NOT EXISTS media_identity_keys (
@@ -281,6 +316,8 @@ class Store:
         with self.connect() as db:
             db.executescript(SCHEMA)
             self._ensure_legacy_columns(db)
+            self._backfill_directory_grant_identities(db)
+            self._backfill_library_roots(db)
             db.execute(
                 "INSERT OR IGNORE INTO project_revisions(project_id,revision,document_json,created_at) "
                 "SELECT id,revision,document_json,updated_at FROM projects"
@@ -320,6 +357,8 @@ class Store:
             source.backup(destination)
             destination.executescript(SCHEMA)
             self._ensure_legacy_columns(destination)
+            self._backfill_directory_grant_identities(destination)
+            self._backfill_library_roots(destination)
             destination.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             destination.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version,applied_at,details_json) VALUES(?,?,?)",
@@ -344,14 +383,27 @@ class Store:
 
     def _ensure_legacy_columns(self, db: sqlite3.Connection) -> None:
         additions = {
+            "directory_grants": {
+                "device": "INTEGER",
+                "inode": "INTEGER",
+            },
             "libraries": {
                 "grant_id": "TEXT REFERENCES directory_grants(id)",
+                "name": "TEXT NOT NULL DEFAULT 'Video library'",
                 "time_zone": "TEXT NOT NULL DEFAULT 'UTC'",
                 "dst_fold": "INTEGER NOT NULL DEFAULT 0",
                 "nonexistent_policy": "TEXT NOT NULL DEFAULT 'REJECT'",
                 "current_generation": "INTEGER NOT NULL DEFAULT 0",
+                "catalog_revision": "INTEGER NOT NULL DEFAULT 0",
+                "event_gap_us": "INTEGER NOT NULL DEFAULT 15000000",
+                "session_gap_us": "INTEGER NOT NULL DEFAULT 120000000",
+            },
+            "scan_generations": {
+                "root_ids_json": "TEXT NOT NULL DEFAULT '[]'",
+                "root_progress_json": "TEXT NOT NULL DEFAULT '{}'",
             },
             "media": {
+                "root_id": "TEXT REFERENCES library_roots(id)",
                 "first_generation": "INTEGER NOT NULL DEFAULT 0",
                 "last_generation": "INTEGER NOT NULL DEFAULT 0",
                 "missing": "INTEGER NOT NULL DEFAULT 0",
@@ -368,6 +420,48 @@ class Store:
             for name, definition in columns.items():
                 if name not in existing:
                     db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+    def _backfill_directory_grant_identities(self, db: sqlite3.Connection) -> None:
+        for row in db.execute(
+            "SELECT id,root FROM directory_grants WHERE device IS NULL OR inode IS NULL"
+        ):
+            try:
+                resolved = Path(row["root"]).resolve(strict=True)
+                stat = resolved.stat()
+            except OSError:
+                continue
+            if str(resolved) != row["root"]:
+                continue
+            db.execute(
+                "UPDATE directory_grants SET device=?,inode=? WHERE id=?",
+                (stat.st_dev, stat.st_ino, row["id"]),
+            )
+
+    def _backfill_library_roots(self, db: sqlite3.Connection) -> None:
+        for library in db.execute(
+            "SELECT id,grant_id,root,name FROM libraries WHERE grant_id IS NOT NULL ORDER BY id"
+        ):
+            root_id = f"root_{digest_json({'libraryId': library['id'], 'root': library['root']})[:24]}"
+            label = Path(library["root"]).name or str(library["name"] or "Video folder")
+            db.execute(
+                "INSERT OR IGNORE INTO library_roots(id,library_id,grant_id,root,label,created_at) "
+                "VALUES(?,?,?,?,?,?)",
+                (root_id, library["id"], library["grant_id"], library["root"], label, now_iso()),
+            )
+            rows = list(
+                db.execute(
+                    "SELECT id,relative_path,record_json FROM media WHERE library_id=? AND root_id IS NULL",
+                    (library["id"],),
+                )
+            )
+            for row in rows:
+                payload = json.loads(row["record_json"])
+                relative = str(payload.get("relative_path") or row["relative_path"])
+                payload["rootId"] = root_id
+                db.execute(
+                    "UPDATE media SET root_id=?,relative_path=?,record_json=? WHERE id=?",
+                    (root_id, _storage_relative_path(root_id, relative), json.dumps(payload), row["id"]),
+                )
 
     def connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(
@@ -389,6 +483,7 @@ class Store:
         resolved = root.expanduser().resolve(strict=True)
         if not resolved.is_dir():
             raise DomainError("VALIDATION_FAILED", "Directory grant requires an existing directory")
+        identity = resolved.stat()
         with self._lock, self.connect() as db:
             for row in db.execute("SELECT root,role FROM directory_grants WHERE revoked=0"):
                 other = Path(row["root"])
@@ -398,11 +493,12 @@ class Store:
                 "SELECT * FROM directory_grants WHERE root=? AND role=? AND revoked=0", (str(resolved), role)
             ).fetchone()
             if existing:
+                self._validated_grant_root(existing)
                 return self._public_grant(existing)
             grant_id = opaque_id("grant")
             db.execute(
-                "INSERT INTO directory_grants(id,role,root,created_at) VALUES(?,?,?,?)",
-                (grant_id, role, str(resolved), now_iso()),
+                "INSERT INTO directory_grants(id,role,root,device,inode,created_at) VALUES(?,?,?,?,?,?)",
+                (grant_id, role, str(resolved), identity.st_dev, identity.st_ino, now_iso()),
             )
             row = db.execute("SELECT * FROM directory_grants WHERE id=?", (grant_id,)).fetchone()
             return self._public_grant(row)
@@ -418,7 +514,26 @@ class Store:
                 raise DomainError("GRANT_REQUIRED", "Directory grant is unavailable")
             if role and row["role"] != role:
                 raise DomainError("FORBIDDEN", f"Directory grant must have role {role}")
+            self._validated_grant_root(row)
             return dict(row)
+
+    @staticmethod
+    def _validated_grant_root(row: sqlite3.Row) -> Path:
+        if row["device"] is None or row["inode"] is None:
+            raise DomainError("GRANT_REQUIRED", "Directory must be granted again")
+        try:
+            configured = Path(row["root"])
+            resolved = configured.resolve(strict=True)
+            stat = resolved.stat()
+        except OSError as error:
+            raise DomainError("GRANT_REQUIRED", "Directory grant is unavailable") from error
+        if (
+            str(resolved) != row["root"]
+            or stat.st_dev != int(row["device"])
+            or stat.st_ino != int(row["inode"])
+        ):
+            raise DomainError("GRANT_REQUIRED", "Directory grant identity changed")
+        return resolved
 
     def revoke_grant(self, grant_id: str) -> dict[str, Any]:
         with self._lock, self.connect() as db:
@@ -426,15 +541,31 @@ class Store:
             if not row:
                 raise DomainError("NOT_FOUND", "Directory grant not found")
             db.execute("UPDATE directory_grants SET revoked=1,revoked_at=? WHERE id=?", (now_iso(), grant_id))
+            revoked_at = now_iso()
+            affected_roots = [
+                item["id"]
+                for item in db.execute(
+                    "SELECT id FROM library_roots WHERE grant_id=? AND active=1", (grant_id,)
+                )
+            ]
+            db.execute(
+                "UPDATE library_roots SET active=0,revoked_at=? WHERE grant_id=?",
+                (revoked_at, grant_id),
+            )
+            if affected_roots:
+                db.execute(
+                    f"UPDATE media SET missing=1 WHERE root_id IN ({','.join('?' for _ in affected_roots)})",
+                    affected_roots,
+                )
             dependent_jobs = list(
                 db.execute(
                     "SELECT DISTINCT jobs.id FROM jobs LEFT JOIN projects ON projects.id=jobs.project_id "
                     "LEFT JOIN artifacts ON artifacts.job_id=jobs.id "
                     "WHERE jobs.status IN ('QUEUED','RUNNING','CANCEL_REQUESTED') AND ("
-                    "jobs.library_id IN (SELECT id FROM libraries WHERE grant_id=?) OR "
-                    "projects.library_id IN (SELECT id FROM libraries WHERE grant_id=?) OR "
+                    "jobs.library_id IN (SELECT id FROM libraries WHERE grant_id=? UNION SELECT library_id FROM library_roots WHERE grant_id=?) OR "
+                    "projects.library_id IN (SELECT id FROM libraries WHERE grant_id=? UNION SELECT library_id FROM library_roots WHERE grant_id=?) OR "
                     "artifacts.output_grant_id=?)",
-                    (grant_id, grant_id, grant_id),
+                    (grant_id, grant_id, grant_id, grant_id, grant_id),
                 )
             )
             for job in dependent_jobs:
@@ -472,41 +603,226 @@ class Store:
         dst_fold: int = 0,
         nonexistent_policy: str = "REJECT",
     ) -> dict[str, Any]:
+        """Compatibility creator for a one-root library.
+
+        The v1 HTTP contract creates an empty named library and then adds roots;
+        legacy callers retain this atomic convenience without changing behavior.
+        """
+        grant = self.grant(grant_id, "READ_ONLY_SOURCE")
+        with self.connect() as db:
+            existing = db.execute(
+                "SELECT library_id FROM library_roots WHERE grant_id=? AND active=1",
+                (grant_id,),
+            ).fetchone()
+        if existing:
+            self.update_library_time_policy(
+                existing["library_id"], time_zone, dst_fold, nonexistent_policy
+            )
+            return self.library(existing["library_id"])
+        library = self.create_empty_library(
+            Path(grant["root"]).name or "Video library",
+            time_zone,
+            dst_fold,
+            nonexistent_policy,
+        )
+        self.add_library_root(library["id"], grant_id)
+        return self.library(library["id"])
+
+    def create_empty_library(
+        self,
+        name: str,
+        time_zone: str = "UTC",
+        dst_fold: int = 0,
+        nonexistent_policy: str = "REJECT",
+        event_gap_us: int = 15_000_000,
+        session_gap_us: int = 120_000_000,
+    ) -> dict[str, Any]:
+        self._validate_library_settings(
+            time_zone, nonexistent_policy, event_gap_us, session_gap_us
+        )
+        label = str(name).strip()[:200]
+        if not label:
+            raise DomainError("VALIDATION_FAILED", "Library name is required")
+        library_id = opaque_id("lib")
+        placeholder = f".__library__/{library_id}"
+        with self._lock, self.connect() as db:
+            db.execute(
+                "INSERT INTO libraries(id,grant_id,root,name,time_zone,dst_fold,nonexistent_policy,"
+                "event_gap_us,session_gap_us,summary_json) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (
+                    library_id,
+                    None,
+                    placeholder,
+                    label,
+                    time_zone,
+                    int(bool(dst_fold)),
+                    nonexistent_policy,
+                    int(event_gap_us),
+                    int(session_gap_us),
+                    "{}",
+                ),
+            )
+        return self.library(library_id)
+
+    @staticmethod
+    def _validate_library_settings(
+        time_zone: str, nonexistent_policy: str, event_gap_us: int, session_gap_us: int
+    ) -> None:
         try:
             ZoneInfo(time_zone)
         except (ZoneInfoNotFoundError, ValueError) as error:
             raise DomainError("VALIDATION_FAILED", "Library timeZone must be a valid IANA zone") from error
         if nonexistent_policy not in {"REJECT", "SHIFT_FORWARD"}:
             raise DomainError("VALIDATION_FAILED", "Unknown nonexistent local-time policy")
+        if int(event_gap_us) < 0 or int(session_gap_us) < int(event_gap_us):
+            raise DomainError(
+                "VALIDATION_FAILED", "sessionGapUs must be greater than or equal to eventGapUs"
+            )
+
+    def add_library_root(
+        self,
+        library_id: str,
+        grant_id: str,
+        label: str | None = None,
+        time_policy_override: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        library = self.library(library_id)
         grant = self.grant(grant_id, "READ_ONLY_SOURCE")
-        library_id = f"lib_{digest_json(str(grant['root']))[:24]}"
+        resolved = Path(grant["root"]).resolve(strict=True)
+        normalized_override = None
+        if time_policy_override is not None:
+            unknown = set(time_policy_override) - {"timeZone", "dstFold", "nonexistentPolicy"}
+            if unknown:
+                raise DomainError("VALIDATION_FAILED", "Unknown root time-policy field")
+            normalized_override = {
+                "timeZone": str(time_policy_override.get("timeZone", library["timeZone"])),
+                "dstFold": int(bool(time_policy_override.get("dstFold", library["dstFold"]))),
+                "nonexistentPolicy": str(
+                    time_policy_override.get("nonexistentPolicy", library["nonexistentPolicy"])
+                ),
+            }
+            self._validate_library_settings(
+                normalized_override["timeZone"],
+                normalized_override["nonexistentPolicy"],
+                0,
+                0,
+            )
         with self._lock, self.connect() as db:
-            previous = db.execute(
-                "SELECT time_zone,dst_fold,nonexistent_policy FROM libraries WHERE id=?", (library_id,)
+            historical = db.execute(
+                "SELECT * FROM library_roots WHERE library_id=? AND root=?",
+                (library_id, str(resolved)),
+            ).fetchone()
+            roots = list(
+                db.execute(
+                    "SELECT * FROM library_roots WHERE library_id=? AND active=1 ORDER BY created_at,id",
+                    (library_id,),
+                )
+            )
+            if len(roots) >= 16:
+                raise DomainError("VALIDATION_FAILED", "A library may contain at most 16 active roots")
+            for existing in roots:
+                other = Path(existing["root"])
+                if _contains(other, resolved) or _contains(resolved, other):
+                    raise DomainError(
+                        "VALIDATION_FAILED",
+                        "Library roots may not be duplicate, nested, or overlapping",
+                    )
+            root_id = opaque_id("root")
+            timestamp = now_iso()
+            root_label = str(
+                label or (historical["label"] if historical else None) or resolved.name or "Video folder"
+            ).strip()[:200]
+            if historical:
+                root_id = historical["id"]
+                policy_json = (
+                    json.dumps(normalized_override)
+                    if normalized_override is not None
+                    else historical["time_policy_json"]
+                )
+                db.execute(
+                    "UPDATE library_roots SET grant_id=?,label=?,active=1,time_policy_json=?,"
+                    "revoked_at=NULL WHERE id=?",
+                    (grant_id, root_label, policy_json, root_id),
+                )
+            else:
+                db.execute(
+                    "INSERT INTO library_roots(id,library_id,grant_id,root,label,active,time_policy_json,created_at) "
+                    "VALUES(?,?,?,?,?,1,?,?)",
+                    (
+                        root_id,
+                        library_id,
+                        grant_id,
+                        str(resolved),
+                        root_label,
+                        json.dumps(normalized_override) if normalized_override is not None else None,
+                        timestamp,
+                    ),
+                )
+            if not roots:
+                db.execute(
+                    "UPDATE libraries SET grant_id=?,root=? WHERE id=?",
+                    (grant_id, str(resolved), library_id),
+                )
+            row = db.execute("SELECT * FROM library_roots WHERE id=?", (root_id,)).fetchone()
+            return self._public_library_root(row)
+
+    def library_roots(self, library_id: str, *, include_revoked: bool = True) -> list[dict[str, Any]]:
+        self.library(library_id)
+        with self.connect() as db:
+            where = "" if include_revoked else "AND active=1"
+            return [
+                self._public_library_root(row)
+                for row in db.execute(
+                    f"SELECT * FROM library_roots WHERE library_id=? {where} ORDER BY created_at,id",
+                    (library_id,),
+                )
+            ]
+
+    @staticmethod
+    def _public_library_root(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "id": row["id"],
+            "libraryId": row["library_id"],
+            "grantId": row["grant_id"],
+            "label": row["label"],
+            "active": bool(row["active"]),
+            "timePolicyOverride": json.loads(row["time_policy_json"]) if row["time_policy_json"] else None,
+            "lastScanAt": row["last_scan_at"],
+            "createdAt": row["created_at"],
+            "revokedAt": row["revoked_at"],
+        }
+
+    def revoke_library_root(self, library_id: str, root_id: str) -> dict[str, Any]:
+        with self._lock, self.connect() as db:
+            row = db.execute(
+                "SELECT * FROM library_roots WHERE id=? AND library_id=?",
+                (root_id, library_id),
+            ).fetchone()
+            if not row:
+                raise DomainError("NOT_FOUND", "Library root not found")
+            timestamp = now_iso()
+            db.execute(
+                "UPDATE library_roots SET active=0,revoked_at=? WHERE id=?",
+                (timestamp, root_id),
+            )
+            db.execute("UPDATE media SET missing=1 WHERE root_id=?", (root_id,))
+            replacement = db.execute(
+                "SELECT grant_id,root FROM library_roots WHERE library_id=? AND active=1 ORDER BY created_at,id LIMIT 1",
+                (library_id,),
             ).fetchone()
             db.execute(
-                "INSERT INTO libraries(id,grant_id,root,time_zone,dst_fold,nonexistent_policy,summary_json) "
-                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET grant_id=excluded.grant_id,time_zone=excluded.time_zone,"
-                "dst_fold=excluded.dst_fold,nonexistent_policy=excluded.nonexistent_policy",
-                (library_id, grant_id, grant["root"], time_zone, int(bool(dst_fold)), nonexistent_policy, "{}"),
+                "UPDATE libraries SET grant_id=?,root=? WHERE id=?",
+                (
+                    replacement["grant_id"] if replacement else None,
+                    replacement["root"] if replacement else f".__library__/{library_id}",
+                    library_id,
+                ),
             )
-            changed = previous and (
-                previous["time_zone"] != time_zone
-                or int(previous["dst_fold"]) != int(bool(dst_fold))
-                or previous["nonexistent_policy"] != nonexistent_policy
+        self.revoke_grant(row["grant_id"])
+        with self.connect() as db:
+            return self._public_library_root(
+                db.execute("SELECT * FROM library_roots WHERE id=?", (root_id,)).fetchone()
             )
-            if changed:
-                self._renormalize_library_timestamps_db(
-                    db, library_id, time_zone, int(bool(dst_fold)), nonexistent_policy
-                )
-            if changed:
-                self._invalidate_suggestions_db(
-                    db,
-                    "library_id=? AND status IN ('PENDING','ACCEPTED')",
-                    (library_id,),
-                    "Library timestamp policy changed",
-                )
-        return self.library(library_id)
 
     def update_library_time_policy(
         self,
@@ -515,58 +831,139 @@ class Store:
         dst_fold: int = 0,
         nonexistent_policy: str = "REJECT",
     ) -> dict[str, Any]:
-        library = self.library(library_id)
-        return self.create_library(
-            library["sourceGrantId"], time_zone, dst_fold, nonexistent_policy
-        )
+        self._validate_library_settings(time_zone, nonexistent_policy, 0, 0)
+        with self._lock, self.connect() as db:
+            row = db.execute("SELECT * FROM libraries WHERE id=?", (library_id,)).fetchone()
+            if not row:
+                raise DomainError("NOT_FOUND", "Library not found")
+            changed = (
+                row["time_zone"] != time_zone
+                or int(row["dst_fold"]) != int(bool(dst_fold))
+                or row["nonexistent_policy"] != nonexistent_policy
+            )
+            db.execute(
+                "UPDATE libraries SET time_zone=?,dst_fold=?,nonexistent_policy=? WHERE id=?",
+                (time_zone, int(bool(dst_fold)), nonexistent_policy, library_id),
+            )
+            if changed:
+                self._renormalize_library_timestamps_db(
+                    db, library_id, time_zone, int(bool(dst_fold)), nonexistent_policy
+                )
+                self._invalidate_suggestions_db(
+                    db,
+                    "library_id=? AND status IN ('PENDING','ACCEPTED')",
+                    (library_id,),
+                    "Library timestamp policy changed",
+                )
+        return self.library(library_id)
 
     def library(self, library_id: str) -> dict[str, Any]:
         with self.connect() as db:
             row = db.execute("SELECT * FROM libraries WHERE id=?", (library_id,)).fetchone()
             if not row:
                 raise DomainError("NOT_FOUND", "Library not found")
-            return self._public_library(row)
+            return self._public_library(db, row)
 
     def libraries(self) -> list[dict[str, Any]]:
         with self.connect() as db:
             return [
-                self._public_library(row)
+                self._public_library(db, row)
                 for row in db.execute("SELECT * FROM libraries ORDER BY COALESCE(last_scan,'') DESC,id")
             ]
 
-    @staticmethod
-    def _public_library(row: sqlite3.Row) -> dict[str, Any]:
+    @classmethod
+    def _public_library(cls, db: sqlite3.Connection, row: sqlite3.Row) -> dict[str, Any]:
+        roots = [
+            cls._public_library_root(item)
+            for item in db.execute(
+                "SELECT * FROM library_roots WHERE library_id=? ORDER BY created_at,id",
+                (row["id"],),
+            )
+        ]
         return {
             "id": row["id"],
             "sourceGrantId": row["grant_id"],
-            "label": Path(row["root"]).name or "Video library",
+            "name": row["name"],
+            "label": row["name"],
             "timeZone": row["time_zone"],
             "dstFold": int(row["dst_fold"]),
             "nonexistentPolicy": row["nonexistent_policy"],
             "currentGeneration": int(row["current_generation"]),
+            "catalogRevision": int(row["catalog_revision"]),
+            "eventGapUs": int(row["event_gap_us"]),
+            "sessionGapUs": int(row["session_gap_us"]),
+            "roots": roots,
             "lastScan": row["last_scan"],
             "summary": json.loads(row["summary_json"] or "{}"),
         }
 
     def library_root(self, library_id: str) -> Path:
+        roots = self.active_library_root_paths(library_id)
+        if not roots:
+            raise DomainError("GRANT_REQUIRED", "Library has no active source folders")
+        return roots[0][1]
+
+    def active_library_root_paths(
+        self, library_id: str, root_ids: Iterable[str] | None = None
+    ) -> list[tuple[str, Path]]:
+        selected = list(dict.fromkeys(root_ids or []))
         with self.connect() as db:
-            row = db.execute(
-                "SELECT l.root,l.grant_id,g.revoked FROM libraries l "
-                "LEFT JOIN directory_grants g ON g.id=l.grant_id WHERE l.id=?",
-                (library_id,),
+            library = db.execute(
+                "SELECT id,grant_id FROM libraries WHERE id=?", (library_id,)
             ).fetchone()
-            if not row:
+            if not library:
                 raise DomainError("NOT_FOUND", "Unknown library")
-            if row["grant_id"] is None or row["revoked"] is None or row["revoked"]:
+            if library["grant_id"] is None:
+                revoked = db.execute(
+                    "SELECT 1 FROM library_roots roots JOIN directory_grants grants "
+                    "ON grants.id=roots.grant_id WHERE roots.library_id=? AND grants.revoked=1 LIMIT 1",
+                    (library_id,),
+                ).fetchone()
+                if revoked:
+                    raise DomainError("GRANT_REQUIRED", "Library source grant has been revoked")
+                raise DomainError("GRANT_REQUIRED", "Library has no active source folders")
+            query = (
+                "SELECT roots.id,roots.root,roots.grant_id,grants.root AS grant_root,grants.device,"
+                "grants.inode,grants.revoked "
+                "FROM library_roots roots JOIN directory_grants grants ON grants.id=roots.grant_id "
+                "WHERE roots.library_id=? AND roots.active=1"
+            )
+            params: list[Any] = [library_id]
+            if selected:
+                query += f" AND roots.id IN ({','.join('?' for _ in selected)})"
+                params.extend(selected)
+            query += " ORDER BY roots.created_at,roots.id"
+            rows = list(db.execute(query, params))
+            if not rows and not selected:
+                revoked = db.execute(
+                    "SELECT 1 FROM library_roots roots JOIN directory_grants grants "
+                    "ON grants.id=roots.grant_id WHERE roots.library_id=? AND grants.revoked=1 LIMIT 1",
+                    (library_id,),
+                ).fetchone()
+                if revoked:
+                    raise DomainError("GRANT_REQUIRED", "Library source grant has been revoked")
+        if selected and {row["id"] for row in rows} != set(selected):
+            raise DomainError("GRANT_REQUIRED", "One or more selected library roots are unavailable")
+        result: list[tuple[str, Path]] = []
+        for row in rows:
+            if row["revoked"] or row["root"] != row["grant_root"]:
                 raise DomainError("GRANT_REQUIRED", "Library source grant has been revoked")
-            return Path(row["root"])
+            result.append((row["id"], self._validated_grant_root(row)))
+        return result
 
     # Scans and media
 
-    def begin_scan(self, library_id: str, mode: str, limit: int | None = None) -> dict[str, Any]:
+    def begin_scan(
+        self,
+        library_id: str,
+        mode: str,
+        limit: int | None = None,
+        root_ids: Iterable[str] | None = None,
+    ) -> dict[str, Any]:
         if mode not in {"FULL", "INCREMENTAL", "BOUNDED"}:
             raise DomainError("VALIDATION_FAILED", "Unknown scan mode")
-        self.library_root(library_id)
+        roots = self.active_library_root_paths(library_id, root_ids)
+        selected_root_ids = [item[0] for item in roots]
         with self._lock, self.connect() as db:
             active = db.execute(
                 "SELECT id FROM scan_generations WHERE library_id=? AND status IN ('QUEUED','RUNNING','CANCEL_REQUESTED')",
@@ -584,9 +981,23 @@ class Store:
             scan_id = opaque_id("scan")
             timestamp = now_iso()
             db.execute(
-                "INSERT INTO scan_generations(id,library_id,generation,mode,status,limit_count,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?)",
-                (scan_id, library_id, generation, mode, "QUEUED", limit, timestamp, timestamp),
+                "INSERT INTO scan_generations(id,library_id,generation,mode,status,limit_count,root_ids_json,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    scan_id,
+                    library_id,
+                    generation,
+                    mode,
+                    "QUEUED",
+                    limit,
+                    json.dumps(selected_root_ids),
+                    timestamp,
+                    timestamp,
+                ),
+            )
+            db.executemany(
+                "INSERT INTO scan_roots(scan_id,root_id,status,updated_at) VALUES(?,?,?,?)",
+                [(scan_id, root_id, "QUEUED", timestamp) for root_id in selected_root_ids],
             )
             self._create_job_db(db, scan_id, "SCAN", library_id=library_id, message="Scan queued")
             return self.scan(scan_id, db)
@@ -598,6 +1009,19 @@ class Store:
             row = db.execute("SELECT * FROM scan_generations WHERE id=?", (scan_id,)).fetchone()
             if not row:
                 raise DomainError("NOT_FOUND", "Scan not found")
+            roots = [
+                {
+                    "rootId": item["root_id"],
+                    "status": item["status"],
+                    "scanned": int(item["scanned"]),
+                    "warnings": int(item["warnings"]),
+                    "fullTraversalCompleted": bool(item["full_traversal_completed"]),
+                    "message": item["message"],
+                }
+                for item in db.execute(
+                    "SELECT * FROM scan_roots WHERE scan_id=? ORDER BY root_id", (scan_id,)
+                )
+            ]
             return {
                 "id": row["id"],
                 "libraryId": row["library_id"],
@@ -605,6 +1029,8 @@ class Store:
                 "mode": row["mode"],
                 "status": row["status"],
                 "limit": row["limit_count"],
+                "rootIds": json.loads(row["root_ids_json"] or "[]"),
+                "roots": roots,
                 "scanned": int(row["scanned"]),
                 "videos": int(row["videos"]),
                 "warnings": int(row["warnings"]),
@@ -626,6 +1052,7 @@ class Store:
         warning: bool = False,
         warning_count: int | None = None,
         message: str | None = None,
+        root_id: str | None = None,
     ) -> None:
         if processed < 1:
             raise DomainError("VALIDATION_FAILED", "Scan progress must include at least one record")
@@ -641,7 +1068,49 @@ class Store:
                 "UPDATE scan_generations SET status='RUNNING',scanned=?,videos=?,warnings=?,message=?,updated_at=? WHERE id=?",
                 (scanned, scanned, warnings, message, now_iso(), scan_id),
             )
+            if root_id is not None:
+                updated = db.execute(
+                    "UPDATE scan_roots SET status='RUNNING',scanned=scanned+?,warnings=warnings+?,message=?,updated_at=? "
+                    "WHERE scan_id=? AND root_id=?",
+                    (
+                        processed,
+                        int(warning) if warning_count is None else warning_count,
+                        message,
+                        now_iso(),
+                        scan_id,
+                        root_id,
+                    ),
+                )
+                if updated.rowcount != 1:
+                    raise DomainError("VALIDATION_FAILED", "Root is not part of this scan")
             self._transition_job_db(db, scan_id, "RUNNING", min(0.99, scanned / max(scanned + 1, 1)), message)
+
+    def finish_scan_root(
+        self,
+        scan_id: str,
+        root_id: str,
+        status: str,
+        *,
+        full_traversal_completed: bool = False,
+        message: str | None = None,
+    ) -> None:
+        if status not in {"SUCCEEDED", "FAILED", "CANCELED", "SKIPPED"}:
+            raise DomainError("VALIDATION_FAILED", "Invalid scan-root terminal state")
+        with self._lock, self.connect() as db:
+            updated = db.execute(
+                "UPDATE scan_roots SET status=?,full_traversal_completed=?,message=?,updated_at=? "
+                "WHERE scan_id=? AND root_id=?",
+                (
+                    status,
+                    int(full_traversal_completed),
+                    message,
+                    now_iso(),
+                    scan_id,
+                    root_id,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise DomainError("NOT_FOUND", "Scan root not found")
 
     def cancel_scan(self, scan_id: str) -> dict[str, Any]:
         with self._lock, self.connect() as db:
@@ -666,16 +1135,52 @@ class Store:
         if not records:
             return
         with self._lock, self.connect() as db:
-            scan = db.execute("SELECT library_id,generation FROM scan_generations WHERE id=?", (scan_id,)).fetchone()
+            scan = db.execute(
+                "SELECT library_id,generation,root_ids_json FROM scan_generations WHERE id=?",
+                (scan_id,),
+            ).fetchone()
             if not scan:
                 raise DomainError("NOT_FOUND", "Scan not found")
             policy = db.execute(
-                "SELECT root,time_zone,dst_fold,nonexistent_policy FROM libraries WHERE id=?",
+                "SELECT time_zone,dst_fold,nonexistent_policy FROM libraries WHERE id=?",
                 (scan["library_id"],),
             ).fetchone()
-            library_root = Path(policy["root"])
+            selected_root_ids = json.loads(scan["root_ids_json"] or "[]")
+            validated_roots: dict[str, tuple[sqlite3.Row, Path]] = {}
             for record in records:
-                _normalize_media_record_timestamp(record, dict(policy))
+                root_id = record.root_id or (selected_root_ids[0] if len(selected_root_ids) == 1 else None)
+                if root_id is None or root_id not in selected_root_ids:
+                    raise DomainError("VALIDATION_FAILED", "Media record does not identify a selected scan root")
+                validated = validated_roots.get(root_id)
+                if validated is None:
+                    root_row = db.execute(
+                        "SELECT roots.root,roots.grant_id,roots.active,roots.time_policy_json,"
+                        "grants.root AS grant_root,grants.device,grants.inode,grants.revoked "
+                        "FROM library_roots roots JOIN directory_grants grants ON grants.id=roots.grant_id "
+                        "WHERE roots.id=? AND roots.library_id=?",
+                        (root_id, scan["library_id"]),
+                    ).fetchone()
+                    if (
+                        not root_row
+                        or not root_row["active"]
+                        or root_row["revoked"]
+                        or root_row["root"] != root_row["grant_root"]
+                    ):
+                        raise DomainError("GRANT_REQUIRED", "Media record root grant is unavailable")
+                    validated = (root_row, self._validated_grant_root(root_row))
+                    validated_roots[root_id] = validated
+                root_row, library_root = validated
+                record.root_id = root_id
+                storage_path = _storage_relative_path(root_id, record.relative_path)
+                effective_policy = dict(policy)
+                if root_row["time_policy_json"]:
+                    override = json.loads(root_row["time_policy_json"])
+                    effective_policy = {
+                        "time_zone": override["timeZone"],
+                        "dst_fold": int(override["dstFold"]),
+                        "nonexistent_policy": override["nonexistentPolicy"],
+                    }
+                _normalize_media_record_timestamp(record, effective_policy)
                 fingerprint = record.fingerprint or {}
                 identity_material = {
                     "device": fingerprint.get("device"),
@@ -690,13 +1195,18 @@ class Store:
                     rename_candidates = list(
                         db.execute(
                             "SELECT keys.asset_id,media.relative_path FROM media_identity_keys keys "
-                            "JOIN media ON media.id=keys.asset_id WHERE keys.library_id=? AND keys.identity_key=?",
-                            (scan["library_id"], identity_key),
+                            "JOIN media ON media.id=keys.asset_id WHERE keys.library_id=? "
+                            "AND media.root_id=? AND keys.identity_key=?",
+                            (scan["library_id"], root_id, identity_key),
                         )
                     )
                     rename_matches = []
                     for item in rename_candidates:
-                        previous_path = library_root / item["relative_path"]
+                        previous = db.execute(
+                            "SELECT record_json FROM media WHERE id=?", (item["asset_id"],)
+                        ).fetchone()
+                        previous_relative = json.loads(previous["record_json"])["relative_path"]
+                        previous_path = library_root / previous_relative
                         try:
                             previous_identity = _identity_key_from_fingerprint(quick_fingerprint(previous_path))
                         except OSError:
@@ -707,24 +1217,27 @@ class Store:
                         record.id = rename_matches[0]["asset_id"]
                 target_owner = db.execute(
                     "SELECT media.id,keys.identity_key FROM media LEFT JOIN media_identity_keys keys "
-                    "ON keys.asset_id=media.id WHERE media.library_id=? AND media.relative_path=?",
-                    (scan["library_id"], record.relative_path),
+                    "ON keys.asset_id=media.id WHERE media.library_id=? AND media.root_id=? "
+                    "AND media.relative_path=?",
+                    (scan["library_id"], root_id, storage_path),
                 ).fetchone()
                 if target_owner and identity_key and target_owner["identity_key"] == identity_key:
                     record.id = target_owner["id"]
                 existing_asset = db.execute(
                     "SELECT id,relative_path,record_json FROM media "
-                    "WHERE library_id=? AND relative_path=? AND id<>?",
-                    (scan["library_id"], record.relative_path, record.id),
+                    "WHERE library_id=? AND root_id=? AND relative_path=? AND id<>?",
+                    (scan["library_id"], root_id, storage_path, record.id),
                 ).fetchone()
                 if existing_asset:
                     moving = db.execute(
-                        "SELECT relative_path FROM media WHERE id=?", (record.id,)
+                        "SELECT relative_path,record_json,root_id FROM media WHERE id=?", (record.id,)
                     ).fetchone()
-                    replacement_path = f".__unavailable__/{existing_asset['id']}"
+                    replacement_relative = f".__unavailable__/{existing_asset['id']}"
+                    replacement_path = _storage_relative_path(root_id, replacement_relative)
                     replacement_missing = 1
-                    if moving:
-                        old_path = library_root / moving["relative_path"]
+                    if moving and moving["root_id"] == root_id:
+                        moving_payload = json.loads(moving["record_json"])
+                        old_path = library_root / moving_payload["relative_path"]
                         try:
                             old_identity = _identity_key_from_fingerprint(quick_fingerprint(old_path))
                         except OSError:
@@ -734,14 +1247,15 @@ class Store:
                             (existing_asset["id"],),
                         ).fetchone()
                         if owner_identity_row and old_identity == owner_identity_row["identity_key"]:
+                            replacement_relative = moving_payload["relative_path"]
                             replacement_path = moving["relative_path"]
                             replacement_missing = 0
                         db.execute(
                             "UPDATE media SET relative_path=? WHERE id=?",
-                            (f".__moving__/{record.id}-{scan_id}", record.id),
+                            (_storage_relative_path(root_id, f".__moving__/{record.id}-{scan_id}"), record.id),
                         )
                     owner_payload = json.loads(existing_asset["record_json"])
-                    owner_payload["relative_path"] = replacement_path
+                    owner_payload["relative_path"] = replacement_relative
                     owner_payload["missing"] = bool(replacement_missing)
                     db.execute(
                         "UPDATE media SET relative_path=?,missing=?,record_json=? WHERE id=?",
@@ -751,14 +1265,15 @@ class Store:
                 payload["generation"] = int(scan["generation"])
                 payload["missing"] = False
                 db.execute(
-                    "INSERT INTO media(id,library_id,relative_path,captured_at,camera,duration,first_generation,last_generation,missing,fingerprint_json,record_json) "
-                    "VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET relative_path=excluded.relative_path,"
+                    "INSERT INTO media(id,library_id,root_id,relative_path,captured_at,camera,duration,first_generation,last_generation,missing,fingerprint_json,record_json) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET root_id=excluded.root_id,relative_path=excluded.relative_path,"
                     "captured_at=excluded.captured_at,camera=excluded.camera,duration=excluded.duration,last_generation=excluded.last_generation,"
                     "missing=0,fingerprint_json=excluded.fingerprint_json,record_json=excluded.record_json",
                     (
                         record.id,
                         scan["library_id"],
-                        record.relative_path,
+                        root_id,
+                        storage_path,
                         record.captured_at,
                         record.camera,
                         record.duration,
@@ -784,11 +1299,29 @@ class Store:
         dst_fold: int,
         nonexistent_policy: str,
     ) -> None:
-        cursor = db.execute("SELECT id,record_json FROM media WHERE library_id=? ORDER BY id", (library_id,))
+        cursor = db.execute(
+            "SELECT media.id,media.record_json,roots.time_policy_json FROM media "
+            "LEFT JOIN library_roots roots ON roots.id=media.root_id "
+            "WHERE media.library_id=? ORDER BY media.id",
+            (library_id,),
+        )
         while rows := cursor.fetchmany(500):
             for row in rows:
+                effective_zone = time_zone
+                effective_fold = dst_fold
+                effective_nonexistent = nonexistent_policy
+                if row["time_policy_json"]:
+                    override = json.loads(row["time_policy_json"])
+                    effective_zone = override["timeZone"]
+                    effective_fold = int(override["dstFold"])
+                    effective_nonexistent = override["nonexistentPolicy"]
                 self._renormalize_timestamp_row_db(
-                    db, row, library_id, time_zone, dst_fold, nonexistent_policy
+                    db,
+                    row,
+                    library_id,
+                    effective_zone,
+                    effective_fold,
+                    effective_nonexistent,
                 )
 
     def _renormalize_timestamp_row_db(
@@ -845,19 +1378,41 @@ class Store:
                     else "Scan canceled; visited records retained"
                 )
                 summary = {**summary, "interrupted": True}
-            if status == "SUCCEEDED" and scan["mode"] == "FULL":
+            if status == "SUCCEEDED":
                 db.execute(
-                    "UPDATE media SET missing=1 WHERE library_id=? AND last_generation<?",
-                    (scan["library_id"], scan["generation"]),
+                    "UPDATE scan_roots SET status='SUCCEEDED',full_traversal_completed=?,updated_at=? "
+                    "WHERE scan_id=? AND status IN ('QUEUED','RUNNING')",
+                    (int(scan["mode"] == "FULL"), now_iso(), scan_id),
                 )
+            if status == "SUCCEEDED" and scan["mode"] == "FULL":
+                completed = [
+                    item["root_id"]
+                    for item in db.execute(
+                        "SELECT root_id FROM scan_roots WHERE scan_id=? AND status='SUCCEEDED' "
+                        "AND full_traversal_completed=1",
+                        (scan_id,),
+                    )
+                ]
+                if completed:
+                    db.execute(
+                        f"UPDATE media SET missing=1 WHERE library_id=? AND root_id IN "
+                        f"({','.join('?' for _ in completed)}) AND last_generation<?",
+                        (scan["library_id"], *completed, scan["generation"]),
+                    )
             db.execute(
                 "UPDATE scan_generations SET status=?,summary_json=?,message=?,updated_at=? WHERE id=?",
                 (status, json.dumps(summary), message, now_iso(), scan_id),
             )
             if status == "SUCCEEDED":
                 db.execute(
-                    "UPDATE libraries SET current_generation=?,last_scan=?,summary_json=? WHERE id=?",
+                    "UPDATE libraries SET current_generation=?,catalog_revision=catalog_revision+1,"
+                    "last_scan=?,summary_json=? WHERE id=?",
                     (scan["generation"], now_iso(), json.dumps(summary), scan["library_id"]),
+                )
+                db.execute(
+                    "UPDATE library_roots SET last_scan_at=? WHERE id IN "
+                    "(SELECT root_id FROM scan_roots WHERE scan_id=? AND status='SUCCEEDED')",
+                    (now_iso(), scan_id),
                 )
                 self._invalidate_suggestions_db(
                     db,
@@ -874,12 +1429,34 @@ class Store:
                 error_code=error_code,
             )
 
-    def existing_media_by_path(self, library_id: str, relative_path: str) -> dict[str, Any] | None:
+    def existing_media_by_path(
+        self, library_id: str, relative_path: str, root_id: str | None = None
+    ) -> dict[str, Any] | None:
+        if root_id is None:
+            roots = self.active_library_root_paths(library_id)
+            if len(roots) != 1:
+                raise DomainError("VALIDATION_FAILED", "rootId is required for a multi-root library")
+            root_id = roots[0][0]
+        return self.existing_media_by_paths(library_id, root_id, [relative_path]).get(relative_path)
+
+    def existing_media_by_paths(
+        self, library_id: str, root_id: str, relative_paths: Iterable[str]
+    ) -> dict[str, dict[str, Any]]:
+        paths = list(dict.fromkeys(str(item) for item in relative_paths))
+        if not paths:
+            return {}
+        storage_paths = [_storage_relative_path(root_id, item) for item in paths]
         with self.connect() as db:
-            row = db.execute(
-                "SELECT record_json FROM media WHERE library_id=? AND relative_path=?", (library_id, relative_path)
-            ).fetchone()
-            return json.loads(row[0]) if row else None
+            rows = db.execute(
+                f"SELECT record_json FROM media WHERE library_id=? AND root_id=? AND relative_path IN "
+                f"({','.join('?' for _ in storage_paths)})",
+                (library_id, root_id, *storage_paths),
+            )
+            result = {}
+            for row in rows:
+                payload = json.loads(row["record_json"])
+                result[str(payload["relative_path"])] = payload
+            return result
 
     def media_page(
         self, library_id: str, limit: int = 200, cursor: str | None = None, generation: int | None = None
@@ -975,7 +1552,15 @@ class Store:
             with self._lock, self.connect() as db:
                 db.execute("PRAGMA foreign_keys=OFF")
                 db.execute("UPDATE libraries SET id=? WHERE id=?", (summary.library_id, library["id"]))
+                db.execute(
+                    "UPDATE library_roots SET library_id=? WHERE library_id=?",
+                    (summary.library_id, library["id"]),
+                )
                 db.execute("UPDATE media SET library_id=? WHERE library_id=?", (summary.library_id, library["id"]))
+                db.execute(
+                    "UPDATE media_identity_keys SET library_id=? WHERE library_id=?",
+                    (summary.library_id, library["id"]),
+                )
                 db.execute("UPDATE scan_generations SET library_id=? WHERE library_id=?", (summary.library_id, library["id"]))
                 db.execute("UPDATE jobs SET library_id=? WHERE library_id=?", (summary.library_id, library["id"]))
                 db.execute("PRAGMA foreign_keys=ON")
@@ -1204,7 +1789,26 @@ class Store:
         if media.get("missing"):
             raise DomainError("SOURCE_MISSING", "Source media is missing")
         try:
-            root = self.library_root(str(media["library_id"])).resolve(strict=True)
+            root_id = media.get("rootId")
+            if root_id:
+                with self.connect() as db:
+                    row = db.execute(
+                        "SELECT roots.root,roots.active,grants.root AS grant_root,grants.device,"
+                        "grants.inode,grants.revoked "
+                        "FROM library_roots roots JOIN directory_grants grants ON grants.id=roots.grant_id "
+                        "WHERE roots.id=? AND roots.library_id=?",
+                        (root_id, media["library_id"]),
+                    ).fetchone()
+                if (
+                    not row
+                    or not row["active"]
+                    or row["revoked"]
+                    or row["root"] != row["grant_root"]
+                ):
+                    raise DomainError("GRANT_REQUIRED", "Source folder grant is unavailable")
+                root = self._validated_grant_root(row)
+            else:
+                root = self.library_root(str(media["library_id"])).resolve(strict=True)
             target = (root / str(media["relative_path"])).resolve(strict=True)
         except FileNotFoundError as error:
             raise DomainError("SOURCE_MISSING", "Source media is missing") from error
@@ -2220,6 +2824,10 @@ def _raw_timestamp_from_evidence(record: MediaRecord) -> object | None:
 
 def _stable_migration_id(prefix: str, *parts: object) -> str:
     return f"{prefix}_{digest_json([str(part) for part in parts])[:24]}"
+
+
+def _storage_relative_path(root_id: str, relative_path: str) -> str:
+    return f"{root_id}::{relative_path}"
 
 
 def _identity_key_from_fingerprint(fingerprint: dict[str, Any]) -> str | None:

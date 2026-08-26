@@ -82,6 +82,7 @@
       "properties": {
         "id": {"$ref": "#/$defs/OpaqueId"},
         "library_id": {"$ref": "#/$defs/OpaqueId"},
+        "rootId": {"type": ["string", "null"], "description": "Opaque identity of the independently granted library root containing this asset."},
         "relative_path": {"type": "string", "minLength": 1},
         "size": {"type": "integer", "minimum": 0},
         "modified_ns": {"type": "integer", "minimum": 0},

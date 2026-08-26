@@ -53,11 +53,13 @@ class MediaRecord:
     source_candidate_id: str | None = None
     missing: bool = False
     generation: int = 0
+    root_id: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
         value["durationUs"] = value.pop("duration_us")
         value["sourceCandidateId"] = value.pop("source_candidate_id")
+        value["rootId"] = value.pop("root_id")
         return value
 
 

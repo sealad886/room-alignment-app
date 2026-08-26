@@ -175,65 +175,130 @@ class App:
         finally:
             self._lock_file.close()
 
-    def start_scan(self, library_id: str, mode: str, limit: int | None = None) -> dict[str, object]:
-        scan = self.store.begin_scan(library_id, mode, limit)
+    def start_scan(
+        self,
+        library_id: str,
+        mode: str,
+        limit: int | None = None,
+        root_ids: list[str] | None = None,
+    ) -> dict[str, object]:
+        scan = self.store.begin_scan(library_id, mode, limit, root_ids)
+        roots = self.store.active_library_root_paths(library_id, scan["rootIds"])
 
         def run() -> None:
             cameras: set[str] = set()
             date_groups: dict[str, int] = {}
             warnings = 0
-            batch = []
-            last_progress_at = time.monotonic()
+            completed_root_ids: list[str] = []
+            failed_roots: list[dict[str, str]] = []
+            skipped_root_ids: list[str] = []
+            processed = 0
             try:
-                root = self.store.library_root(library_id)
-                for record in iter_scan_records(
-                    root,
-                    library_id,
-                    mode=mode,
-                    existing_lookup=lambda path: self.store.existing_media_by_path(library_id, path),
-                    canceled=lambda: self.closing or self.store.scan_cancel_requested(scan["id"]),
-                    max_files=limit,
-                ):
+                for root_index, (root_id, root) in enumerate(roots):
                     if self.closing or self.store.scan_cancel_requested(scan["id"]):
-                        job = self.store.job(scan["id"])
-                        grant_revoked = job.get("errorCode") == "GRANT_REQUIRED"
-                        self.store.finish_scan(
-                            scan["id"],
-                            "FAILED" if grant_revoked else "CANCELED",
-                            {"videos": self.store.scan(scan["id"])["videos"]},
-                            (
-                                "Directory grant revoked; visited records retained"
-                                if grant_revoked
-                                else "Scan canceled; visited records retained"
+                        break
+                    remaining = None if limit is None else max(0, limit - processed)
+                    if remaining == 0:
+                        for pending_root_id, _pending_root in roots[root_index:]:
+                            self.store.finish_scan_root(
+                                scan["id"],
+                                pending_root_id,
+                                "SKIPPED",
+                                message="Bound reached before this root",
+                            )
+                            skipped_root_ids.append(pending_root_id)
+                        break
+                    batch = []
+                    last_progress_at = time.monotonic()
+                    try:
+                        for record in iter_scan_records(
+                            root,
+                            library_id,
+                            root_id=root_id,
+                            mode=mode,
+                            existing_batch_lookup=lambda paths, selected=root_id: self.store.existing_media_by_paths(
+                                library_id, selected, paths
                             ),
-                            "GRANT_REQUIRED" if grant_revoked else None,
-                        )
-                        return
-                    if record.camera:
-                        cameras.add(record.camera)
-                    if record.captured_at:
-                        date = str(record.captured_at)[:10]
-                        date_groups[date] = date_groups.get(date, 0) + 1
-                    warnings += int(bool(record.warning))
-                    batch.append(record)
-                    if len(batch) >= 50 or time.monotonic() - last_progress_at >= 1:
-                        self.store.save_media_batch(scan["id"], batch)
-                        self.store.scan_progress(
+                            canceled=lambda: self.closing or self.store.scan_cancel_requested(scan["id"]),
+                            max_files=remaining,
+                        ):
+                            if self.closing or self.store.scan_cancel_requested(scan["id"]):
+                                break
+                            if record.camera:
+                                cameras.add(record.camera)
+                            if record.captured_at:
+                                date = str(record.captured_at)[:10]
+                                date_groups[date] = date_groups.get(date, 0) + 1
+                            warnings += int(bool(record.warning))
+                            batch.append(record)
+                            if len(batch) >= 50 or time.monotonic() - last_progress_at >= 1:
+                                batch_warnings = sum(int(bool(item.warning)) for item in batch)
+                                self.store.save_media_batch(scan["id"], batch)
+                                self.store.scan_progress(
+                                    scan["id"],
+                                    root_id=root_id,
+                                    processed=len(batch),
+                                    warning_count=batch_warnings,
+                                    message=f"Indexing folder {root_index + 1} of {len(roots)}",
+                                )
+                                processed += len(batch)
+                                batch.clear()
+                                last_progress_at = time.monotonic()
+                        if batch:
+                            batch_warnings = sum(int(bool(item.warning)) for item in batch)
+                            self.store.save_media_batch(scan["id"], batch)
+                            self.store.scan_progress(
+                                scan["id"],
+                                root_id=root_id,
+                                processed=len(batch),
+                                warning_count=batch_warnings,
+                                message=f"Indexing folder {root_index + 1} of {len(roots)}",
+                            )
+                            processed += len(batch)
+                        if self.closing or self.store.scan_cancel_requested(scan["id"]):
+                            self.store.finish_scan_root(
+                                scan["id"], root_id, "CANCELED", message="Scan interrupted"
+                            )
+                            break
+                        self.store.finish_scan_root(
                             scan["id"],
-                            processed=len(batch),
-                            warning_count=sum(int(bool(item.warning)) for item in batch),
-                            message="Indexing media",
+                            root_id,
+                            "SUCCEEDED",
+                            full_traversal_completed=mode == "FULL",
+                            message="Folder scan complete",
                         )
-                        batch.clear()
-                        last_progress_at = time.monotonic()
-                if batch:
-                    self.store.save_media_batch(scan["id"], batch)
-                    self.store.scan_progress(
+                        completed_root_ids.append(root_id)
+                    except Exception as root_error:
+                        failed_roots.append(
+                            {
+                                "rootId": root_id,
+                                "code": getattr(root_error, "code", "INTERNAL_ERROR"),
+                                "message": _safe_error(root_error),
+                            }
+                        )
+                        self.store.finish_scan_root(
+                            scan["id"], root_id, "FAILED", message=_safe_error(root_error)
+                        )
+                if self.closing or self.store.scan_cancel_requested(scan["id"]):
+                    job = self.store.job(scan["id"])
+                    grant_revoked = job.get("errorCode") == "GRANT_REQUIRED"
+                    self.store.finish_scan(
                         scan["id"],
-                        processed=len(batch),
-                        warning_count=sum(int(bool(item.warning)) for item in batch),
-                        message="Indexing media",
+                        "FAILED" if grant_revoked else "CANCELED",
+                        {
+                            "videos": self.store.scan(scan["id"])["videos"],
+                            "completedRootIds": completed_root_ids,
+                            "failedRoots": failed_roots,
+                            "skippedRootIds": skipped_root_ids,
+                        },
+                        (
+                            "Directory grant revoked; visited records retained"
+                            if grant_revoked
+                            else "Scan canceled; visited records retained"
+                        ),
+                        "GRANT_REQUIRED" if grant_revoked else None,
                     )
+                    return
                 current = self.store.scan(scan["id"])
                 summary = {
                     "libraryId": library_id,
@@ -244,8 +309,22 @@ class App:
                     "sources": len(cameras),
                     "cameras": sorted(cameras),
                     "dateGroups": date_groups,
+                    "completedRootIds": completed_root_ids,
+                    "failedRoots": failed_roots,
+                    "skippedRootIds": skipped_root_ids,
+                    "partial": bool(failed_roots),
                 }
-                self.store.finish_scan(scan["id"], "SUCCEEDED", summary, "Scan complete")
+                if completed_root_ids:
+                    message = "Scan complete with folder warnings" if failed_roots else "Scan complete"
+                    self.store.finish_scan(scan["id"], "SUCCEEDED", summary, message)
+                else:
+                    self.store.finish_scan(
+                        scan["id"],
+                        "FAILED",
+                        summary,
+                        "No selected folder could be scanned",
+                        failed_roots[0]["code"] if failed_roots else "INTERNAL_ERROR",
+                    )
             except Exception as error:
                 try:
                     self.store.finish_scan(
@@ -728,6 +807,8 @@ class Handler(BaseHTTPRequestHandler):
                     _int_input(generation, "generation") if generation is not None else None,
                 )
             )
+        if len(parts) == 5 and parts[2] == "libraries" and parts[4] == "roots":
+            return self.respond(APP.store.library_roots(parts[3]))
         if len(parts) == 5 and parts[2] == "libraries" and parts[4] == "cluster-suggestions":
             return self.respond(APP.store.library_suggestions(parts[3]))
         if len(parts) == 4 and parts[2] == "media":
@@ -868,15 +949,24 @@ class Handler(BaseHTTPRequestHandler):
                 HTTPStatus.CREATED,
             )
         if path == "/api/v1/libraries":
-            return self.respond(
-                APP.store.create_library(
-                    str(_required(body, "sourceGrantId")),
+            source_grant_id = body.get("sourceGrantId")
+            if source_grant_id is not None:
+                library = APP.store.create_library(
+                    str(source_grant_id),
                     str(body.get("timeZone", "UTC")),
                     _int_input(body.get("dstFold", 0), "dstFold"),
                     str(body.get("nonexistentPolicy", "REJECT")),
-                ),
-                HTTPStatus.CREATED,
-            )
+                )
+            else:
+                library = APP.store.create_empty_library(
+                    str(_required(body, "name")),
+                    str(body.get("timeZone", "UTC")),
+                    _int_input(body.get("dstFold", 0), "dstFold"),
+                    str(body.get("nonexistentPolicy", "REJECT")),
+                    _int_input(body.get("eventGapUs", 15_000_000), "eventGapUs"),
+                    _int_input(body.get("sessionGapUs", 120_000_000), "sessionGapUs"),
+                )
+            return self.respond(library, HTTPStatus.CREATED)
         if path == "/api/v1/projects":
             source_groups = body.get("sourceGroups")
             if source_groups is not None and not isinstance(source_groups, list):
@@ -914,12 +1004,34 @@ class Handler(BaseHTTPRequestHandler):
         parts = [part for part in path.split("/") if part]
         if len(parts) == 5 and parts[2] == "grants" and parts[4] == "revoke":
             return self.respond(APP.store.revoke_grant(parts[3]))
+        if len(parts) == 5 and parts[2] == "libraries" and parts[4] == "roots":
+            return self.respond(
+                APP.store.add_library_root(
+                    parts[3],
+                    str(_required(body, "grantId")),
+                    str(body["label"]) if body.get("label") is not None else None,
+                    _dict_input(body["timePolicyOverride"], "timePolicyOverride")
+                    if body.get("timePolicyOverride") is not None
+                    else None,
+                ),
+                HTTPStatus.CREATED,
+            )
+        if (
+            len(parts) == 7
+            and parts[2] == "libraries"
+            and parts[4] == "roots"
+            and parts[6] == "revoke"
+        ):
+            return self.respond(APP.store.revoke_library_root(parts[3], parts[5]))
         if len(parts) == 5 and parts[2] == "libraries" and parts[4] == "scans":
             mode = str(body.get("mode", "INCREMENTAL"))
             limit = _int_input(body["limit"], "limit") if body.get("limit") is not None else None
+            root_ids = [str(item) for item in _list_input(body.get("rootIds", []), "rootIds")]
             if limit is not None:
                 mode = "BOUNDED"
-            return self.respond(APP.start_scan(parts[3], mode, limit), HTTPStatus.ACCEPTED)
+            return self.respond(
+                APP.start_scan(parts[3], mode, limit, root_ids or None), HTTPStatus.ACCEPTED
+            )
         if len(parts) == 5 and parts[2] == "libraries" and parts[4] == "time-policy":
             return self.respond(
                 APP.store.update_library_time_policy(

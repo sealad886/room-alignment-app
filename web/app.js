@@ -32,6 +32,7 @@ const state = {
   renderPlan: null,
   artifact: null,
   scanJob: null,
+  scanDetail: null,
   renderJob: null,
   eventCursor: 0,
   eventFeed: null,
@@ -253,9 +254,55 @@ async function loadLibraries() {
 
 function syncLibraryControls() {
   if (!state.library) return;
+  $("#library-name").value = state.library.name || "Video library";
+  $("#library-name").disabled = true;
   $("#library-time-zone").value = state.library.timeZone || "UTC";
   $("#library-dst-fold").value = String(state.library.dstFold || 0);
   $("#library-nonexistent").value = state.library.nonexistentPolicy || "REJECT";
+  $("#add-folder").textContent = "Add folder & scan it";
+  renderLibraryRoots();
+}
+
+function renderLibraryRoots() {
+  const panel = $("#library-roots-panel");
+  const roots = state.library?.roots || [];
+  panel.classList.toggle("hidden", !state.library);
+  $("#root-count").textContent = `${roots.filter(root => root.active).length} / 16`;
+  $("#scan-all-folders").disabled = !roots.some(root => root.active) || Boolean(state.scanJob);
+  $("#library-roots").innerHTML = roots.map(root => {
+    const progress = state.scanDetail?.roots?.find(item => item.rootId === root.id);
+    const activity = progress
+      ? `${progress.status.toLocaleLowerCase()} · ${Number(progress.scanned).toLocaleString()} inspected${progress.warnings ? ` · ${progress.warnings} warnings` : ""}`
+      : (root.lastScanAt ? `scanned ${new Date(root.lastScanAt).toLocaleString()}` : "not yet scanned");
+    return `
+    <article class="library-root${root.active ? "" : " revoked"}">
+      <div><strong>${safe(root.label)}</strong><small><span class="root-state">${root.active ? "Ready" : "Disconnected"}</span> · ${safe(activity)}</small></div>
+      <div class="root-actions">${root.active ? `<button class="btn" type="button" data-scan-root="${safe(root.id)}"${state.scanJob ? " disabled" : ""}>Scan</button><button class="btn" type="button" data-revoke-root="${safe(root.id)}"${state.scanJob ? " disabled" : ""}>Disconnect</button>` : ""}</div>
+    </article>`;
+  }).join("") || '<p class="muted">No folders added yet.</p>';
+  $$('[data-scan-root]').forEach(button => {
+    button.onclick = () => scanRoots([button.dataset.scanRoot]).catch(handleError);
+  });
+  $$('[data-revoke-root]').forEach(button => {
+    button.onclick = async () => {
+      const root = roots.find(item => item.id === button.dataset.revokeRoot);
+      if (!root || !window.confirm(`Disconnect “${root.label}”? Indexed records and project decisions will remain, but its media will be unavailable.`)) return;
+      try {
+        await client.revokeLibraryRoot({libraryId: state.library.id, rootId: root.id}, {});
+        await refreshCurrentLibrary();
+        await loadMediaPage(true);
+        toast("Folder disconnected; indexed records and decisions were preserved");
+      } catch (error) { handleError(error); }
+    };
+  });
+}
+
+async function refreshCurrentLibrary() {
+  const libraries = await client.listLibraries();
+  const current = libraries.find(item => item.id === state.library?.id) || libraries[0] || null;
+  state.library = current;
+  if (current) syncLibraryControls();
+  return current;
 }
 
 async function loadMediaPage(reset = false) {
@@ -1077,19 +1124,67 @@ async function connectEventFeed() {
   }
 }
 
-async function scanLibrary(path, limit) {
-  const grant = await client.createGrant({}, {path, role: "READ_ONLY_SOURCE"});
-  state.library = await client.createLibrary({}, {sourceGrantId: grant.id, timeZone: $("#library-time-zone").value || "UTC", dstFold: Number($("#library-dst-fold").value), nonexistentPolicy: $("#library-nonexistent").value});
-  state.scanJob = await client.startScan({libraryId: state.library.id}, limit ? {mode: "BOUNDED", limit} : {mode: "FULL"});
+function selectedScanRequest(rootIds) {
+  const mode = $("#scan-mode").value;
+  const request = {mode, rootIds};
+  if (mode === "BOUNDED") request.limit = Math.max(1, normalizeInteger($("#scan-limit").value, 250));
+  return request;
+}
+
+async function scanRoots(rootIds) {
+  if (!state.library) throw new Error("Create a library and add a folder first");
+  state.scanJob = await client.startScan(
+    {libraryId: state.library.id},
+    selectedScanRequest(rootIds),
+  );
+  state.scanDetail = state.scanJob;
+  renderLibraryRoots();
   const panel = $("#scan-progress");
   panel.classList.remove("hidden");
-  const scan = await pollJob(state.scanJob.id, job => {
-    $("#scan-count").textContent = `${Math.round((job.progress || 0) * 100)}% · ${job.message || "Scanning"}`;
-  });
-  panel.classList.add("hidden");
+  let scan;
+  const detailTimer = setInterval(() => {
+    client.getScan({scanId: state.scanJob?.id}).then(detail => {
+      state.scanDetail = detail;
+      renderLibraryRoots();
+    }).catch(() => {});
+  }, 750);
+  try {
+    scan = await pollJob(state.scanJob.id, job => {
+      $("#scan-count").textContent = `${Math.round((job.progress || 0) * 100)}% · ${job.message || "Scanning"}`;
+    });
+  } finally {
+    clearInterval(detailTimer);
+    if (state.scanJob?.id) {
+      try { state.scanDetail = await client.getScan({scanId: state.scanJob.id}); } catch (_error) {}
+    }
+    state.scanJob = null;
+    panel.classList.add("hidden");
+    renderLibraryRoots();
+  }
   if (scan.status !== "SUCCEEDED") throw new Error(scan.message || `Scan ${scan.status.toLowerCase()}`);
-  await loadLibraries();
+  await refreshCurrentLibrary();
+  await loadMediaPage(true);
   toast("Read-only scan complete; warnings and incomplete evidence remain inspectable");
+}
+
+async function addFolderAndScan(path) {
+  if (!path) throw new Error("Choose a folder path to add");
+  if (!state.library) {
+    state.library = await client.createLibrary({}, {
+      name: $("#library-name").value.trim() || "Video library",
+      timeZone: $("#library-time-zone").value || "UTC",
+      dstFold: Number($("#library-dst-fold").value),
+      nonexistentPolicy: $("#library-nonexistent").value,
+    });
+  }
+  const grant = await client.createGrant({}, {path, role: "READ_ONLY_SOURCE"});
+  const root = await client.addLibraryRoot(
+    {libraryId: state.library.id},
+    {grantId: grant.id},
+  );
+  await refreshCurrentLibrary();
+  $("#library-path").value = "";
+  await scanRoots([root.id]);
 }
 
 function setupEvents() {
@@ -1097,13 +1192,25 @@ function setupEvents() {
   $("#scan-form").onsubmit = async event => {
     event.preventDefault();
     try {
-      const limit = $("#scan-limit").value;
-      await scanLibrary($("#library-path").value.trim(), limit ? Number(limit) : null);
+      await addFolderAndScan($("#library-path").value.trim());
     } catch (error) {
+      state.scanJob = null;
       $("#scan-progress").classList.add("hidden");
+      renderLibraryRoots();
       handleError(error);
     }
   };
+  $("#scan-mode").onchange = event => {
+    $("#scan-limit-field").classList.toggle("hidden", event.target.value !== "BOUNDED");
+  };
+  $("#scan-all-folders").onclick = () => scanRoots(
+    (state.library?.roots || []).filter(root => root.active).map(root => root.id),
+  ).catch(error => {
+    state.scanJob = null;
+    $("#scan-progress").classList.add("hidden");
+    renderLibraryRoots();
+    handleError(error);
+  });
   $("#load-more-media").onclick = () => loadMediaPage(false).catch(handleError);
   $("#apply-time-policy").onclick = async () => {
     if (!state.library) return toast("Index or open a library first");
