@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
+import sys
 import tomllib
 import unittest
 from argparse import Namespace
@@ -12,6 +14,7 @@ from unittest.mock import patch
 
 from room_alignment import __version__
 from room_alignment import cli
+from room_alignment.lifecycle import stop
 from room_alignment.server import App, CONTRACT, CONTRACTS, WEB, serve
 
 
@@ -75,6 +78,92 @@ class InstallableCliTests(unittest.TestCase):
                     serve(args)
             reopened = App(data_dir)
             reopened.close()
+
+    def test_stop_is_idempotent_without_a_running_application(self):
+        with TemporaryDirectory() as temporary:
+            self.assertEqual(
+                stop(Path(temporary)),
+                {"status": "NOT_RUNNING", "forced": False},
+            )
+
+    def test_stop_command_gracefully_stops_validated_state_owner(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "room_alignment",
+                    "serve",
+                    "--no-open",
+                    "--port",
+                    "0",
+                    "--data-dir",
+                    str(state),
+                ],
+                cwd=ROOT,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert process.stdout is not None
+                self.assertIn("Room Alignment secure launch:", process.stdout.readline())
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(cli.main(["stop", "--data-dir", str(state)]), 0)
+                self.assertEqual(
+                    json.loads(output.getvalue()),
+                    {"status": "STOPPED", "forced": False},
+                )
+                self.assertEqual(process.wait(timeout=5), 0)
+
+                reopened = App(state)
+                reopened.close()
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+                if process.stdout is not None:
+                    process.stdout.close()
+                if process.stderr is not None:
+                    process.stderr.close()
+
+    def test_stop_refuses_a_contended_lock_without_room_alignment_identity(self):
+        with TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            state.mkdir()
+            lock_path = state / "application.lock"
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import fcntl, pathlib, sys, time; "
+                        "f=pathlib.Path(sys.argv[1]).open('w+'); "
+                        "f.write('{}'); f.flush(); "
+                        "fcntl.flock(f.fileno(), fcntl.LOCK_EX); "
+                        "print('ready', flush=True); time.sleep(30)"
+                    ),
+                    str(lock_path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            try:
+                assert process.stdout is not None
+                self.assertEqual(process.stdout.readline().strip(), "ready")
+                with self.assertRaisesRegex(ValueError, "not owned by Room Alignment"):
+                    stop(state)
+                self.assertIsNone(process.poll())
+            finally:
+                process.kill()
+                process.wait(timeout=5)
+                if process.stdout is not None:
+                    process.stdout.close()
+                if process.stderr is not None:
+                    process.stderr.close()
 
 
 if __name__ == "__main__":

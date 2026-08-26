@@ -28,6 +28,7 @@ from .alignment import (
     analyze_project_alignment,
 )
 from .domain import DomainError, program_at
+from .lifecycle import write_owner
 from .render import CanonicalRenderManager, RenderManager, build_render_plan
 from .scanner import iter_scan_records
 from .store import Store, TERMINAL_JOB_STATES
@@ -128,6 +129,7 @@ class App:
         except BlockingIOError as error:
             self._lock_file.close()
             raise RuntimeError("Another Room Alignment process owns this state directory") from error
+        write_owner(self._lock_file)
         self.store = Store(self.data_dir / "room-alignment.sqlite3")
         self.audio_signatures = AudioSignatureCache(self.store)
         self.legacy_render = RenderManager(self.store)

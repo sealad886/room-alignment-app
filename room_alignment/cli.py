@@ -6,8 +6,10 @@ import re
 import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 from . import __version__
+from .lifecycle import stop
 from .server import CONTRACT, CONTRACTS, WEB, add_serve_arguments, serve
 from .state_admin import add_admin_arguments, run_admin
 
@@ -88,6 +90,19 @@ def parser() -> argparse.ArgumentParser:
     serve_parser = commands.add_parser("serve", help="start local application and open secure browser session")
     add_serve_arguments(serve_parser)
     commands.add_parser("doctor", help="check packaged resources and external media tools")
+    stop_parser = commands.add_parser("stop", help="stop the application owning a state directory")
+    stop_parser.add_argument("--data-dir", type=Path, default=Path.home() / ".room-alignment")
+    stop_parser.add_argument(
+        "--timeout",
+        type=float,
+        default=10.0,
+        help="seconds to wait for graceful shutdown (default: 10)",
+    )
+    stop_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="send SIGKILL if graceful shutdown exceeds the timeout",
+    )
     admin_parser = commands.add_parser("admin", help="verify, back up, migrate-check, or restore state")
     add_admin_arguments(admin_parser)
     return root
@@ -96,7 +111,7 @@ def parser() -> argparse.ArgumentParser:
 def _normalized_argv(argv: list[str]) -> list[str]:
     if not argv:
         return ["serve"]
-    if argv[0] in {"serve", "doctor", "admin", "--help", "-h", "--version"}:
+    if argv[0] in {"serve", "stop", "doctor", "admin", "--help", "-h", "--version"}:
         return argv
     # Preserve the original `room-alignment --host ...` launch shape.
     return ["serve", *argv]
@@ -109,6 +124,10 @@ def main(argv: list[str] | None = None) -> int:
         return serve(args)
     if args.command == "doctor":
         return doctor()
+    if args.command == "stop":
+        result = stop(args.data_dir, args.timeout, args.force)
+        print(json.dumps(result, sort_keys=True))
+        return 1 if result["status"] == "TIMEOUT" else 0
     if args.command == "admin":
         return run_admin(args)
     raise AssertionError(f"Unhandled command: {args.command}")
