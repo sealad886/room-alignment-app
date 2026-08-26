@@ -18,13 +18,17 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .domain import (
     DomainError,
     alignment_digest,
+    alignment_summary,
     apply_command,
     compile_program,
     digest_json,
     new_project,
     now_iso,
     opaque_id,
+    project_preparation,
     seconds_to_us,
+    timeline_window,
+    timeline_section_proposal,
 )
 from .models import MediaRecord, ScanSummary
 from .models import ProvenanceEvidence
@@ -32,7 +36,8 @@ from .provenance import normalize_timestamp
 from .scanner import media_record_from_dict, quick_fingerprint
 
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 7
+PROJECT_SNAPSHOT_INTERVAL = 25
 MAX_JOB_EVENTS = 100_000
 MAX_CACHE_ENTRIES = 10_000
 MAX_CACHE_BYTES = 2 * 1024 * 1024 * 1024
@@ -54,6 +59,7 @@ PROGRAM_AFFECTING_COMMANDS = {
     "DeleteVideoBlock", "AssignVideoSource", "PinVideoClip", "CutToSource", "AddAudioBlock",
     "SplitAudioBlock", "MoveAudioBoundary", "DeleteAudioBlock", "SetAudioMode", "SetAnchoringMode",
     "ReconcileBoundary", "AcceptAlignmentSuggestion", "AcceptAlignmentSuggestions",
+    "AlignMarkedMoments", "AcceptAlignmentProposalSet", "AcceptAlignmentProposal",
 }
 
 
@@ -283,6 +289,25 @@ CREATE TABLE IF NOT EXISTS project_revisions (
   created_at TEXT NOT NULL,
   PRIMARY KEY(project_id, revision)
 );
+CREATE TABLE IF NOT EXISTS project_revision_deltas (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  revision INTEGER NOT NULL,
+  base_revision INTEGER NOT NULL,
+  delta_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY(project_id, revision)
+);
+CREATE TABLE IF NOT EXISTS project_components (
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  component_type TEXT NOT NULL,
+  component_id TEXT NOT NULL,
+  ordinal INTEGER NOT NULL,
+  document_json TEXT NOT NULL,
+  updated_revision INTEGER NOT NULL,
+  PRIMARY KEY(project_id, component_type, component_id)
+);
+CREATE INDEX IF NOT EXISTS project_components_order
+  ON project_components(project_id,component_type,ordinal,component_id);
 CREATE TABLE IF NOT EXISTS command_records (
   command_id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -332,6 +357,23 @@ CREATE TABLE IF NOT EXISTS suggestions (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS alignment_proposal_sets (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  project_revision INTEGER NOT NULL,
+  selection_digest TEXT NOT NULL,
+  input_digest TEXT NOT NULL,
+  proposal_digest TEXT NOT NULL UNIQUE,
+  algorithm TEXT NOT NULL,
+  algorithm_version TEXT NOT NULL,
+  config_digest TEXT NOT NULL,
+  status TEXT NOT NULL,
+  set_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS alignment_sets_project_created
+  ON alignment_proposal_sets(project_id,created_at DESC,id DESC);
 CREATE TABLE IF NOT EXISTS render_plans (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -418,6 +460,7 @@ class Store:
                 "INSERT OR IGNORE INTO project_revisions(project_id,revision,document_json,created_at) "
                 "SELECT id,revision,document_json,updated_at FROM projects"
             )
+            self._backfill_project_components(db)
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             db.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version,applied_at,details_json) VALUES(?,?,?)",
@@ -456,6 +499,7 @@ class Store:
             self._backfill_directory_grant_identities(destination)
             self._backfill_library_roots(destination)
             self._backfill_catalog_revisions(destination)
+            self._backfill_project_components(destination)
             destination.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             destination.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version,applied_at,details_json) VALUES(?,?,?)",
@@ -588,6 +632,64 @@ class Store:
                 (revision_id, library["id"], revision, digest, asset_count, now_iso()),
             )
 
+    def _backfill_project_components(self, db: sqlite3.Connection) -> None:
+        for row in db.execute("SELECT id,revision,document_json FROM projects"):
+            exists = db.execute(
+                "SELECT 1 FROM project_components WHERE project_id=? LIMIT 1", (row["id"],)
+            ).fetchone()
+            if exists:
+                continue
+            project = self._migrate_legacy_project(json.loads(row["document_json"]))
+            self._sync_project_component_delta_db(db, {}, project, int(row["revision"]))
+
+    @staticmethod
+    def _sync_project_component_delta_db(
+        db: sqlite3.Connection,
+        before: dict[str, Any],
+        after: dict[str, Any],
+        revision: int,
+    ) -> None:
+        component_fields = {
+            "logicalSource": "logicalSources",
+            "clip": "clips",
+            "timelineSection": "timelineSections",
+            "videoBlock": "videoBlocks",
+            "audioBlock": "audioBlocks",
+            "syntheticSlate": "syntheticSlates",
+        }
+        project_id = str(after["id"])
+        for component_type, field in component_fields.items():
+            previous = {str(item["id"]): item for item in before.get(field, [])}
+            current = {str(item["id"]): item for item in after.get(field, [])}
+            removed = sorted(set(previous) - set(current))
+            if removed:
+                db.executemany(
+                    "DELETE FROM project_components WHERE project_id=? AND component_type=? AND component_id=?",
+                    ((project_id, component_type, component_id) for component_id in removed),
+                )
+            rows = []
+            for ordinal, item in enumerate(after.get(field, [])):
+                component_id = str(item["id"])
+                if previous.get(component_id) == item:
+                    continue
+                rows.append(
+                    (
+                        project_id,
+                        component_type,
+                        component_id,
+                        ordinal,
+                        json.dumps(item),
+                        int(revision),
+                    )
+                )
+            if rows:
+                db.executemany(
+                    "INSERT INTO project_components(project_id,component_type,component_id,ordinal,document_json,updated_revision) "
+                    "VALUES(?,?,?,?,?,?) ON CONFLICT(project_id,component_type,component_id) DO UPDATE SET "
+                    "ordinal=excluded.ordinal,document_json=excluded.document_json,updated_revision=excluded.updated_revision",
+                    rows,
+                )
+
     @staticmethod
     def _catalog_digest_db(db: sqlite3.Connection, library_id: str) -> tuple[str, int]:
         digest = hashlib.sha256()
@@ -642,6 +744,9 @@ class Store:
                 asset_count,
                 now_iso(),
             ),
+        )
+        self._invalidate_alignment_sets_for_library_db(
+            db, library_id, "Library catalog changed after alignment analysis"
         )
         return revision
 
@@ -1813,6 +1918,7 @@ class Store:
                 "INSERT INTO project_revisions(project_id,revision,document_json,created_at) VALUES(?,?,?,?)",
                 (project["id"], project["revision"], json.dumps(project), project["createdAt"]),
             )
+            self._sync_project_component_delta_db(db, {}, project, int(project["revision"]))
         return self.project(project["id"])
 
     def create_project_from_selection(
@@ -1864,6 +1970,7 @@ class Store:
                 "VALUES(?,?,?,?)",
                 (project["id"], project["revision"], json.dumps(project), project["createdAt"]),
             )
+            self._sync_project_component_delta_db(db, {}, project, int(project["revision"]))
         return self.project(project["id"])
 
     def project_selection_preview(
@@ -2041,6 +2148,14 @@ class Store:
     def save_project(self, project: dict[str, Any]) -> None:
         canonical = self._migrate_legacy_project(project)
         with self._lock, self.connect() as db:
+            previous_row = db.execute(
+                "SELECT document_json FROM projects WHERE id=?", (canonical["id"],)
+            ).fetchone()
+            previous = (
+                self._migrate_legacy_project(json.loads(previous_row["document_json"]))
+                if previous_row
+                else {}
+            )
             db.execute(
                 "INSERT INTO projects(id,name,library_id,revision,archived,created_at,updated_at,document_json) "
                 "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,library_id=excluded.library_id,"
@@ -2059,6 +2174,9 @@ class Store:
             db.execute(
                 "INSERT OR REPLACE INTO project_revisions(project_id,revision,document_json,created_at) VALUES(?,?,?,?)",
                 (canonical["id"], canonical["revision"], json.dumps(canonical), canonical.get("updatedAt", now_iso())),
+            )
+            self._sync_project_component_delta_db(
+                db, previous, canonical, int(canonical["revision"])
             )
 
     def project(self, project_id: str) -> dict[str, Any]:
@@ -2082,11 +2200,38 @@ class Store:
                 "SELECT document_json FROM project_revisions WHERE project_id=? AND revision=?",
                 (project_id, int(revision)),
             ).fetchone()
-            if not row:
+            if row:
+                return self._migrate_legacy_project(json.loads(row[0]))
+            snapshot = db.execute(
+                "SELECT revision,document_json FROM project_revisions WHERE project_id=? AND revision<? "
+                "ORDER BY revision DESC LIMIT 1",
+                (project_id, int(revision)),
+            ).fetchone()
+            if not snapshot:
                 raise DomainError("NOT_FOUND", "Retained project revision not found")
-            return self._migrate_legacy_project(json.loads(row[0]))
+            project = self._migrate_legacy_project(json.loads(snapshot["document_json"]))
+            expected = int(snapshot["revision"]) + 1
+            for delta_row in db.execute(
+                "SELECT revision,delta_json FROM project_revision_deltas WHERE project_id=? "
+                "AND revision>? AND revision<=? ORDER BY revision",
+                (project_id, int(snapshot["revision"]), int(revision)),
+            ):
+                if int(delta_row["revision"]) != expected:
+                    raise DomainError("NOT_FOUND", "Retained project revision chain is incomplete")
+                project = _apply_project_delta(project, json.loads(delta_row["delta_json"]))
+                expected += 1
+            if expected != int(revision) + 1:
+                raise DomainError("NOT_FOUND", "Retained project revision chain is incomplete")
+            return self._migrate_legacy_project(project)
 
-    def apply_project_command(self, project_id: str, envelope: dict[str, Any], preview: bool = False) -> dict[str, Any]:
+    def apply_project_command(
+        self,
+        project_id: str,
+        envelope: dict[str, Any],
+        preview: bool = False,
+        *,
+        delta_result: bool = False,
+    ) -> dict[str, Any]:
         command_id = str(envelope.get("commandId", ""))
         if not command_id:
             raise DomainError("VALIDATION_FAILED", "commandId is required")
@@ -2123,24 +2268,40 @@ class Store:
                 self._validate_alignment_acceptance_db(
                     db, project_id, current_revision, command_type, payload
                 )
+            proposal_action: dict[str, Any] | None = None
+            if command_type in {
+                "AcceptAlignmentProposalSet",
+                "AcceptAlignmentProposal",
+                "RejectAlignmentProposal",
+                "RejectAlignmentProposalSet",
+            }:
+                payload, proposal_action = self._prepare_alignment_proposal_command_db(
+                    db, project_id, current_revision, command_type, payload
+                )
             assets = self._media_records_db(db, [item["assetId"] for item in project.get("clips", [])])
             previous_compiled = compile_program(project, assets) if command_type in PROGRAM_AFFECTING_COMMANDS else None
             changed = apply_command(project, command_type, payload, assets)
             changed["revision"] = current_revision + 1
             changed["updatedAt"] = now_iso()
             compiled = compile_program(changed, assets)
-            result = {
+            full_result = {
                 "commandId": command_id,
                 "projectId": project_id,
                 "previousRevision": current_revision,
                 "appliedRevision": changed["revision"],
                 "project": changed,
                 "issues": compiled["issues"],
+                "preparation": project_preparation(changed, assets),
                 "reviewState": "STALE" if project.get("review") else "NOT_REVIEWED",
                 "eventCursor": self.latest_event_sequence(db),
                 "preview": preview,
                 "affectedIntervals": _affected_program_intervals(previous_compiled, compiled) if previous_compiled else [],
             }
+            result = (
+                _delta_command_result(project, changed, full_result, previous_compiled, compiled)
+                if delta_result
+                else full_result
+            )
             if preview:
                 db.rollback()
                 return result
@@ -2155,9 +2316,28 @@ class Store:
                     project_id,
                 ),
             )
+            delta = _project_delta(project, changed)
             db.execute(
-                "INSERT INTO project_revisions(project_id,revision,document_json,created_at) VALUES(?,?,?,?)",
-                (project_id, changed["revision"], json.dumps(changed), changed["updatedAt"]),
+                "INSERT INTO project_revision_deltas(project_id,revision,base_revision,delta_json,created_at) "
+                "VALUES(?,?,?,?,?)",
+                (
+                    project_id,
+                    changed["revision"],
+                    current_revision,
+                    json.dumps(delta),
+                    changed["updatedAt"],
+                ),
+            )
+            if (
+                int(changed["revision"]) % PROJECT_SNAPSHOT_INTERVAL == 0
+                or command_type == "GenerateProgramDraft"
+            ):
+                db.execute(
+                    "INSERT INTO project_revisions(project_id,revision,document_json,created_at) VALUES(?,?,?,?)",
+                    (project_id, changed["revision"], json.dumps(changed), changed["updatedAt"]),
+                )
+            self._sync_project_component_delta_db(
+                db, project, changed, int(changed["revision"])
             )
             db.execute(
                 "INSERT INTO command_records(command_id,project_id,payload_digest,result_json,created_at) VALUES(?,?,?,?,?)",
@@ -2169,6 +2349,20 @@ class Store:
                 (project_id, changed["revision"]),
                 "Project revision changed after suggestion creation",
             )
+            if proposal_action:
+                self._set_alignment_proposal_status_db(
+                    db,
+                    proposal_action["proposalSetId"],
+                    proposal_action["status"],
+                    proposal_action.get("acceptedProposalIds", []),
+                    proposal_action.get("rejectedProposalIds", []),
+                )
+            self._invalidate_alignment_proposal_sets_db(
+                db,
+                project_id,
+                changed["revision"],
+                exclude_id=proposal_action["proposalSetId"] if proposal_action else None,
+            )
             if command_type in {"AcceptAlignmentSuggestion", "RejectAlignmentSuggestion"}:
                 suggestion_id = str(payload.get("suggestionId", ""))
                 next_status = "ACCEPTED" if command_type == "AcceptAlignmentSuggestion" else "REJECTED"
@@ -2177,6 +2371,104 @@ class Store:
                 for suggestion in payload.get("suggestions", []):
                     self._set_suggestion_status_db(db, str(suggestion.get("suggestionId", "")), "ACCEPTED")
             return result
+
+    def apply_project_delta_command(
+        self, project_id: str, envelope: dict[str, Any], preview: bool = False
+    ) -> dict[str, Any]:
+        return self.apply_project_command(
+            project_id, envelope, preview, delta_result=True
+        )
+
+    def _prepare_alignment_proposal_command_db(
+        self,
+        db: sqlite3.Connection,
+        project_id: str,
+        project_revision: int,
+        command_type: str,
+        payload: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        proposal_set_id = str(payload.get("proposalSetId", ""))
+        row = db.execute(
+            "SELECT * FROM alignment_proposal_sets WHERE id=?", (proposal_set_id,)
+        ).fetchone()
+        if not row:
+            raise DomainError("NOT_FOUND", "Alignment proposal set not found")
+        value = json.loads(row["set_json"])
+        if row["project_id"] != project_id:
+            raise DomainError("VALIDATION_FAILED", "Alignment proposal set belongs to another project")
+        if int(row["project_revision"]) > project_revision or row["status"] not in {
+            "PENDING",
+            "PARTIALLY_RESOLVED",
+        }:
+            raise DomainError("PLAN_STALE", "Alignment proposal set is no longer current")
+        if str(payload.get("digest", "")) != str(row["proposal_digest"]):
+            raise DomainError("PLAN_STALE", "Alignment proposal set digest does not match")
+        proposals = {str(item["id"]): item for item in value.get("proposals", [])}
+        already_resolved = set(value.get("acceptedProposalIds", [])) | set(
+            value.get("rejectedProposalIds", [])
+        )
+        if command_type == "RejectAlignmentProposalSet":
+            return dict(payload), {
+                "proposalSetId": proposal_set_id,
+                "status": "REJECTED",
+                "rejectedProposalIds": sorted(proposals),
+            }
+        if command_type == "RejectAlignmentProposal":
+            proposal_id = str(payload.get("proposalId", ""))
+            if proposal_id not in proposals:
+                raise DomainError("NOT_FOUND", "Alignment proposal not found in set")
+            return dict(payload), {
+                "proposalSetId": proposal_set_id,
+                "status": "PARTIALLY_RESOLVED",
+                "rejectedProposalIds": [proposal_id],
+            }
+        selected: list[dict[str, Any]]
+        if command_type == "AcceptAlignmentProposalSet":
+            if payload.get("mode", "HIGH_CONFIDENCE") != "HIGH_CONFIDENCE":
+                raise DomainError("VALIDATION_FAILED", "Unknown proposal-set acceptance mode")
+            selected = [
+                item
+                for item in proposals.values()
+                if item.get("automaticallyAcceptable") and item["id"] not in already_resolved
+            ]
+        else:
+            proposal_id = str(payload.get("proposalId", ""))
+            proposal = proposals.get(proposal_id)
+            if not proposal:
+                raise DomainError("NOT_FOUND", "Alignment proposal not found in set")
+            if proposal_id in already_resolved:
+                raise DomainError("JOB_STATE_CONFLICT", "Alignment proposal was already resolved")
+            if not proposal.get("automaticallyAcceptable") and not payload.get("confirmLowConfidence"):
+                raise DomainError(
+                    "VALIDATION_FAILED", "Low-confidence alignment requires explicit confirmation"
+                )
+            selected = [proposal]
+        if not selected:
+            raise DomainError("VALIDATION_FAILED", "Proposal set has no high-confidence alignments")
+        if any(item.get("requiresDriftConfirmation") for item in selected) and not payload.get("confirmDrift"):
+            raise DomainError("VALIDATION_FAILED", "Proposed drift requires explicit confirmation")
+        expanded = dict(payload)
+        expanded["alignments"] = [
+            {
+                "proposalId": item["id"],
+                "clipId": item["clipId"],
+                "alignment": item["proposedAlignment"],
+                "confidence": item["confidence"],
+                "evidenceKinds": (
+                    ["audio-correlation", "timestamp-prior"]
+                    if item.get("classification") == "AUDIO_CONFIRMED"
+                    else ["timestamp-prior"]
+                    if item.get("classification") == "TIMESTAMP_ONLY"
+                    else ["manual-review"]
+                ),
+            }
+            for item in selected
+        ]
+        return expanded, {
+            "proposalSetId": proposal_set_id,
+            "status": "PARTIALLY_RESOLVED",
+            "acceptedProposalIds": [item["id"] for item in selected],
+        }
 
     def _validate_alignment_acceptance_db(
         self,
@@ -2249,9 +2541,49 @@ class Store:
         assets = self.media_records(item["assetId"] for item in project["clips"])
         return compile_program(project, assets)
 
+    def project_alignment_summary(self, project_id: str) -> dict[str, Any]:
+        project = self.project(project_id)
+        assets = self.media_records(item["assetId"] for item in project.get("clips", []))
+        return alignment_summary(project, assets)
+
+    def project_preparation(self, project_id: str) -> dict[str, Any]:
+        project = self.project(project_id)
+        assets = self.media_records(item["assetId"] for item in project.get("clips", []))
+        return project_preparation(project, assets)
+
+    def project_timeline_window(
+        self,
+        project_id: str,
+        start_aligned_us: int,
+        end_aligned_us: int,
+        resolution_us: int,
+        lane_ids: set[str] | None = None,
+    ) -> dict[str, Any]:
+        project = self.project(project_id)
+        assets = self.media_records(item["assetId"] for item in project.get("clips", []))
+        return timeline_window(
+            project,
+            assets,
+            start_aligned_us,
+            end_aligned_us,
+            resolution_us,
+            lane_ids,
+        )
+
+    def project_timeline_section_proposal(
+        self, project_id: str, gap_mode: str = "EXCLUDE"
+    ) -> dict[str, Any]:
+        project = self.project(project_id)
+        assets = self.media_records(item["assetId"] for item in project.get("clips", []))
+        return timeline_section_proposal(project, assets, gap_mode)
+
     def _migrate_legacy_project(self, project: dict[str, Any]) -> dict[str, Any]:
         if "logicalSources" in project:
             canonical = copy.deepcopy(project)
+            for source in canonical.get("logicalSources", []):
+                # Existing source decisions predate explicit preparation state. Preserve
+                # them as accepted instead of turning a migration into a new decision.
+                source.setdefault("identityState", "USER_CONFIRMED")
             asset_ids = [str(item["assetId"]) for item in canonical.get("clips", [])]
             snapshot = canonical.setdefault(
                 "selectionSnapshot",
@@ -2269,6 +2601,7 @@ class Store:
                 {key: value for key, value in snapshot.items() if key != "digest"}
             )
             canonical.setdefault("timelineSections", [])
+            canonical.setdefault("syntheticSlates", [])
             canonical.setdefault(
                 "programDraft",
                 {
@@ -2292,8 +2625,22 @@ class Store:
         assets = self.media_records(media_ids)
         if not assets:
             return project
+        legacy_assets = list(assets.values())
+        # A legacy per-media source was an accepted editorial identity. Candidate
+        # evidence introduced later may suggest that two files share a camera,
+        # but migration must not silently merge those accepted identities.
         canonical = new_project(
-            project.get("name", "Migrated project"), project["libraryId"], list(assets.values()), project["id"]
+            project.get("name", "Migrated project"),
+            project["libraryId"],
+            legacy_assets,
+            project["id"],
+            source_groups=[
+                {
+                    "label": item.get("camera") or f"Source {index + 1}",
+                    "assetIds": [item["id"]],
+                }
+                for index, item in enumerate(legacy_assets)
+            ],
         )
         source_remap: dict[str, str] = {}
         clip_remap: dict[str, str] = {}
@@ -2430,6 +2777,9 @@ class Store:
                     (project["id"],),
                     "A provenance resolution changed after suggestion creation",
                 )
+                self._invalidate_alignment_proposal_sets_db(
+                    db, project["id"], int(project["revision"]) + 1
+                )
             result = {
                 "id": resolution_id,
                 "mediaId": media_id,
@@ -2487,6 +2837,191 @@ class Store:
                     "createdAt": row["created_at"],
                 }
         return [latest[key] for key in sorted(latest)]
+
+    def save_alignment_proposal_set(self, proposal_set: dict[str, Any]) -> dict[str, Any]:
+        value = copy.deepcopy(proposal_set)
+        required = {
+            "id",
+            "projectId",
+            "projectRevision",
+            "selectionDigest",
+            "inputDigest",
+            "digest",
+            "algorithm",
+            "algorithmVersion",
+            "configDigest",
+            "status",
+            "summary",
+            "proposals",
+            "createdAt",
+            "updatedAt",
+        }
+        if required - value.keys():
+            raise DomainError("VALIDATION_FAILED", "Alignment proposal set is incomplete")
+        with self._lock, self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            project_row = db.execute(
+                "SELECT revision,document_json FROM projects WHERE id=?", (value["projectId"],)
+            ).fetchone()
+            if not project_row:
+                raise DomainError("NOT_FOUND", "Project not found")
+            current = self._migrate_legacy_project(json.loads(project_row["document_json"]))
+            if (
+                int(project_row["revision"]) != int(value["projectRevision"])
+                or str((current.get("selectionSnapshot") or {}).get("digest", ""))
+                != str(value["selectionDigest"])
+            ):
+                value["status"] = "STALE"
+                value["invalidationReason"] = "Project changed before analysis completed"
+                value["updatedAt"] = now_iso()
+            rows = list(
+                db.execute(
+                    "SELECT id,set_json FROM alignment_proposal_sets "
+                    "WHERE project_id=? AND status='PENDING'",
+                    (value["projectId"],),
+                )
+            )
+            for row in rows:
+                previous = json.loads(row["set_json"])
+                previous["status"] = "SUPERSEDED"
+                previous["invalidationReason"] = "A newer alignment proposal set was created"
+                previous["updatedAt"] = now_iso()
+                db.execute(
+                    "UPDATE alignment_proposal_sets SET status='SUPERSEDED',set_json=?,updated_at=? WHERE id=?",
+                    (json.dumps(previous), previous["updatedAt"], row["id"]),
+                )
+            db.execute(
+                "INSERT INTO alignment_proposal_sets(id,project_id,project_revision,selection_digest,"
+                "input_digest,proposal_digest,algorithm,algorithm_version,config_digest,status,set_json,"
+                "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    value["id"],
+                    value["projectId"],
+                    int(value["projectRevision"]),
+                    value["selectionDigest"],
+                    value["inputDigest"],
+                    value["digest"],
+                    value["algorithm"],
+                    value["algorithmVersion"],
+                    value["configDigest"],
+                    value["status"],
+                    json.dumps(value),
+                    value["createdAt"],
+                    value["updatedAt"],
+                ),
+            )
+        return value
+
+    def alignment_proposal_sets(self, project_id: str, limit: int = 20) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100))
+        with self.connect() as db:
+            if not db.execute("SELECT 1 FROM projects WHERE id=?", (project_id,)).fetchone():
+                raise DomainError("NOT_FOUND", "Project not found")
+            return [
+                json.loads(row["set_json"])
+                for row in db.execute(
+                    "SELECT set_json FROM alignment_proposal_sets WHERE project_id=? "
+                    "ORDER BY created_at DESC,id DESC LIMIT ?",
+                    (project_id, limit),
+                )
+            ]
+
+    def alignment_proposal_set(self, proposal_set_id: str) -> dict[str, Any]:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT set_json FROM alignment_proposal_sets WHERE id=?", (proposal_set_id,)
+            ).fetchone()
+            if not row:
+                raise DomainError("NOT_FOUND", "Alignment proposal set not found")
+            return json.loads(row["set_json"])
+
+    def _set_alignment_proposal_status_db(
+        self,
+        db: sqlite3.Connection,
+        proposal_set_id: str,
+        status: str,
+        accepted_proposal_ids: list[str],
+        rejected_proposal_ids: list[str],
+    ) -> None:
+        row = db.execute(
+            "SELECT set_json FROM alignment_proposal_sets WHERE id=?", (proposal_set_id,)
+        ).fetchone()
+        if not row:
+            raise DomainError("NOT_FOUND", "Alignment proposal set not found")
+        value = json.loads(row["set_json"])
+        accepted = sorted(
+            set(value.get("acceptedProposalIds", [])) | set(accepted_proposal_ids)
+        )
+        rejected = sorted(
+            set(value.get("rejectedProposalIds", [])) | set(rejected_proposal_ids)
+        )
+        proposal_ids = {str(item["id"]) for item in value.get("proposals", [])}
+        if status in {"REJECTED", "STALE", "SUPERSEDED"}:
+            resolved_status = status
+        elif proposal_ids and proposal_ids <= set(accepted):
+            resolved_status = "ACCEPTED"
+        elif proposal_ids and proposal_ids <= set(rejected):
+            resolved_status = "REJECTED"
+        elif proposal_ids and proposal_ids <= set(accepted) | set(rejected):
+            resolved_status = "RESOLVED"
+        else:
+            resolved_status = "PARTIALLY_RESOLVED"
+        value["status"] = resolved_status
+        value["acceptedProposalIds"] = accepted
+        value["rejectedProposalIds"] = rejected
+        value["updatedAt"] = now_iso()
+        db.execute(
+            "UPDATE alignment_proposal_sets SET status=?,set_json=?,updated_at=? WHERE id=?",
+            (resolved_status, json.dumps(value), value["updatedAt"], proposal_set_id),
+        )
+
+    def _invalidate_alignment_proposal_sets_db(
+        self,
+        db: sqlite3.Connection,
+        project_id: str,
+        current_revision: int,
+        *,
+        exclude_id: str | None = None,
+    ) -> None:
+        rows = list(
+            db.execute(
+                "SELECT id,set_json FROM alignment_proposal_sets "
+                "WHERE project_id=? AND project_revision<? AND status IN ('PENDING','PARTIALLY_RESOLVED')",
+                (project_id, int(current_revision)),
+            )
+        )
+        for row in rows:
+            if exclude_id and row["id"] == exclude_id:
+                continue
+            value = json.loads(row["set_json"])
+            value["status"] = "STALE"
+            value["invalidationReason"] = "Project revision changed after alignment analysis"
+            value["updatedAt"] = now_iso()
+            db.execute(
+                "UPDATE alignment_proposal_sets SET status='STALE',set_json=?,updated_at=? WHERE id=?",
+                (json.dumps(value), value["updatedAt"], row["id"]),
+            )
+
+    def _invalidate_alignment_sets_for_library_db(
+        self, db: sqlite3.Connection, library_id: str, reason: str
+    ) -> None:
+        rows = list(
+            db.execute(
+                "SELECT sets.id,sets.set_json FROM alignment_proposal_sets sets "
+                "JOIN projects ON projects.id=sets.project_id "
+                "WHERE projects.library_id=? AND sets.status IN ('PENDING','PARTIALLY_RESOLVED')",
+                (library_id,),
+            )
+        )
+        for row in rows:
+            value = json.loads(row["set_json"])
+            value["status"] = "STALE"
+            value["invalidationReason"] = reason
+            value["updatedAt"] = now_iso()
+            db.execute(
+                "UPDATE alignment_proposal_sets SET status='STALE',set_json=?,updated_at=? WHERE id=?",
+                (json.dumps(value), value["updatedAt"], row["id"]),
+            )
 
     def save_suggestion(self, suggestion: dict[str, Any]) -> dict[str, Any]:
         timestamp = now_iso()
@@ -3411,6 +3946,40 @@ class Store:
         cursor = db.execute("DELETE FROM job_events WHERE sequence<?", (int(cutoff[0]),))
         return max(0, int(cursor.rowcount))
 
+    def register_cache_entry(
+        self,
+        key: str,
+        kind: str,
+        path: Path,
+        size_bytes: int,
+        *,
+        pinned: bool = False,
+        prune: bool = True,
+    ) -> None:
+        cache_root = (self.path.parent / "cache").resolve()
+        target = path.resolve()
+        if not target.is_relative_to(cache_root) or not target.is_file():
+            raise DomainError("FORBIDDEN", "Derived cache entry must remain beneath state cache")
+        timestamp = now_iso()
+        with self._lock, self.connect() as db:
+            db.execute(
+                "INSERT INTO cache_entries(key,kind,path,size_bytes,pinned,last_accessed,created_at) "
+                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(key) DO UPDATE SET "
+                "kind=excluded.kind,path=excluded.path,size_bytes=excluded.size_bytes,pinned=excluded.pinned,"
+                "last_accessed=excluded.last_accessed",
+                (key, kind, str(target), max(0, int(size_bytes)), int(pinned), timestamp, timestamp),
+            )
+        if prune:
+            self.prune_cache()
+
+    def touch_cache_entry(self, key: str) -> None:
+        with self._lock, self.connect() as db:
+            db.execute("UPDATE cache_entries SET last_accessed=? WHERE key=?", (now_iso(), key))
+
+    def remove_cache_entry(self, key: str) -> None:
+        with self._lock, self.connect() as db:
+            db.execute("DELETE FROM cache_entries WHERE key=?", (key,))
+
     def prune_cache(
         self,
         max_entries: int = MAX_CACHE_ENTRIES,
@@ -3857,6 +4426,64 @@ def _affected_program_intervals(before: dict[str, Any], after: dict[str, Any]) -
         else:
             result.append({"startUs": start, "endUs": end, "reasons": reasons})
     return result
+
+
+def _project_delta(before: dict[str, Any], after: dict[str, Any]) -> dict[str, Any]:
+    removed = sorted(set(before) - set(after))
+    changed = {
+        key: copy.deepcopy(value)
+        for key, value in after.items()
+        if key not in before or before[key] != value
+    }
+    return {"set": changed, "remove": removed}
+
+
+def _apply_project_delta(project: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
+    result = copy.deepcopy(project)
+    for key in delta.get("remove", []):
+        result.pop(str(key), None)
+    for key, value in dict(delta.get("set") or {}).items():
+        result[str(key)] = copy.deepcopy(value)
+    return result
+
+
+def _delta_command_result(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    full_result: dict[str, Any],
+    previous_compiled: dict[str, Any] | None,
+    compiled: dict[str, Any],
+) -> dict[str, Any]:
+    prior_issues = {
+        str(item["id"]): item for item in (previous_compiled or compiled).get("issues", [])
+    }
+    current_issues = {str(item["id"]): item for item in compiled.get("issues", [])}
+    return {
+        "commandId": full_result["commandId"],
+        "projectId": full_result["projectId"],
+        "previousRevision": full_result["previousRevision"],
+        "appliedRevision": full_result["appliedRevision"],
+        "changedEntities": _project_delta(before, after),
+        "projectSummary": {
+            "id": after["id"],
+            "name": after["name"],
+            "revision": after["revision"],
+            "updatedAt": after["updatedAt"],
+            "archived": bool(after.get("archived", False)),
+            "preparation": full_result["preparation"],
+        },
+        "issueDelta": {
+            "added": [
+                current_issues[item_id]
+                for item_id in sorted(set(current_issues) - set(prior_issues))
+            ],
+            "removedIds": sorted(set(prior_issues) - set(current_issues)),
+            "current": list(compiled.get("issues", [])),
+        },
+        "reviewState": full_result["reviewState"],
+        "eventCursor": full_result["eventCursor"],
+        "preview": full_result["preview"],
+    }
 
 
 def _compiled_signature_at(compiled: dict[str, Any], output_us: int) -> dict[str, Any]:

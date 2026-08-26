@@ -245,6 +245,28 @@ class StoreV1Tests(unittest.TestCase):
         self.assertIn("affectedIntervals", first)
         self.assertEqual(self.store.project_revision(project["id"], 1)["name"], "Event")
         self.assertEqual(self.store.project_revision(project["id"], 2)["name"], "Renamed")
+        with self.store.connect() as db:
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM project_revisions WHERE project_id=?",
+                    (project["id"],),
+                ).fetchone()[0],
+                1,
+            )
+            self.assertEqual(
+                db.execute(
+                    "SELECT COUNT(*) FROM project_revision_deltas WHERE project_id=?",
+                    (project["id"],),
+                ).fetchone()[0],
+                1,
+            )
+            self.assertGreater(
+                db.execute(
+                    "SELECT COUNT(*) FROM project_components WHERE project_id=?",
+                    (project["id"],),
+                ).fetchone()[0],
+                0,
+            )
         with self.assertRaisesRegex(DomainError, "already used"):
             self.store.apply_project_command(other_project["id"], envelope)
         self.assertEqual(self.store.project(other_project["id"])["name"], "Other event")
@@ -263,6 +285,24 @@ class StoreV1Tests(unittest.TestCase):
                     "payload": {"name": "Stale"},
                 },
             )
+
+    def test_delta_command_returns_only_changed_project_fields(self):
+        self.scan("FULL", [self.record("delta", "delta.mp4")])
+        project = self.store.create_project("Delta", self.library["id"], ["delta"])
+        result = self.store.apply_project_delta_command(
+            project["id"],
+            {
+                "commandId": "delta-command",
+                "expectedRevision": project["revision"],
+                "commandType": "UpdateProjectMetadata",
+                "payload": {"name": "Delta renamed"},
+            },
+        )
+        self.assertNotIn("project", result)
+        self.assertEqual(result["changedEntities"]["set"]["name"], "Delta renamed")
+        self.assertNotIn("clips", result["changedEntities"]["set"])
+        self.assertEqual(result["projectSummary"]["revision"], 2)
+        self.assertIn("current", result["issueDelta"])
 
     def test_restart_marks_running_render_recoverable(self):
         job = self.store.create_job("RENDER")

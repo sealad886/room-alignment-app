@@ -22,7 +22,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from . import __version__
-from .domain import DomainError, digest_json, program_at
+from .alignment import (
+    AlignmentCanceled,
+    AudioSignatureCache,
+    analyze_project_alignment,
+)
+from .domain import DomainError, program_at
 from .render import CanonicalRenderManager, RenderManager, build_render_plan
 from .scanner import iter_scan_records
 from .store import Store, TERMINAL_JOB_STATES
@@ -124,12 +129,14 @@ class App:
             self._lock_file.close()
             raise RuntimeError("Another Room Alignment process owns this state directory") from error
         self.store = Store(self.data_dir / "room-alignment.sqlite3")
+        self.audio_signatures = AudioSignatureCache(self.store)
         self.legacy_render = RenderManager(self.store)
         self.render = CanonicalRenderManager(self.store)
         self.sessions = SessionManager()
         self.scan_threads: dict[str, threading.Thread] = {}
         self.analysis_threads: dict[str, threading.Thread] = {}
         self.analysis_reserved: set[str] = set()
+        self.alignment_projects_reserved: set[str] = set()
         self.hash_slot = threading.BoundedSemaphore(1)
         self.lock = threading.RLock()
         self.closing = False
@@ -348,83 +355,46 @@ class App:
 
     def start_alignment_analysis(self, project_id: str) -> dict[str, object]:
         project = self.store.project(project_id)
-        self.store.library_root(project["libraryId"])
+        self.store.active_library_root_paths(project["libraryId"])
         with self.lock:
             if len(self.analysis_reserved) >= 2:
                 raise DomainError("JOB_STATE_CONFLICT", "At most two analysis jobs may run concurrently")
+            if project_id in self.alignment_projects_reserved:
+                raise DomainError("JOB_STATE_CONFLICT", "Alignment analysis already runs for this project")
             job = self.store.create_job("ALIGNMENT_ANALYSIS", project_id=project_id, message="Analysis queued")
             self.analysis_reserved.add(job["id"])
+            self.alignment_projects_reserved.add(project_id)
 
         def run() -> None:
             try:
                 self._raise_if_job_stopping(job["id"])
-                self.store.transition_job(job["id"], "RUNNING", 0.1, "Comparing timestamp evidence")
+                self.store.transition_job(job["id"], "RUNNING", 0.05, "Preparing bounded overlap candidates")
                 assets = self.store.media_records(item["assetId"] for item in project["clips"])
-                reference = next(
-                    (
-                        clip
-                        for clip in project["clips"]
-                        if next(
-                            (
-                                source.get("reference")
-                                for source in project["logicalSources"]
-                                if source["id"] == clip["logicalSourceId"]
-                            ),
-                            False,
-                        )
+                proposal_set = analyze_project_alignment(
+                    project,
+                    assets,
+                    self.audio_signatures,
+                    canceled=lambda: self.closing or self._job_stopping(job["id"]),
+                    progress=lambda value, message: self.store.transition_job(
+                        job["id"], "RUNNING", value, message
                     ),
-                    project["clips"][0],
                 )
-                reference_time = _timestamp_us(assets.get(reference["assetId"], {}).get("captured_at"))
-                created = []
-                if reference_time is not None:
-                    for clip in project["clips"]:
-                        self._raise_if_job_stopping(job["id"])
-                        if clip["id"] == reference["id"]:
-                            continue
-                        captured = _timestamp_us(assets.get(clip["assetId"], {}).get("captured_at"))
-                        if captured is None:
-                            continue
-                        suggestion = self.store.save_suggestion(
-                            {
-                                "projectId": project_id,
-                                "libraryId": project["libraryId"],
-                                "kind": "ALIGNMENT",
-                                "inputDigest": digest_json(
-                                    {
-                                        "projectRevision": project["revision"],
-                                        "assets": [reference["assetId"], clip["assetId"]],
-                                        "fingerprints": [
-                                            assets[reference["assetId"]].get("fingerprint", {}),
-                                            assets[clip["assetId"]].get("fingerprint", {}),
-                                        ],
-                                    }
-                                ),
-                                "algorithm": "timestamp-evidence",
-                                "algorithmVersion": "1",
-                                "projectRevision": project["revision"],
-                                "confidence": 0.55,
-                                "clipId": clip["id"],
-                                "sync": {
-                                    "anchorSourceUs": 0,
-                                    "anchorOutputUs": captured - reference_time,
-                                    "ratePpm": 0,
-                                },
-                                "evidence": ["resolved-or-naive captured timestamp"],
-                                "limitations": [
-                                    "Clock error and timezone ambiguity are not corrected",
-                                    "Manual verification remains authoritative",
-                                ],
-                            }
-                        )
-                        created.append(suggestion["id"])
+                proposal_set = self.store.save_alignment_proposal_set(proposal_set)
                 self._raise_if_job_stopping(job["id"])
                 self.store.transition_job(
                     job["id"],
                     "SUCCEEDED",
                     1,
-                    f"Created {len(created)} non-mutating suggestions",
-                    result={"suggestionIds": created},
+                    "Created one non-mutating alignment proposal set",
+                    result={
+                        "proposalSetId": proposal_set["id"],
+                        "proposalSetDigest": proposal_set["digest"],
+                        "summary": proposal_set["summary"],
+                    },
+                )
+            except AlignmentCanceled as error:
+                self._finish_analysis_error(
+                    job["id"], DomainError("JOB_STATE_CONFLICT", str(error))
                 )
             except Exception as error:
                 self._finish_analysis_error(job["id"], error)
@@ -432,6 +402,7 @@ class App:
                 with self.lock:
                     self.analysis_threads.pop(job["id"], None)
                     self.analysis_reserved.discard(job["id"])
+                    self.alignment_projects_reserved.discard(project_id)
 
         thread = threading.Thread(target=run, daemon=True, name=f"analysis-{job['id']}")
         with self.lock:
@@ -442,6 +413,7 @@ class App:
             with self.lock:
                 self.analysis_threads.pop(job["id"], None)
                 self.analysis_reserved.discard(job["id"])
+                self.alignment_projects_reserved.discard(project_id)
             self.store.transition_job(job["id"], "FAILED", 0, "Analysis worker could not start")
             raise
         return job
@@ -520,6 +492,9 @@ class App:
             code = str(job.get("errorCode") or "JOB_STATE_CONFLICT")
             message = "Directory grant was revoked" if code == "GRANT_REQUIRED" else "Job was canceled"
             raise DomainError(code, message)
+
+    def _job_stopping(self, job_id: str) -> bool:
+        return self.store.job(job_id)["status"] == "CANCEL_REQUESTED"
 
     def _finish_analysis_error(self, job_id: str, error: Exception) -> None:
         self.store.finish_job_error(
@@ -857,6 +832,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(media)
         if len(parts) == 5 and parts[2] == "media" and parts[4] == "preview":
             return self.stream_source_preview(APP.store.media_source_path(parts[3]))
+        if len(parts) == 5 and parts[2] == "media" and parts[4] == "waveform":
+            media = APP.store.media_record(parts[3])
+            return self.respond(
+                APP.audio_signatures.cached_waveform(
+                    media,
+                    _int_input(query.get("startSourceUs", ["0"])[0], "startSourceUs"),
+                    _int_input(query["endSourceUs"][0], "endSourceUs")
+                    if query.get("endSourceUs")
+                    else None,
+                    _int_input(query.get("maxPoints", ["240"])[0], "maxPoints"),
+                )
+            )
         if len(parts) == 6 and parts[2] == "media" and parts[4:] == ["provenance", "resolutions"]:
             return self.respond(APP.store.provenance_resolutions(parts[3], query.get("field", [None])[0]))
         if len(parts) == 4 and parts[2] == "projects":
@@ -865,6 +852,37 @@ class Handler(BaseHTTPRequestHandler):
             return self.respond(APP.store.project_revision(parts[3], _int_input(parts[5], "revision")))
         if len(parts) == 5 and parts[2] == "projects" and parts[4] == "program":
             return self.respond(APP.store.compiled_project(parts[3]))
+        if len(parts) == 5 and parts[2] == "projects" and parts[4] == "alignment-summary":
+            return self.respond(APP.store.project_alignment_summary(parts[3]))
+        if len(parts) == 5 and parts[2] == "projects" and parts[4] == "preparation":
+            return self.respond(APP.store.project_preparation(parts[3]))
+        if len(parts) == 5 and parts[2] == "projects" and parts[4] == "timeline-section-proposal":
+            return self.respond(
+                APP.store.project_timeline_section_proposal(
+                    parts[3], query.get("gapMode", ["EXCLUDE"])[0]
+                )
+            )
+        if len(parts) == 5 and parts[2] == "projects" and parts[4] == "timeline-window":
+            lanes = {
+                item
+                for item in query.get("lane", [""])[0].split(",")
+                if item
+            }
+            return self.respond(
+                APP.store.project_timeline_window(
+                    parts[3],
+                    _int_input(_required_query(query, "startAlignedUs"), "startAlignedUs"),
+                    _int_input(_required_query(query, "endAlignedUs"), "endAlignedUs"),
+                    _int_input(_required_query(query, "resolutionUs"), "resolutionUs"),
+                    lanes or None,
+                )
+            )
+        if (
+            len(parts) == 5
+            and parts[2] == "projects"
+            and parts[4] == "alignment-proposal-sets"
+        ):
+            return self.respond(APP.store.alignment_proposal_sets(parts[3]))
         if len(parts) == 5 and parts[2] == "projects" and parts[4] == "program-at":
             output_us = _int_input(query.get("outputUs", ["0"])[0], "outputUs")
             compiled = APP.store.compiled_project(parts[3])
@@ -1170,6 +1188,15 @@ class Handler(BaseHTTPRequestHandler):
                 ),
                 HTTPStatus.CREATED,
             )
+        if (
+            len(parts) == 6
+            and parts[2] == "projects"
+            and parts[4:] == ["commands", "delta"]
+        ):
+            preview = query.get("preview", ["false"])[0].lower() == "true"
+            return self.respond(
+                APP.store.apply_project_delta_command(parts[3], body, preview)
+            )
         if len(parts) == 5 and parts[2] == "projects" and parts[4] == "commands":
             preview = query.get("preview", ["false"])[0].lower() == "true"
             return self.respond(APP.store.apply_project_command(parts[3], body, preview))
@@ -1267,6 +1294,12 @@ def _required(body: dict[str, object], name: str) -> object:
     if name not in body or body[name] is None:
         raise DomainError("VALIDATION_FAILED", f"Missing required field: {name}")
     return body[name]
+
+
+def _required_query(query: dict[str, list[str]], name: str) -> str:
+    if not query.get(name):
+        raise DomainError("VALIDATION_FAILED", f"Missing required query field: {name}")
+    return query[name][0]
 
 
 def _int_input(value: object, name: str) -> int:

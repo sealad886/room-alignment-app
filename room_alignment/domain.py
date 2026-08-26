@@ -4,6 +4,7 @@ import copy
 import hashlib
 import json
 import uuid
+from bisect import bisect_left, bisect_right
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -15,6 +16,7 @@ MAX_RATE_PPM = 2_000
 AUDIO_MODES = {"FOLLOW_VIDEO", "FIXED_SOURCE", "FIXED_CLIP", "SILENCE"}
 ANCHOR_MODES = {"PROGRAM_TIME", "SOURCE_TIME"}
 ALIGNMENT_STATES = {"PROVISIONAL", "ACCEPTED", "REVIEW_REQUIRED", "UNRESOLVED"}
+SOURCE_IDENTITY_STATES = {"PROVISIONAL", "USER_CONFIRMED"}
 TIMELINE_SECTION_MODES = {"KEEP", "EXCLUDE", "SLATE"}
 BLOCKING = "BLOCKING"
 WARNING = "WARNING"
@@ -26,12 +28,27 @@ COMMAND_PAYLOAD_FIELDS = {
     "SplitLogicalSource": {"sourceId", "newSourceId", "clipIds", "label"},
     "ArchiveLogicalSource": {"sourceId", "archived"},
     "AssignClip": {"clipId", "logicalSourceId"},
+    "ConfirmSourceIdentities": {"sourceIds"},
     "SetReferenceSource": {"sourceId"},
     "SetSyncTransform": {"clipId", "sync", "confirmDrift"},
     "SetClipAlignment": {"clipId", "alignment", "confirmDrift"},
+    "AlignMarkedMoments": {
+        "referenceClipId", "referenceSourceUs", "targetClipId", "targetSourceUs"
+    },
+    "AcceptAlignmentProposalSet": {
+        "proposalSetId", "digest", "mode", "confirmDrift", "alignments"
+    },
+    "AcceptAlignmentProposal": {
+        "proposalSetId", "proposalId", "digest", "confirmLowConfidence", "confirmDrift",
+        "alignments"
+    },
+    "RejectAlignmentProposal": {"proposalSetId", "proposalId", "digest"},
+    "RejectAlignmentProposalSet": {"proposalSetId", "digest"},
     "InitializeProgram": set(),
     "SetTimelineSections": {"sections"},
-    "GenerateProgramDraft": {"alignmentDigest", "selectionDigest", "replaceExisting"},
+    "GenerateProgramDraft": {
+        "alignmentDigest", "selectionDigest", "gapMode", "sectionProposalDigest", "replaceExisting",
+    },
     "AddVideoBlock": {"id", "startUs", "endUs", "logicalSourceId", "pinnedClipId"},
     "SplitVideoBlock": {"blockId", "atUs", "newBlockId"},
     "MoveVideoBoundary": {"leftBlockId", "rightBlockId", "atUs"},
@@ -244,10 +261,22 @@ def new_project(
                 "Confirmed source groups must contain every selected asset exactly once",
             )
     else:
-        groups = [
-            {"label": asset.get("camera") or f"Source {index + 1}", "assetIds": [asset["id"]]}
-            for index, asset in enumerate(chosen)
-        ]
+        # Candidate evidence creates manageable provisional tracks, not accepted
+        # camera identity. Unknown candidates stay isolated. A later named
+        # command is the only way to confirm these tracks for program use.
+        candidate_groups: dict[str, dict[str, Any]] = {}
+        for index, asset in enumerate(chosen):
+            candidate_key = str(asset.get("sourceCandidateId") or f"asset:{asset['id']}")
+            group = candidate_groups.setdefault(
+                candidate_key,
+                {
+                    "label": asset.get("camera") or f"Source candidate {index + 1}",
+                    "assetIds": [],
+                    "candidateKey": candidate_key,
+                },
+            )
+            group["assetIds"].append(asset["id"])
+        groups = list(candidate_groups.values())
     captured_us = {
         str(asset["id"]): value
         for asset in chosen
@@ -269,7 +298,11 @@ def new_project(
                 "reference": not sources,
                 "archived": False,
                 "candidateKey": candidate_keys[0] if len(candidate_keys) == 1 else digest_json(candidate_keys),
-                "identityState": "USER_CONFIRMED" if source_groups is not None else "USER_REVIEW_REQUIRED",
+                "identityState": "USER_CONFIRMED" if source_groups is not None else "PROVISIONAL",
+                "candidateEvidence": {
+                    "candidateKeys": candidate_keys,
+                    "assetCount": len(group_assets),
+                },
             }
         )
         for asset in group_assets:
@@ -319,6 +352,7 @@ def new_project(
         "alignmentDigest": "",
         "timelineSections": [],
         "programDraft": None,
+        "syntheticSlates": [],
         "videoBlocks": [],
         "audioBlocks": [],
         "renderSettings": {"profile": "COMPATIBLE"},
@@ -377,6 +411,394 @@ def aligned_extent(
     start_us = min(int(item["startUs"]) for item in ranges)
     end_us = max(int(item["endUs"]) for item in ranges)
     return {"startAlignedUs": start_us, "endAlignedUs": end_us, "durationUs": end_us - start_us}
+
+
+def _alignment_state(clip: dict[str, Any]) -> str:
+    return str(clip.get("alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED"))
+
+
+def _union_intervals(intervals: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
+    ordered = sorted((int(start), int(end)) for start, end in intervals if int(end) > int(start))
+    merged: list[tuple[int, int]] = []
+    for start, end in ordered:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _interval_duration(intervals: Iterable[tuple[int, int]]) -> int:
+    return sum(end - start for start, end in _union_intervals(intervals))
+
+
+def _difference_duration(
+    required: Iterable[tuple[int, int]], covered: Iterable[tuple[int, int]]
+) -> int:
+    required_intervals = _union_intervals(required)
+    covered_intervals = _union_intervals(covered)
+    missing = 0
+    covered_index = 0
+    for start, end in required_intervals:
+        cursor = start
+        while covered_index < len(covered_intervals) and covered_intervals[covered_index][1] <= start:
+            covered_index += 1
+        scan_index = covered_index
+        while scan_index < len(covered_intervals) and covered_intervals[scan_index][0] < end:
+            covered_start, covered_end = covered_intervals[scan_index]
+            if covered_start > cursor:
+                missing += min(end, covered_start) - cursor
+            cursor = max(cursor, covered_end)
+            if cursor >= end:
+                break
+            scan_index += 1
+        if cursor < end:
+            missing += end - cursor
+    return missing
+
+
+def alignment_summary(
+    project: dict[str, Any], assets: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    all_ranges = _clip_ranges(project, assets, include_provisional=True)
+    clips_by_id = {str(item["id"]): item for item in project.get("clips", [])}
+    accepted_ranges = [
+        item
+        for item in all_ranges
+        if _alignment_state(clips_by_id[str(item["clipId"])]) == "ACCEPTED"
+    ]
+    extent = aligned_extent(project, assets, include_provisional=True)
+    evidence_intervals = [(int(item["startUs"]), int(item["endUs"])) for item in all_ranges]
+    accepted_intervals = [(int(item["startUs"]), int(item["endUs"])) for item in accepted_ranges]
+    evidence_coverage_us = _interval_duration(evidence_intervals)
+    accepted_coverage_us = _interval_duration(accepted_intervals)
+    unresolved_sole_coverage_us = _difference_duration(evidence_intervals, accepted_intervals)
+    counts = {state: 0 for state in sorted(ALIGNMENT_STATES)}
+    audio_confirmed = 0
+    timestamp_only = 0
+    conflicts: list[dict[str, Any]] = []
+    for clip in project.get("clips", []):
+        state = _alignment_state(clip)
+        counts[state] = counts.get(state, 0) + 1
+        evidence = set(clip.get("alignmentEvidence", []))
+        if "audio-correlation" in evidence:
+            audio_confirmed += 1
+        elif "timestamp" in evidence or "timestamp-prior" in evidence:
+            timestamp_only += 1
+        asset = assets.get(clip["assetId"])
+        if not asset or asset.get("missing"):
+            conflicts.append(
+                {
+                    "code": "SOURCE_UNAVAILABLE",
+                    "clipId": clip["id"],
+                    "assetId": clip["assetId"],
+                    "blocking": True,
+                }
+            )
+        elif _asset_duration_us(asset) <= 0:
+            conflicts.append(
+                {
+                    "code": "DURATION_UNRESOLVED",
+                    "clipId": clip["id"],
+                    "assetId": clip["assetId"],
+                    "blocking": True,
+                }
+            )
+        if state == "REVIEW_REQUIRED":
+            conflicts.append(
+                {
+                    "code": "TIMING_CONFLICT",
+                    "clipId": clip["id"],
+                    "assetId": clip["assetId"],
+                    "blocking": True,
+                }
+            )
+    sections = project.get("timelineSections", [])
+    proposed_output_duration_us = (
+        sum(
+            int(section["endAlignedUs"]) - int(section["startAlignedUs"])
+            for section in sections
+            if section.get("mode") in {"KEEP", "SLATE"}
+        )
+        if sections
+        else int(extent["durationUs"])
+    )
+    ready = bool(accepted_ranges) and unresolved_sole_coverage_us == 0 and not any(
+        item.get("blocking") for item in conflicts
+    )
+    return {
+        "projectId": project["id"],
+        "revision": int(project["revision"]),
+        "alignmentDigest": alignment_digest(project),
+        "evidenceSpan": extent,
+        "proposedOutputDurationUs": proposed_output_duration_us,
+        "confidenceCounts": {
+            "accepted": counts.get("ACCEPTED", 0),
+            "provisional": counts.get("PROVISIONAL", 0),
+            "reviewRequired": counts.get("REVIEW_REQUIRED", 0),
+            "unresolved": counts.get("UNRESOLVED", 0),
+            "audioConfirmed": audio_confirmed,
+            "timestampOnly": timestamp_only,
+        },
+        "coverage": {
+            "evidenceCoverageUs": evidence_coverage_us,
+            "acceptedCoverageUs": accepted_coverage_us,
+            "unresolvedSoleCoverageUs": unresolved_sole_coverage_us,
+            "acceptedPercent": (
+                round(accepted_coverage_us * 100 / evidence_coverage_us, 3)
+                if evidence_coverage_us
+                else 0.0
+            ),
+            "sourceCount": len({item["logicalSourceId"] for item in all_ranges}),
+        },
+        "conflicts": conflicts,
+        "unplacedClipIds": [
+            str(clip["id"])
+            for clip in project.get("clips", [])
+            if _alignment_state(clip) == "UNRESOLVED"
+        ],
+        "readyForProgramDraft": ready,
+    }
+
+
+def project_preparation(
+    project: dict[str, Any], assets: dict[str, dict[str, Any]]
+) -> dict[str, Any]:
+    """Return backend-owned workflow readiness without mutating project state."""
+
+    alignment = alignment_summary(project, assets)
+    active_sources = [
+        source for source in project.get("logicalSources", []) if not source.get("archived")
+    ]
+    provisional_source_ids = [
+        str(source["id"])
+        for source in active_sources
+        if source.get("identityState", "USER_CONFIRMED") != "USER_CONFIRMED"
+    ]
+    has_program = bool(project.get("videoBlocks"))
+    compiled = compile_program(project, assets) if has_program else None
+    program_duration_us = int(compiled["durationUs"]) if compiled else 0
+    aligned_end_us = int(alignment["evidenceSpan"]["endAlignedUs"])
+    aligned_start_us = int(alignment["evidenceSpan"]["startAlignedUs"])
+    evidence_duration_us = int(alignment["evidenceSpan"]["durationUs"])
+    program_draft = project.get("programDraft") or {}
+    has_explicit_composition = bool(
+        project.get("timelineSections")
+        and program_draft.get("strategy") == "coverage-optimizer-v1"
+        and program_draft.get("alignmentDigest")
+        and program_draft.get("selectionDigest")
+    )
+    legacy_truncation = bool(
+        has_program
+        and not has_explicit_composition
+        and evidence_duration_us > 0
+        and aligned_end_us - aligned_start_us > program_duration_us + 1_000_000
+    )
+    source_ready = not provisional_source_ids
+    alignment_ready = bool(alignment["readyForProgramDraft"])
+    if project.get("review") is not None and not legacy_truncation:
+        phase = "REVIEWED"
+    elif has_program:
+        phase = "PROGRAM_DRAFT"
+    elif not source_ready:
+        phase = "SOURCE_REVIEW"
+    elif not alignment_ready:
+        phase = "ALIGNMENT_REVIEW"
+    else:
+        phase = "COMPOSITION_READY"
+    blockers: list[dict[str, Any]] = []
+    if provisional_source_ids:
+        blockers.append(
+            {
+                "code": "SOURCE_IDENTITY_UNCONFIRMED",
+                "count": len(provisional_source_ids),
+                "sourceIds": provisional_source_ids,
+            }
+        )
+    if not alignment_ready:
+        blockers.append(
+            {
+                "code": "ALIGNMENT_REVIEW_REQUIRED",
+                "count": int(alignment["confidenceCounts"].get("provisional", 0))
+                + int(alignment["confidenceCounts"].get("reviewRequired", 0))
+                + int(alignment["confidenceCounts"].get("unresolved", 0)),
+            }
+        )
+    if legacy_truncation:
+        blockers.append(
+            {
+                "code": "PROGRAM_TRUNCATES_ALIGNED_MEDIA",
+                "programDurationUs": program_duration_us,
+                "evidenceDurationUs": evidence_duration_us,
+            }
+        )
+    return {
+        "projectId": project["id"],
+        "revision": int(project["revision"]),
+        "phase": phase,
+        "sourceIdentity": {
+            "ready": source_ready,
+            "confirmedCount": len(active_sources) - len(provisional_source_ids),
+            "provisionalCount": len(provisional_source_ids),
+            "provisionalSourceIds": provisional_source_ids,
+        },
+        "alignment": alignment,
+        "hasProgram": has_program,
+        "programDurationUs": program_duration_us,
+        "legacyProgramTruncation": legacy_truncation,
+        "canAnalyzeAlignment": bool(project.get("clips")),
+        "canGenerateProgramDraft": source_ready and alignment_ready,
+        "canEnterCut": has_program and not legacy_truncation,
+        "canEnterReview": bool(compiled and compiled.get("valid") and not legacy_truncation),
+        "blockers": blockers,
+    }
+
+
+def timeline_window(
+    project: dict[str, Any],
+    assets: dict[str, dict[str, Any]],
+    start_aligned_us: int,
+    end_aligned_us: int,
+    resolution_us: int,
+    lane_ids: set[str] | None = None,
+    *,
+    max_items: int = 2_000,
+) -> dict[str, Any]:
+    start_aligned_us = int(start_aligned_us)
+    end_aligned_us = int(end_aligned_us)
+    resolution_us = int(resolution_us)
+    max_items = max(1, min(int(max_items), 2_000))
+    if end_aligned_us <= start_aligned_us:
+        raise DomainError("VALIDATION_FAILED", "Timeline window must have positive duration")
+    if resolution_us <= 0:
+        raise DomainError("VALIDATION_FAILED", "resolutionUs must be positive")
+    clip_by_id = {str(item["id"]): item for item in project.get("clips", [])}
+    unplaced_candidates: list[dict[str, Any]] = []
+    for clip in project.get("clips", []):
+        if _alignment_state(clip) != "UNRESOLVED":
+            continue
+        if lane_ids and str(clip["logicalSourceId"]) not in lane_ids:
+            continue
+        asset = assets.get(str(clip["assetId"]), {})
+        warnings = ["TIMING_UNRESOLVED"]
+        if asset.get("warning"):
+            warnings.append(str(asset["warning"]))
+        if asset.get("missing"):
+            warnings.append("SOURCE_UNAVAILABLE")
+        unplaced_candidates.append(
+            {
+                "type": "UNPLACED",
+                "clipId": str(clip["id"]),
+                "assetId": str(clip["assetId"]),
+                "logicalSourceId": str(clip["logicalSourceId"]),
+                "alignmentState": "UNRESOLVED",
+                "relativePath": str(asset.get("relative_path", "")),
+                "warnings": warnings,
+            }
+        )
+    unplaced_candidates.sort(key=lambda item: (item["logicalSourceId"], item["clipId"]))
+    unplaced_items = unplaced_candidates[:max_items]
+    visible_budget = max(0, max_items - len(unplaced_items))
+    items: list[dict[str, Any]] = []
+    total_before = 0
+    for item in _clip_ranges(project, assets, include_provisional=True):
+        if lane_ids and str(item["logicalSourceId"]) not in lane_ids:
+            continue
+        if int(item["endUs"]) <= start_aligned_us:
+            total_before += 1
+            continue
+        if int(item["startUs"]) >= end_aligned_us:
+            continue
+        clip = clip_by_id[str(item["clipId"])]
+        asset = assets.get(item["assetId"], {})
+        warnings = []
+        if asset.get("warning"):
+            warnings.append(str(asset["warning"]))
+        if asset.get("missing"):
+            warnings.append("SOURCE_UNAVAILABLE")
+        state = _alignment_state(clip)
+        if state in {"REVIEW_REQUIRED", "UNRESOLVED"}:
+            warnings.append(f"TIMING_{state}")
+        items.append(
+            {
+                "type": "CLIP",
+                "clipId": item["clipId"],
+                "assetId": item["assetId"],
+                "logicalSourceId": item["logicalSourceId"],
+                "startAlignedUs": int(item["startUs"]),
+                "endAlignedUs": int(item["endUs"]),
+                "alignmentState": state,
+                "confidence": float(clip.get("alignmentConfidence", 1.0 if "sync" in clip else 0.0)),
+                "evidenceKinds": list(clip.get("alignmentEvidence", [])),
+                "relativePath": str(asset.get("relative_path", "")),
+                "warnings": warnings,
+            }
+        )
+    items.sort(key=lambda item: (item["startAlignedUs"], item["clipId"]))
+    total_in_window = len(items)
+    if total_in_window <= visible_budget:
+        mode = "EXACT"
+        response_items = items
+        effective_resolution = resolution_us
+    else:
+        mode = "AGGREGATED"
+        span = end_aligned_us - start_aligned_us
+        effective_resolution = max(
+            resolution_us,
+            (span + max(1, visible_budget) - 1) // max(1, visible_budget),
+        )
+        bucket_count = min(
+            visible_budget,
+            (span + effective_resolution - 1) // effective_resolution,
+        )
+        buckets: list[dict[str, Any]] = []
+        starts = sorted(items, key=lambda item: (item["startAlignedUs"], item["clipId"]))
+        active: dict[str, dict[str, Any]] = {}
+        start_index = 0
+        for bucket_index in range(bucket_count):
+            bucket_start = start_aligned_us + bucket_index * effective_resolution
+            bucket_end = min(end_aligned_us, bucket_start + effective_resolution)
+            while start_index < len(starts) and starts[start_index]["startAlignedUs"] < bucket_end:
+                active[starts[start_index]["clipId"]] = starts[start_index]
+                start_index += 1
+            active = {
+                clip_id: item
+                for clip_id, item in active.items()
+                if item["endAlignedUs"] > bucket_start
+            }
+            if not active:
+                continue
+            state_counts: dict[str, int] = {}
+            for item in active.values():
+                state = str(item["alignmentState"])
+                state_counts[state] = state_counts.get(state, 0) + 1
+            buckets.append(
+                {
+                    "type": "BUCKET",
+                    "startAlignedUs": bucket_start,
+                    "endAlignedUs": bucket_end,
+                    "clipCount": len(active),
+                    "sourceCount": len({item["logicalSourceId"] for item in active.values()}),
+                    "logicalSourceIds": sorted({item["logicalSourceId"] for item in active.values()}),
+                    "stateCounts": state_counts,
+                    "warningCount": sum(bool(item["warnings"]) for item in active.values()),
+                }
+            )
+        response_items = buckets[:visible_budget]
+    return {
+        "projectId": project["id"],
+        "revision": int(project["revision"]),
+        "startAlignedUs": start_aligned_us,
+        "endAlignedUs": end_aligned_us,
+        "resolutionUs": effective_resolution,
+        "mode": mode,
+        "items": response_items,
+        "totalBeforeWindow": total_before,
+        "totalInWindow": total_in_window,
+        "unplacedCount": len(unplaced_candidates),
+        "unplacedItems": unplaced_items,
+        "alignmentDigest": alignment_digest(project),
+    }
 
 
 def initialize_program(project: dict[str, Any], assets: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -448,6 +870,13 @@ def validate_project(project: dict[str, Any]) -> None:
     _unique_ids(project["videoBlocks"], "video block")
     _unique_ids(project["audioBlocks"], "audio block")
     source_ids = {item["id"] for item in project["logicalSources"]}
+    for source in project["logicalSources"]:
+        identity_state = source.get("identityState", "USER_CONFIRMED")
+        if identity_state not in SOURCE_IDENTITY_STATES:
+            raise DomainError(
+                "VALIDATION_FAILED",
+                f"Logical source {source['id']} has an invalid identity state",
+            )
     clip_ids = {item["id"] for item in project["clips"]}
     for clip in project["clips"]:
         if clip.get("logicalSourceId") not in source_ids:
@@ -463,7 +892,15 @@ def validate_project(project: dict[str, Any]) -> None:
             raise DomainError("VALIDATION_FAILED", "Timeline sections must have positive aligned duration")
     for block in project["videoBlocks"]:
         _validate_interval(block)
-        if block.get("logicalSourceId") not in source_ids:
+        synthetic_slate_id = block.get("syntheticSlateId")
+        if synthetic_slate_id is not None:
+            if block.get("logicalSourceId") is not None:
+                raise DomainError("VALIDATION_FAILED", "Synthetic slate blocks may not select a source")
+            if synthetic_slate_id not in {
+                str(item["id"]) for item in project.get("syntheticSlates", [])
+            }:
+                raise DomainError("VALIDATION_FAILED", "Video block references an unknown synthetic slate")
+        elif block.get("logicalSourceId") not in source_ids:
             raise DomainError("VALIDATION_FAILED", f"Video block {block['id']} references an unknown source")
         if block.get("pinnedClipId") is not None and block["pinnedClipId"] not in clip_ids:
             raise DomainError("VALIDATION_FAILED", f"Video block {block['id']} pins an unknown clip")
@@ -489,12 +926,42 @@ def compile_program(project: dict[str, Any], assets: dict[str, dict[str, Any]]) 
         issues.append(_issue("VIDEO_GAP", 0, 0, "A positive-duration video program is required"))
     _interval_issues(video_blocks, duration_us, "VIDEO", issues)
     video_slices: list[dict[str, Any]] = []
+    clip_range_index = _build_clip_range_index(_clip_ranges(project, assets))
+    slates_by_id = {str(item["id"]): item for item in project.get("syntheticSlates", [])}
     for block in video_blocks:
-        video_slices.extend(_compile_source_block(project, assets, block, issues, require_audio=False))
+        if block.get("syntheticSlateId"):
+            slate = slates_by_id[str(block["syntheticSlateId"])]
+            video_slices.append(
+                {
+                    "id": _compiled_slice_id(
+                        "vslice", block["id"], block["startUs"], block["endUs"], slate["id"]
+                    ),
+                    "blockId": block["id"],
+                    "startUs": int(block["startUs"]),
+                    "endUs": int(block["endUs"]),
+                    "synthetic": True,
+                    "slateId": slate["id"],
+                    "slateText": slate["text"],
+                    "transforms": ["generated no-footage slate"],
+                    "provenance": slate["provenance"],
+                }
+            )
+        else:
+            video_slices.extend(
+                _compile_source_block(
+                    project, assets, block, issues, require_audio=False,
+                    clip_range_index=clip_range_index,
+                )
+            )
     _interval_issues(audio_blocks, duration_us, "AUDIO", issues)
     audio_slices: list[dict[str, Any]] = []
     for block in audio_blocks:
-        audio_slices.extend(_compile_audio_block(project, assets, block, video_slices, issues))
+        audio_slices.extend(
+            _compile_audio_block(
+                project, assets, block, video_slices, issues,
+                clip_range_index=clip_range_index,
+            )
+        )
     issues = _dedupe_issues(issues)
     return {
         "projectId": project["id"],
@@ -538,11 +1005,23 @@ def apply_command(
         "SplitLogicalSource": _split_source,
         "ArchiveLogicalSource": _archive_source,
         "AssignClip": _assign_clip,
+        "ConfirmSourceIdentities": _confirm_source_identities,
         "SetReferenceSource": _set_reference,
         "SetSyncTransform": lambda p, command_payload: _set_sync(p, command_payload, assets),
         "SetClipAlignment": lambda p, command_payload: _set_clip_alignment(
             p, command_payload, assets
         ),
+        "AlignMarkedMoments": lambda p, command_payload: _align_marked_moments(
+            p, command_payload, assets
+        ),
+        "AcceptAlignmentProposalSet": lambda p, command_payload: _accept_alignment_proposals(
+            p, command_payload, assets
+        ),
+        "AcceptAlignmentProposal": lambda p, command_payload: _accept_alignment_proposals(
+            p, command_payload, assets
+        ),
+        "RejectAlignmentProposal": lambda _p, _payload: None,
+        "RejectAlignmentProposalSet": lambda _p, _payload: None,
         "InitializeProgram": lambda p, _payload: _replace(p, initialize_program(p, assets)),
         "SetTimelineSections": _set_timeline_sections,
         "GenerateProgramDraft": lambda p, command_payload: _replace(
@@ -626,6 +1105,8 @@ def _add_source(project: dict[str, Any], payload: dict[str, Any]) -> None:
             "label": str(payload.get("label") or "New source")[:200],
             "reference": False,
             "archived": False,
+            "identityState": "USER_CONFIRMED",
+            "confirmedAt": now_iso(),
         }
     )
 
@@ -644,6 +1125,8 @@ def _merge_sources(project: dict[str, Any], payload: dict[str, Any]) -> None:
     target_source["reference"] = bool(target_source.get("reference")) or any(
         bool(source.get("reference")) for source in project["logicalSources"] if source["id"] in merged
     )
+    target_source["identityState"] = "USER_CONFIRMED"
+    target_source["confirmedAt"] = now_iso()
     for clip in project["clips"]:
         if clip["logicalSourceId"] in merged:
             clip["logicalSourceId"] = target
@@ -681,6 +1164,17 @@ def _assign_clip(project: dict[str, Any], payload: dict[str, Any]) -> None:
     ]
 
 
+def _confirm_source_identities(project: dict[str, Any], payload: dict[str, Any]) -> None:
+    source_ids = list(dict.fromkeys(str(source_id) for source_id in payload.get("sourceIds", [])))
+    if not source_ids:
+        raise DomainError("VALIDATION_FAILED", "At least one logical source must be confirmed")
+    confirmed_at = now_iso()
+    for source_id in source_ids:
+        source = _find(project["logicalSources"], source_id, "logical source")
+        source["identityState"] = "USER_CONFIRMED"
+        source["confirmedAt"] = confirmed_at
+
+
 def _set_reference(project: dict[str, Any], payload: dict[str, Any]) -> None:
     _find(project["logicalSources"], payload["sourceId"], "logical source")
     for source in project["logicalSources"]:
@@ -713,6 +1207,60 @@ def _set_clip_alignment(
     )
 
 
+def _align_marked_moments(
+    project: dict[str, Any], payload: dict[str, Any], assets: dict[str, dict[str, Any]]
+) -> None:
+    reference = _find(project["clips"], payload["referenceClipId"], "reference project clip")
+    target = _find(project["clips"], payload["targetClipId"], "target project clip")
+    if reference["id"] == target["id"]:
+        raise DomainError("VALIDATION_FAILED", "Marked moments require two different clips")
+    reference_source_us = int(payload["referenceSourceUs"])
+    target_source_us = int(payload["targetSourceUs"])
+    reference_asset = assets.get(reference["assetId"], {})
+    target_asset = assets.get(target["assetId"], {})
+    reference_duration = _asset_duration_us(reference_asset)
+    target_duration = _asset_duration_us(target_asset)
+    if not 0 <= reference_source_us <= reference_duration:
+        raise DomainError("VALIDATION_FAILED", "Reference moment is outside its source clip")
+    if not 0 <= target_source_us <= target_duration:
+        raise DomainError("VALIDATION_FAILED", "Target moment is outside its source clip")
+    reference_alignment = _clip_alignment(reference)
+    target_alignment = _clip_alignment(target)
+    shared_aligned_us = reference_alignment.source_to_aligned(reference_source_us)
+    _set_alignment(
+        project,
+        str(target["id"]),
+        ClipAlignmentTransform(target_source_us, shared_aligned_us, target_alignment.rate_ppm),
+        bool(target_alignment.rate_ppm),
+        assets,
+        legacy_payload=False,
+        evidence=["manual", "marked-moment"],
+        confidence=1.0,
+    )
+
+
+def _accept_alignment_proposals(
+    project: dict[str, Any], payload: dict[str, Any], assets: dict[str, dict[str, Any]]
+) -> None:
+    alignments = payload.get("alignments")
+    if not isinstance(alignments, list) or not alignments:
+        raise DomainError("VALIDATION_FAILED", "No canonical alignment proposals were selected")
+    for item in alignments:
+        if not isinstance(item, dict):
+            raise DomainError("VALIDATION_FAILED", "Canonical alignment proposal is invalid")
+        proposed = ClipAlignmentTransform.from_dict(item.get("alignment"))
+        _set_alignment(
+            project,
+            str(item["clipId"]),
+            proposed,
+            bool(payload.get("confirmDrift")),
+            assets,
+            legacy_payload=False,
+            evidence=[str(value) for value in item.get("evidenceKinds", ["manual-review"])],
+            confidence=float(item.get("confidence", 0.0)),
+        )
+
+
 def _set_alignment(
     project: dict[str, Any],
     clip_id: str,
@@ -721,6 +1269,8 @@ def _set_alignment(
     assets: dict[str, dict[str, Any]],
     *,
     legacy_payload: bool,
+    evidence: list[str] | None = None,
+    confidence: float = 1.0,
 ) -> None:
     clip = _find(project["clips"], clip_id, "project clip")
     old = _clip_alignment(clip)
@@ -751,8 +1301,79 @@ def _set_alignment(
         clip.pop("sync", None)
         clip["alignment"] = new.to_dict()
         clip["alignmentState"] = "ACCEPTED"
-        clip["alignmentConfidence"] = 1.0
-        clip["alignmentEvidence"] = ["manual"]
+        clip["alignmentConfidence"] = max(0.0, min(1.0, float(confidence)))
+        clip["alignmentEvidence"] = list(evidence or ["manual"])
+
+
+def timeline_section_proposal(
+    project: dict[str, Any],
+    assets: dict[str, dict[str, Any]],
+    gap_mode: str = "EXCLUDE",
+) -> dict[str, Any]:
+    """Propose an explicit aligned-to-program composition without mutating state."""
+
+    gap_mode = str(gap_mode).upper()
+    if gap_mode not in {"EXCLUDE", "SLATE"}:
+        raise DomainError("VALIDATION_FAILED", "gapMode must be EXCLUDE or SLATE")
+    accepted = _union_intervals(
+        (int(item["startUs"]), int(item["endUs"]))
+        for item in _clip_ranges(project, assets)
+    )
+    if not accepted:
+        raise DomainError("COVERAGE_INVALID", "No accepted aligned media is available for composition")
+    sections: list[dict[str, Any]] = []
+
+    def append_section(start_us: int, end_us: int, mode: str) -> None:
+        if end_us <= start_us:
+            return
+        identity = digest_json(
+            {
+                "projectId": project["id"],
+                "revision": project["revision"],
+                "startAlignedUs": start_us,
+                "endAlignedUs": end_us,
+                "mode": mode,
+            }
+        )[:24]
+        sections.append(
+            {
+                "id": f"section_{identity}",
+                "startAlignedUs": start_us,
+                "endAlignedUs": end_us,
+                "mode": mode,
+                "slateText": "No recorded footage" if mode == "SLATE" else None,
+            }
+        )
+
+    cursor = accepted[0][0]
+    for start_us, end_us in accepted:
+        append_section(cursor, start_us, gap_mode)
+        append_section(start_us, end_us, "KEEP")
+        cursor = end_us
+    keep_us = sum(
+        int(item["endAlignedUs"]) - int(item["startAlignedUs"])
+        for item in sections
+        if item["mode"] == "KEEP"
+    )
+    gap_us = sum(
+        int(item["endAlignedUs"]) - int(item["startAlignedUs"])
+        for item in sections
+        if item["mode"] != "KEEP"
+    )
+    output_us = keep_us + (gap_us if gap_mode == "SLATE" else 0)
+    value = {
+        "projectId": project["id"],
+        "projectRevision": int(project["revision"]),
+        "alignmentDigest": alignment_digest(project),
+        "gapMode": gap_mode,
+        "sections": sections,
+        "keepDurationUs": keep_us,
+        "excludedDurationUs": gap_us if gap_mode == "EXCLUDE" else 0,
+        "slateDurationUs": gap_us if gap_mode == "SLATE" else 0,
+        "outputDurationUs": output_us,
+    }
+    value["digest"] = digest_json(value)
+    return value
 
 
 def _set_timeline_sections(project: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -768,7 +1389,7 @@ def _set_timeline_sections(project: dict[str, Any], payload: dict[str, Any]) -> 
             raise DomainError("VALIDATION_FAILED", "Unknown timeline section mode")
         start_us = int(item.get("startAlignedUs", -1))
         end_us = int(item.get("endAlignedUs", -1))
-        if start_us < 0 or end_us <= start_us:
+        if end_us <= start_us:
             raise DomainError("VALIDATION_FAILED", "Timeline sections require a positive aligned interval")
         sections.append(
             {
@@ -786,34 +1407,290 @@ def _set_timeline_sections(project: dict[str, Any], payload: dict[str, Any]) -> 
     project["timelineSections"] = sections
 
 
+def _program_section_mappings(sections: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    cursor = 0
+    mappings: list[dict[str, Any]] = []
+    for section in sorted(sections, key=lambda item: (int(item["startAlignedUs"]), item["id"])):
+        duration_us = int(section["endAlignedUs"]) - int(section["startAlignedUs"])
+        if section["mode"] == "EXCLUDE":
+            continue
+        mappings.append(
+            {
+                **section,
+                "startProgramUs": cursor,
+                "endProgramUs": cursor + duration_us,
+            }
+        )
+        cursor += duration_us
+    return mappings
+
+
+def _optimize_keep_section(
+    project: dict[str, Any],
+    assets: dict[str, dict[str, Any]],
+    section: dict[str, Any],
+    start_program_us: int,
+    clip_range_index: dict[str, tuple[list[int], list[int], list[dict[str, Any]]]],
+) -> list[dict[str, Any]]:
+    start_aligned_us = int(section["startAlignedUs"])
+    end_aligned_us = int(section["endAlignedUs"])
+    clip_ranges: list[dict[str, Any]] = []
+    for source_id in clip_range_index:
+        clip_ranges.extend(
+            _overlapping_clip_ranges(
+                clip_range_index, source_id, start_aligned_us, end_aligned_us
+            )
+        )
+    boundaries = {start_aligned_us, end_aligned_us}
+    for item in clip_ranges:
+        boundaries.add(max(start_aligned_us, int(item["startUs"])))
+        boundaries.add(min(end_aligned_us, int(item["endUs"])))
+    points = sorted(boundaries)
+    clip_by_id = {str(item["id"]): item for item in project.get("clips", [])}
+    starting: dict[int, list[dict[str, Any]]] = {}
+    ending: dict[int, list[dict[str, Any]]] = {}
+    for item in clip_ranges:
+        clipped_start = max(start_aligned_us, int(item["startUs"]))
+        clipped_end = min(end_aligned_us, int(item["endUs"]))
+        if clipped_end <= clipped_start:
+            continue
+        starting.setdefault(clipped_start, []).append(item)
+        ending.setdefault(clipped_end, []).append(item)
+    active_by_source: dict[str, dict[str, dict[str, Any]]] = {}
+    intervals: list[dict[str, Any]] = []
+    for interval_start, interval_end in zip(points, points[1:]):
+        if interval_end <= interval_start:
+            continue
+        for item in ending.get(interval_start, []):
+            source_items = active_by_source.get(str(item["logicalSourceId"]))
+            if source_items is not None:
+                source_items.pop(str(item["clipId"]), None)
+                if not source_items:
+                    active_by_source.pop(str(item["logicalSourceId"]), None)
+        for item in starting.get(interval_start, []):
+            active_by_source.setdefault(str(item["logicalSourceId"]), {})[
+                str(item["clipId"])
+            ] = item
+        candidates: dict[str, dict[str, Any]] = {}
+        ambiguous_sources: list[str] = []
+        for source_id, active in active_by_source.items():
+            covering = list(active.values())
+            if len(covering) != 1:
+                ambiguous_sources.append(source_id)
+                continue
+            clip = clip_by_id[str(covering[0]["clipId"])]
+            candidates[source_id] = {
+                "clipId": clip["id"],
+                "confidence": float(clip.get("alignmentConfidence", 1.0 if "sync" in clip else 0.0)),
+                "transformed": bool(_clip_alignment(clip).rate_ppm),
+            }
+        if not candidates:
+            raise DomainError(
+                "COVERAGE_INVALID",
+                "A kept interval has no unambiguous accepted video source",
+                {
+                    "startAlignedUs": interval_start,
+                    "endAlignedUs": interval_end,
+                    "ambiguousSourceIds": sorted(ambiguous_sources),
+                },
+            )
+        intervals.append(
+            {
+                "startAlignedUs": interval_start,
+                "endAlignedUs": interval_end,
+                "candidates": candidates,
+            }
+        )
+    if not intervals:
+        raise DomainError("COVERAGE_INVALID", "A kept section has no accepted video coverage")
+
+    layers: list[dict[str, tuple[tuple[int, int, int], str | None]]] = []
+    for interval_index, interval in enumerate(intervals):
+        duration_us = int(interval["endAlignedUs"]) - int(interval["startAlignedUs"])
+        layer: dict[str, tuple[tuple[int, int, int], str | None]] = {}
+        for source_id, candidate in sorted(interval["candidates"].items()):
+            confidence_cost = -round(float(candidate["confidence"]) * duration_us)
+            transform_cost = duration_us if candidate["transformed"] else 0
+            if interval_index == 0:
+                layer[source_id] = ((confidence_cost, 0, transform_cost), None)
+                continue
+            options = []
+            for previous_source, (previous_cost, _predecessor) in layers[-1].items():
+                cost = (
+                    previous_cost[0] + confidence_cost,
+                    previous_cost[1] + int(previous_source != source_id),
+                    previous_cost[2] + transform_cost,
+                )
+                options.append((cost, previous_source))
+            layer[source_id] = min(options, key=lambda item: (item[0], item[1]))
+        layers.append(layer)
+    selected_sources = [""] * len(intervals)
+    selected_sources[-1] = min(layers[-1], key=lambda source_id: (layers[-1][source_id][0], source_id))
+    for index in range(len(intervals) - 1, 0, -1):
+        predecessor = layers[index][selected_sources[index]][1]
+        if predecessor is None:
+            raise DomainError("INTERNAL_ERROR", "Coverage optimizer lost its predecessor")
+        selected_sources[index - 1] = predecessor
+
+    blocks: list[dict[str, Any]] = []
+    for index, (interval, source_id) in enumerate(zip(intervals, selected_sources)):
+        start_us = start_program_us + int(interval["startAlignedUs"]) - start_aligned_us
+        end_us = start_program_us + int(interval["endAlignedUs"]) - start_aligned_us
+        candidate = interval["candidates"][source_id]
+        reason = (
+            "coverage-continuity"
+            if blocks and blocks[-1]["logicalSourceId"] == source_id
+            else "higher-alignment-confidence"
+            if candidate["confidence"] >= 0.9
+            else "usable-unambiguous-coverage"
+        )
+        if blocks and blocks[-1]["endUs"] == start_us and blocks[-1]["logicalSourceId"] == source_id:
+            blocks[-1]["endUs"] = end_us
+            blocks[-1]["endAlignedUs"] = int(interval["endAlignedUs"])
+            continue
+        blocks.append(
+            {
+                "id": opaque_id("vblock"),
+                "startUs": start_us,
+                "endUs": end_us,
+                "logicalSourceId": source_id,
+                "pinnedClipId": None,
+                "syntheticSlateId": None,
+                "sectionId": section["id"],
+                "startAlignedUs": int(interval["startAlignedUs"]),
+                "endAlignedUs": int(interval["endAlignedUs"]),
+                "decisionReason": reason,
+            }
+        )
+    return blocks
+
+
 def generate_program_draft(
     project: dict[str, Any], assets: dict[str, dict[str, Any]], payload: dict[str, Any]
 ) -> dict[str, Any]:
-    if str(payload.get("alignmentDigest", "")) != alignment_digest(project):
+    current_alignment_digest = alignment_digest(project)
+    if str(payload.get("alignmentDigest", "")) != current_alignment_digest:
         raise DomainError("PLAN_STALE", "Alignment changed after the program draft was prepared")
     selection = project.get("selectionSnapshot") or {}
     if str(payload.get("selectionDigest", "")) != str(selection.get("digest", "")):
         raise DomainError("PLAN_STALE", "Project selection changed after the program draft was prepared")
     if project.get("videoBlocks") and not payload.get("replaceExisting"):
         raise DomainError("VALIDATION_FAILED", "replaceExisting is required to replace an existing program")
-    unresolved = [
-        clip["id"]
-        for clip in project.get("clips", [])
-        if clip.get("alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED") != "ACCEPTED"
+    provisional_sources = [
+        source["id"]
+        for source in project.get("logicalSources", [])
+        if not source.get("archived")
+        and source.get("identityState", "USER_CONFIRMED") != "USER_CONFIRMED"
     ]
-    if unresolved:
+    if provisional_sources:
         raise DomainError(
             "COVERAGE_INVALID",
-            "Every required clip must have accepted timing before a first cut is generated",
-            {"unresolvedClipIds": unresolved},
+            "Source identities must be confirmed before a first cut is generated",
+            {"provisionalSourceIds": provisional_sources},
         )
-    result = initialize_program(project, assets)
+    readiness = alignment_summary(project, assets)
+    if not readiness["readyForProgramDraft"]:
+        raise DomainError(
+            "COVERAGE_INVALID",
+            "Accepted alignment does not yet cover every required interval",
+            {
+                "unresolvedSoleCoverageUs": readiness["coverage"]["unresolvedSoleCoverageUs"],
+                "conflicts": readiness["conflicts"],
+            },
+        )
+    result = copy.deepcopy(project)
+    gap_mode = payload.get("gapMode")
+    if gap_mode is not None:
+        proposal = timeline_section_proposal(project, assets, str(gap_mode))
+        if str(payload.get("sectionProposalDigest", "")) != str(proposal["digest"]):
+            raise DomainError(
+                "PLAN_STALE",
+                "Composition proposal changed before the program draft was generated",
+            )
+        _set_timeline_sections(result, {"sections": proposal["sections"]})
+    sections = result.get("timelineSections", [])
+    if not sections:
+        raise DomainError(
+            "COVERAGE_INVALID",
+            "Explicit keep, exclude, or slate decisions are required before program generation",
+        )
+    mappings = _program_section_mappings(sections)
+    result["videoBlocks"] = []
+    result["audioBlocks"] = []
+    result["syntheticSlates"] = []
+    clip_range_index = _build_clip_range_index(_clip_ranges(result, assets))
+    for mapping in mappings:
+        if mapping["mode"] == "SLATE":
+            slate_id = opaque_id("slate")
+            result["syntheticSlates"].append(
+                {
+                    "id": slate_id,
+                    "text": mapping.get("slateText") or "No recorded footage",
+                    "videoGenerated": True,
+                    "audioMode": "SILENCE",
+                    "provenance": {
+                        "sectionId": mapping["id"],
+                        "startAlignedUs": mapping["startAlignedUs"],
+                        "endAlignedUs": mapping["endAlignedUs"],
+                        "decision": "SLATE",
+                    },
+                }
+            )
+            result["videoBlocks"].append(
+                {
+                    "id": opaque_id("vblock"),
+                    "startUs": mapping["startProgramUs"],
+                    "endUs": mapping["endProgramUs"],
+                    "logicalSourceId": None,
+                    "pinnedClipId": None,
+                    "syntheticSlateId": slate_id,
+                    "sectionId": mapping["id"],
+                    "startAlignedUs": mapping["startAlignedUs"],
+                    "endAlignedUs": mapping["endAlignedUs"],
+                    "decisionReason": "explicit-no-footage-slate",
+                }
+            )
+            audio_mode = "SILENCE"
+        else:
+            result["videoBlocks"].extend(
+                _optimize_keep_section(
+                    result,
+                    assets,
+                    mapping,
+                    int(mapping["startProgramUs"]),
+                    clip_range_index,
+                )
+            )
+            audio_mode = "FOLLOW_VIDEO"
+        result["audioBlocks"].append(
+            {
+                "id": opaque_id("ablock"),
+                "startUs": mapping["startProgramUs"],
+                "endUs": mapping["endProgramUs"],
+                "mode": audio_mode,
+                "logicalSourceId": None,
+                "clipId": None,
+                "offsetUs": 0,
+                "ratePpm": 0,
+            }
+        )
+    output_duration_us = max((int(item["endUs"]) for item in result["videoBlocks"]), default=0)
+    if output_duration_us <= 0:
+        raise DomainError("COVERAGE_INVALID", "Composition decisions produce no output")
     result["programDraft"] = {
         "id": opaque_id("draft"),
         "selectionDigest": selection.get("digest"),
-        "alignmentDigest": alignment_digest(project),
+        "alignmentDigest": current_alignment_digest,
+        "timelineSectionsDigest": digest_json(sections),
+        "sectionProposalDigest": payload.get("sectionProposalDigest"),
+        "gapMode": gap_mode,
         "generatedAt": now_iso(),
-        "strategy": "coverage-continuity-v1",
+        "strategy": "coverage-optimizer-v1",
+        "outputDurationUs": output_duration_us,
+        "sourceChanges": sum(
+            left.get("logicalSourceId") != right.get("logicalSourceId")
+            for left, right in zip(result["videoBlocks"], result["videoBlocks"][1:])
+        ),
     }
     return result
 
@@ -894,14 +1771,24 @@ def _split_video_block(project: dict[str, Any], payload: dict[str, Any]) -> None
     at = int(payload["atUs"])
     if not block["startUs"] < at < block["endUs"]:
         raise DomainError("VALIDATION_FAILED", "Split point must be inside video block")
-    original_end = block["endUs"]
+    original_start = int(block["startUs"])
+    original_end = int(block["endUs"])
+    aligned_start, aligned_end = _block_aligned_bounds(project, block)
+    aligned_at = aligned_start + at - original_start
     block["endUs"] = at
+    if block.get("startAlignedUs") is not None:
+        block["endAlignedUs"] = aligned_at
     project["videoBlocks"].append(
         {
             **copy.deepcopy(block),
             "id": payload.get("newBlockId") or opaque_id("vblock"),
             "startUs": at,
             "endUs": original_end,
+            **(
+                {"startAlignedUs": aligned_at, "endAlignedUs": aligned_end}
+                if block.get("startAlignedUs") is not None
+                else {}
+            ),
         }
     )
 
@@ -912,8 +1799,21 @@ def _move_video_boundary(project: dict[str, Any], payload: dict[str, Any]) -> No
     at = int(payload["atUs"])
     if at <= int(left["startUs"]) or at >= int(right["endUs"]):
         raise DomainError("VALIDATION_FAILED", "Boundary must remain inside adjacent blocks")
+    if left.get("sectionId") and right.get("sectionId") and left["sectionId"] != right["sectionId"]:
+        raise DomainError(
+            "VALIDATION_FAILED",
+            "A boundary cannot move across an explicit composition-section boundary",
+        )
+    left_aligned_start, _left_aligned_end = _block_aligned_bounds(project, left)
+    _right_aligned_start, right_aligned_end = _block_aligned_bounds(project, right)
+    aligned_at = left_aligned_start + at - int(left["startUs"])
     left["endUs"] = at
     right["startUs"] = at
+    if left.get("startAlignedUs") is not None:
+        left["endAlignedUs"] = aligned_at
+    if right.get("startAlignedUs") is not None:
+        right["startAlignedUs"] = aligned_at
+        right["endAlignedUs"] = right_aligned_end
 
 
 def _delete_video_block(project: dict[str, Any], payload: dict[str, Any]) -> None:
@@ -923,6 +1823,10 @@ def _delete_video_block(project: dict[str, Any], payload: dict[str, Any]) -> Non
 def _assign_video_source(project: dict[str, Any], payload: dict[str, Any]) -> None:
     _find(project["logicalSources"], payload["logicalSourceId"], "logical source")
     block = _find(project["videoBlocks"], payload["blockId"], "video block")
+    if block.get("syntheticSlateId"):
+        raise DomainError(
+            "VALIDATION_FAILED", "Change the timeline section before replacing a deliberate slate"
+        )
     block["logicalSourceId"] = payload["logicalSourceId"]
     block["pinnedClipId"] = None
 
@@ -1075,30 +1979,112 @@ def _clip_ranges(
     return ranges
 
 
+def _build_clip_range_index(
+    ranges: Iterable[dict[str, Any]],
+) -> dict[str, tuple[list[int], list[int], list[dict[str, Any]]]]:
+    """Build a source-local interval index once per project revision.
+
+    `prefix_max_end` makes overlap lookup logarithmic plus returned matches,
+    including when long clips overlap many later clip starts.
+    """
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in ranges:
+        grouped.setdefault(str(item["logicalSourceId"]), []).append(item)
+    index: dict[str, tuple[list[int], list[int], list[dict[str, Any]]]] = {}
+    for source_id, items in grouped.items():
+        ordered = sorted(items, key=lambda item: (int(item["startUs"]), int(item["endUs"]), item["clipId"]))
+        starts = [int(item["startUs"]) for item in ordered]
+        prefix_max_end: list[int] = []
+        current_end = -(2**63)
+        for item in ordered:
+            current_end = max(current_end, int(item["endUs"]))
+            prefix_max_end.append(current_end)
+        index[source_id] = (starts, prefix_max_end, ordered)
+    return index
+
+
+def _overlapping_clip_ranges(
+    index: dict[str, tuple[list[int], list[int], list[dict[str, Any]]]],
+    source_id: str,
+    start_us: int,
+    end_us: int,
+) -> list[dict[str, Any]]:
+    entry = index.get(str(source_id))
+    if not entry or end_us <= start_us:
+        return []
+    starts, prefix_max_end, ordered = entry
+    first = bisect_right(prefix_max_end, int(start_us))
+    stop = bisect_left(starts, int(end_us))
+    return [item for item in ordered[first:stop] if int(item["endUs"]) > int(start_us)]
+
+
+def _block_aligned_bounds(project: dict[str, Any], block: dict[str, Any]) -> tuple[int, int]:
+    if block.get("startAlignedUs") is not None and block.get("endAlignedUs") is not None:
+        return int(block["startAlignedUs"]), int(block["endAlignedUs"])
+    start_program_us = int(block["startUs"])
+    end_program_us = int(block["endUs"])
+    for mapping in _program_section_mappings(project.get("timelineSections", [])):
+        if (
+            mapping["mode"] == "KEEP"
+            and int(mapping["startProgramUs"]) <= start_program_us
+            and int(mapping["endProgramUs"]) >= end_program_us
+        ):
+            return (
+                int(mapping["startAlignedUs"]) + start_program_us - int(mapping["startProgramUs"]),
+                int(mapping["startAlignedUs"]) + end_program_us - int(mapping["startProgramUs"]),
+            )
+    # Legacy projects used one clock. Keeping this fallback explicit preserves
+    # their existing decisions until the user confirms a repair revision.
+    return start_program_us, end_program_us
+
+
 def _compile_source_block(
     project: dict[str, Any],
     assets: dict[str, dict[str, Any]],
     block: dict[str, Any],
     issues: list[dict[str, Any]],
     require_audio: bool,
+    clip_range_index: dict[str, tuple[list[int], list[int], list[dict[str, Any]]]],
 ) -> list[dict[str, Any]]:
+    block_start_aligned_us, block_end_aligned_us = _block_aligned_bounds(project, block)
     ranges = [
         item
-        for item in _clip_ranges(project, assets)
-        if item["logicalSourceId"] == block["logicalSourceId"]
-        and (not block.get("pinnedClipId") or item["clipId"] == block["pinnedClipId"])
+        for item in _overlapping_clip_ranges(
+            clip_range_index,
+            str(block["logicalSourceId"]),
+            block_start_aligned_us,
+            block_end_aligned_us,
+        )
+        if not block.get("pinnedClipId") or item["clipId"] == block["pinnedClipId"]
     ]
-    boundaries = {int(block["startUs"]), int(block["endUs"])}
+    boundaries = {block_start_aligned_us, block_end_aligned_us}
     for item in ranges:
-        if item["endUs"] > block["startUs"] and item["startUs"] < block["endUs"]:
-            boundaries.add(max(int(block["startUs"]), int(item["startUs"])))
-            boundaries.add(min(int(block["endUs"]), int(item["endUs"])))
+        if item["endUs"] > block_start_aligned_us and item["startUs"] < block_end_aligned_us:
+            boundaries.add(max(block_start_aligned_us, int(item["startUs"])))
+            boundaries.add(min(block_end_aligned_us, int(item["endUs"])))
     points = sorted(boundaries)
-    slices: list[dict[str, Any]] = []
-    for start_us, end_us in zip(points, points[1:]):
-        if end_us <= start_us:
+    starting: dict[int, list[dict[str, Any]]] = {}
+    ending: dict[int, list[dict[str, Any]]] = {}
+    for item in ranges:
+        clipped_start = max(block_start_aligned_us, int(item["startUs"]))
+        clipped_end = min(block_end_aligned_us, int(item["endUs"]))
+        if clipped_end <= clipped_start:
             continue
-        candidates = [item for item in ranges if item["startUs"] <= start_us and item["endUs"] >= end_us]
+        starting.setdefault(clipped_start, []).append(item)
+        ending.setdefault(clipped_end, []).append(item)
+    active: dict[str, dict[str, Any]] = {}
+    slices: list[dict[str, Any]] = []
+    for start_aligned_us, end_aligned_us in zip(points, points[1:]):
+        if end_aligned_us <= start_aligned_us:
+            continue
+        for item in ending.get(start_aligned_us, []):
+            active.pop(str(item["clipId"]), None)
+        for item in starting.get(start_aligned_us, []):
+            active[str(item["clipId"])] = item
+        candidates = list(active.values())
+        start_us = int(block["startUs"]) + start_aligned_us - block_start_aligned_us
+        end_us = int(block["startUs"]) + end_aligned_us - block_start_aligned_us
         if require_audio:
             candidates = [item for item in candidates if _asset_has_audio(assets.get(item["assetId"], {}))]
         if not candidates:
@@ -1125,7 +2111,7 @@ def _compile_source_block(
             )
             continue
         selected = candidates[0]
-        transform: SyncTransform = selected["transform"]
+        transform: ClipAlignmentTransform = selected["transform"]
         slices.append(
             {
                 "id": _compiled_slice_id(
@@ -1145,10 +2131,12 @@ def _compile_source_block(
                 "streamId": _primary_stream_id(
                     assets.get(selected["assetId"], {}), "audio" if require_audio else "video"
                 ),
-                "sourceStartUs": transform.output_to_source(start_us),
-                "sourceEndUs": transform.output_to_source(end_us),
+                "sourceStartUs": transform.aligned_to_source(start_aligned_us),
+                "sourceEndUs": transform.aligned_to_source(end_aligned_us),
                 "sync": transform.to_legacy_sync_dict(),
                 "alignment": transform.to_dict(),
+                "startAlignedUs": start_aligned_us,
+                "endAlignedUs": end_aligned_us,
             }
         )
     return slices
@@ -1160,6 +2148,7 @@ def _compile_audio_block(
     block: dict[str, Any],
     video_slices: list[dict[str, Any]],
     issues: list[dict[str, Any]],
+    clip_range_index: dict[str, tuple[list[int], list[int], list[dict[str, Any]]]],
 ) -> list[dict[str, Any]]:
     mode = block["mode"]
     if mode == "SILENCE":
@@ -1184,6 +2173,17 @@ def _compile_audio_block(
         for video in relevant:
             start_us = max(int(block["startUs"]), int(video["startUs"]))
             end_us = min(int(block["endUs"]), int(video["endUs"]))
+            if video.get("synthetic"):
+                issues.append(
+                    _issue(
+                        "AUDIO_UNAVAILABLE",
+                        start_us,
+                        end_us,
+                        "FOLLOW_VIDEO cannot derive recorded audio from a generated slate",
+                        blockId=block["id"],
+                    )
+                )
+                continue
             asset = assets.get(video["assetId"], {})
             if not _asset_has_audio(asset):
                 issues.append(
@@ -1197,6 +2197,39 @@ def _compile_audio_block(
                     )
                 )
                 continue
+            program_span_us = int(video["endUs"]) - int(video["startUs"])
+            source_span_us = int(video["sourceEndUs"]) - int(video["sourceStartUs"])
+            if program_span_us <= 0 or source_span_us <= 0:
+                issues.append(
+                    _issue(
+                        "AUDIO_UNAVAILABLE",
+                        start_us,
+                        end_us,
+                        "FOLLOW_VIDEO selected a slice with an invalid time mapping",
+                        blockId=block["id"],
+                        assetId=video["assetId"],
+                    )
+                )
+                continue
+            source_start_us = int(video["sourceStartUs"]) + _round_ratio(
+                (start_us - int(video["startUs"])) * source_span_us,
+                program_span_us,
+            )
+            source_end_us = int(video["sourceStartUs"]) + _round_ratio(
+                (end_us - int(video["startUs"])) * source_span_us,
+                program_span_us,
+            )
+            aligned_span_us = int(video.get("endAlignedUs", video["endUs"])) - int(
+                video.get("startAlignedUs", video["startUs"])
+            )
+            aligned_start_us = int(video.get("startAlignedUs", video["startUs"])) + _round_ratio(
+                (start_us - int(video["startUs"])) * aligned_span_us,
+                program_span_us,
+            )
+            aligned_end_us = int(video.get("startAlignedUs", video["startUs"])) + _round_ratio(
+                (end_us - int(video["startUs"])) * aligned_span_us,
+                program_span_us,
+            )
             slices.append(
                 {
                     **copy.deepcopy(video),
@@ -1206,6 +2239,10 @@ def _compile_audio_block(
                     "blockId": block["id"],
                     "startUs": start_us,
                     "endUs": end_us,
+                    "startAlignedUs": aligned_start_us,
+                    "endAlignedUs": aligned_end_us,
+                    "sourceStartUs": source_start_us,
+                    "sourceEndUs": source_end_us,
                     "streamId": _primary_stream_id(asset, "audio"),
                     "mode": mode,
                 }
@@ -1227,7 +2264,10 @@ def _compile_audio_block(
         ),
         "pinnedClipId": block.get("clipId") if mode == "FIXED_CLIP" else None,
     }
-    slices = _compile_source_block(project, assets, synthetic_block, issues, require_audio=True)
+    slices = _compile_source_block(
+        project, assets, synthetic_block, issues, require_audio=True,
+        clip_range_index=clip_range_index,
+    )
     for item in slices:
         item["mode"] = mode
     return _apply_audio_timing(slices, block, assets, issues)
@@ -1249,17 +2289,19 @@ def _apply_audio_timing(
     offset_us = int(block.get("offsetUs", 0))
     rate_ppm = int(block.get("ratePpm", 0))
     rate_denominator = 1_000_000 + rate_ppm
-    anchor_output_us = int(block["startUs"])
     for item in slices:
-        sync = SyncTransform.from_dict(item.get("sync"))
-        anchor_source_us = sync.output_to_source(anchor_output_us)
-
-        def source_at(output_us: int) -> int:
-            base_delta = sync.output_to_source(output_us) - anchor_source_us
-            return anchor_source_us + _round_ratio(base_delta * 1_000_000, rate_denominator) + offset_us
-
-        item["sourceStartUs"] = source_at(int(item["startUs"]))
-        item["sourceEndUs"] = source_at(int(item["endUs"]))
+        # Source ranges have already been resolved from aligned evidence by the
+        # video/source compiler. Independent audio timing must transform that
+        # exact range; feeding programTimeUs back through the clip alignment
+        # would incorrectly reintroduce excluded evidence gaps.
+        base_source_start_us = int(item["sourceStartUs"])
+        base_source_end_us = int(item["sourceEndUs"])
+        base_source_duration_us = base_source_end_us - base_source_start_us
+        item["sourceStartUs"] = base_source_start_us + offset_us
+        item["sourceEndUs"] = item["sourceStartUs"] + _round_ratio(
+            base_source_duration_us * 1_000_000,
+            rate_denominator,
+        )
         item["offsetUs"] = offset_us
         item["ratePpm"] = rate_ppm
         transforms = list(item.get("transforms", []))

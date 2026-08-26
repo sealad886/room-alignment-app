@@ -402,6 +402,172 @@ class ServerBoundaryTests(unittest.TestCase):
         self.assertEqual(project["selectionSnapshot"]["assetIds"], ["one"])
         self.assertEqual(project["videoBlocks"], [])
 
+    def test_alignment_summary_window_and_proposal_set_routes_are_connected(self) -> None:
+        cookie, csrf = self.bootstrap()
+        grant = self.app.store.create_grant(self.source, "READ_ONLY_SOURCE")
+        library = self.app.store.create_library(grant["id"], "UTC")
+        (self.source / "one.mp4").write_bytes(b"one")
+        record = MediaRecord(
+            "one",
+            library["id"],
+            "one.mp4",
+            3,
+            1,
+            duration=60,
+            duration_us=60_000_000,
+            captured_at="2025-10-15T12:00:00+00:00",
+            camera="Door",
+            fingerprint={"size": 3, "modifiedNs": 1},
+        )
+        scan = self.app.store.begin_scan(library["id"], "FULL")
+        self.app.store.save_media_batch(scan["id"], [record])
+        self.app.store.finish_scan(scan["id"], "SUCCEEDED", {"videos": 1})
+        project = self.app.store.create_project("Evidence", library["id"], ["one"])
+
+        status, _headers, delta = self.request(
+            "POST",
+            f"/api/v1/projects/{project['id']}/commands/delta",
+            body={
+                "commandId": "delta-metadata",
+                "expectedRevision": project["revision"],
+                "commandType": "UpdateProjectMetadata",
+                "payload": {"name": "Evidence renamed"},
+            },
+            cookie=cookie,
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        self.assertNotIn("project", delta)
+        self.assertEqual(delta["changedEntities"]["set"]["name"], "Evidence renamed")
+        project = self.app.store.project(project["id"])
+
+        status, _headers, summary = self.request(
+            "GET", f"/api/v1/projects/{project['id']}/alignment-summary", cookie=cookie
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(summary["evidenceSpan"]["durationUs"], 60_000_000)
+        self.assertEqual(summary["confidenceCounts"]["provisional"], 1)
+        self.assertFalse(summary["readyForProgramDraft"])
+
+        status, _headers, preparation = self.request(
+            "GET", f"/api/v1/projects/{project['id']}/preparation", cookie=cookie
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(preparation["phase"], "SOURCE_REVIEW")
+        self.assertFalse(preparation["sourceIdentity"]["ready"])
+        self.assertFalse(preparation["hasProgram"])
+
+        status, _headers, window = self.request(
+            "GET",
+            f"/api/v1/projects/{project['id']}/timeline-window?"
+            "startAlignedUs=0&endAlignedUs=60000000&resolutionUs=100000",
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(window["mode"], "EXACT")
+        self.assertEqual(window["items"][0]["clipId"], project["clips"][0]["id"])
+
+        status, _headers, job = self.request(
+            "POST",
+            f"/api/v1/projects/{project['id']}/alignment-jobs",
+            body={},
+            cookie=cookie,
+            csrf=csrf,
+        )
+        self.assertEqual(status, 202)
+        self.app.analysis_threads[job["id"]].join(timeout=2)
+        self.assertEqual(self.app.store.job(job["id"])["status"], "SUCCEEDED")
+
+        status, _headers, proposal_sets = self.request(
+            "GET",
+            f"/api/v1/projects/{project['id']}/alignment-proposal-sets",
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(len(proposal_sets), 1)
+        self.assertEqual(proposal_sets[0]["summary"]["timestampOnly"], 1)
+        self.assertFalse(proposal_sets[0]["proposals"][0]["automaticallyAcceptable"])
+
+        revision = project["revision"]
+        status, _headers, confirmed = self.request(
+            "POST",
+            f"/api/v1/projects/{project['id']}/commands",
+            body={
+                "commandId": "confirm-source",
+                "expectedRevision": revision,
+                "commandType": "ConfirmSourceIdentities",
+                "payload": {"sourceIds": [project["logicalSources"][0]["id"]]},
+            },
+            cookie=cookie,
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        revision = confirmed["appliedRevision"]
+        status, _headers, aligned = self.request(
+            "POST",
+            f"/api/v1/projects/{project['id']}/commands",
+            body={
+                "commandId": "accept-manual-timing",
+                "expectedRevision": revision,
+                "commandType": "SetClipAlignment",
+                "payload": {
+                    "clipId": project["clips"][0]["id"],
+                    "alignment": {"anchorSourceUs": 0, "anchorAlignedUs": 0, "ratePpm": 0},
+                    "confirmDrift": False,
+                },
+            },
+            cookie=cookie,
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        revision = aligned["appliedRevision"]
+        status, _headers, sections = self.request(
+            "GET",
+            f"/api/v1/projects/{project['id']}/timeline-section-proposal?gapMode=EXCLUDE",
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(sections["outputDurationUs"], 60_000_000)
+        draft_payload = {
+            "alignmentDigest": sections["alignmentDigest"],
+            "selectionDigest": aligned["project"]["selectionSnapshot"]["digest"],
+            "gapMode": "EXCLUDE",
+            "sectionProposalDigest": sections["digest"],
+            "replaceExisting": False,
+        }
+        status, _headers, draft_preview = self.request(
+            "POST",
+            f"/api/v1/projects/{project['id']}/commands?preview=true",
+            body={
+                "commandId": "preview-first-cut",
+                "expectedRevision": revision,
+                "commandType": "GenerateProgramDraft",
+                "payload": draft_payload,
+            },
+            cookie=cookie,
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(draft_preview["project"]["timelineSections"])
+        self.assertTrue(draft_preview["project"]["videoBlocks"])
+        self.assertEqual(self.app.store.project(project["id"])["revision"], revision)
+        status, _headers, committed = self.request(
+            "POST",
+            f"/api/v1/projects/{project['id']}/commands",
+            body={
+                "commandId": "commit-first-cut",
+                "expectedRevision": revision,
+                "commandType": "GenerateProgramDraft",
+                "payload": draft_payload,
+            },
+            cookie=cookie,
+            csrf=csrf,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(committed["appliedRevision"], revision + 1)
+        self.assertEqual(committed["preparation"]["phase"], "PROGRAM_DRAFT")
+        self.assertTrue(committed["preparation"]["canEnterCut"])
+
 
 class WorkerBackpressureTests(unittest.TestCase):
     def test_cluster_worker_start_failure_closes_generation(self) -> None:

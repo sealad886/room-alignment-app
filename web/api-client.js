@@ -123,6 +123,19 @@
     ],
     "queryParameters": {}
   },
+  "getAudioWaveform": {
+    "binary": false,
+    "method": "GET",
+    "path": "/media/{mediaId}/waveform",
+    "pathParameters": [
+      "mediaId"
+    ],
+    "queryParameters": {
+      "endSourceUs": false,
+      "maxPoints": false,
+      "startSourceUs": false
+    }
+  },
   "getClusterFacets": {
     "binary": false,
     "method": "GET",
@@ -222,6 +235,15 @@
     ],
     "queryParameters": {}
   },
+  "getProjectPreparation": {
+    "binary": false,
+    "method": "GET",
+    "path": "/projects/{projectId}/preparation",
+    "pathParameters": [
+      "projectId"
+    ],
+    "queryParameters": {}
+  },
   "getProjectRevision": {
     "binary": false,
     "method": "GET",
@@ -263,6 +285,17 @@
     "path": "/system",
     "pathParameters": [],
     "queryParameters": {}
+  },
+  "getTimelineSectionProposal": {
+    "binary": false,
+    "method": "GET",
+    "path": "/projects/{projectId}/timeline-section-proposal",
+    "pathParameters": [
+      "projectId"
+    ],
+    "queryParameters": {
+      "gapMode": false
+    }
   },
   "getTimelineWindow": {
     "binary": false,

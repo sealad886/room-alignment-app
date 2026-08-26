@@ -218,10 +218,10 @@ class HierarchicalClusteringTests(unittest.TestCase):
         self.assertEqual(snapshot["assetIds"], ["a", "c", "manual"])
         self.assertEqual(project["videoBlocks"], [])
         self.assertEqual(project["audioBlocks"], [])
-        self.assertEqual(len(project["logicalSources"]), 3)
+        self.assertEqual(len(project["logicalSources"]), 2)
         self.assertEqual(
             {source["identityState"] for source in project["logicalSources"]},
-            {"USER_REVIEW_REQUIRED"},
+            {"PROVISIONAL"},
         )
         original_digest = snapshot["digest"]
 

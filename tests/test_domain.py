@@ -124,12 +124,32 @@ class ProgramCompilerTests(unittest.TestCase):
         resolved = compile_program(project, by_id)
         self.assertTrue(resolved["valid"], resolved["issues"])
 
-    def test_source_candidates_never_silently_become_one_logical_source(self):
+    def test_source_candidates_form_one_provisional_track_without_becoming_confirmed(self):
         assets = [asset("a", "Same label", 5_000_000), asset("b", "Same label", 5_000_000)]
         assets[0]["sourceCandidateId"] = assets[1]["sourceCandidateId"] = "candidate-same"
         project = new_project("Event", "lib", assets, "project")
-        self.assertEqual(len(project["logicalSources"]), 2)
-        self.assertNotEqual(project["clips"][0]["logicalSourceId"], project["clips"][1]["logicalSourceId"])
+        self.assertEqual(len(project["logicalSources"]), 1)
+        self.assertEqual(project["logicalSources"][0]["identityState"], "PROVISIONAL")
+        self.assertEqual(
+            {project["clips"][0]["logicalSourceId"], project["clips"][1]["logicalSourceId"]},
+            {project["logicalSources"][0]["id"]},
+        )
+
+    def test_source_identity_requires_an_explicit_confirmation_command(self):
+        media = asset("a", "Door", 5_000_000)
+        media["sourceCandidateId"] = "candidate-door"
+        project = new_project(
+            "Event", "lib", [media], "project", initialize_legacy_program=False
+        )
+        source_id = project["logicalSources"][0]["id"]
+        confirmed = apply_command(
+            project,
+            "ConfirmSourceIdentities",
+            {"sourceIds": [source_id]},
+            {"a": media},
+        )
+        self.assertEqual(confirmed["logicalSources"][0]["identityState"], "USER_CONFIRMED")
+        self.assertIn("confirmedAt", confirmed["logicalSources"][0])
 
     def test_explicit_source_groups_create_one_confirmed_logical_source(self):
         assets = [asset("a", "Door", 5_000_000), asset("b", "Door", 5_000_000)]

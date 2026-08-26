@@ -52,7 +52,7 @@ def quick_fingerprint(path: Path) -> dict[str, Any]:
             if sidecar and sidecar_stat
             else None
         ),
-        "probeVersion": 2,
+        "probeVersion": 3,
     }
 
 
@@ -75,7 +75,7 @@ def cheap_fingerprint(path: Path) -> dict[str, Any]:
             if sidecar and sidecar_stat
             else None
         ),
-        "probeVersion": 2,
+        "probeVersion": 3,
     }
 
 

@@ -124,10 +124,20 @@ def infer_from_path(path: Path, relative: Path) -> tuple[dict[str, Any], list[Pr
         break
     if "captured_at" not in values:
         date_match = None
+        date_origin = None
         for parent in relative.parents:
             date_match = DATE_ONLY.search(parent.name)
             if date_match:
+                date_origin = parent.as_posix()
                 break
+        # A user may grant the date directory itself. In that case its name is
+        # intentionally absent from the relative path, but remains valid
+        # filesystem evidence. Keep only the basename as provenance origin so
+        # an absolute private path never enters canonical evidence or logs.
+        if not date_match:
+            date_match = DATE_ONLY.search(path.parent.name)
+            if date_match:
+                date_origin = path.parent.name
         time_match = TIME_ONLY.search(stem)
         if date_match and time_match:
             year = int(date_match.group("year"))
@@ -138,7 +148,7 @@ def infer_from_path(path: Path, relative: Path) -> tuple[dict[str, Any], list[Pr
                     int(time_match.group("hour")), int(time_match.group("minute")), int(time_match.group("second")),
                 ).isoformat()
                 values["captured_at"] = captured
-                evidence.append(ProvenanceEvidence("filesystem", "captured_at.date", captured[:10], 0.65, parent.as_posix()))
+                evidence.append(ProvenanceEvidence("filesystem", "captured_at.date", captured[:10], 0.65, str(date_origin)))
                 evidence.append(ProvenanceEvidence("filename", "captured_at.time", captured[11:], 0.7, relative.as_posix()))
                 evidence.append(
                     ProvenanceEvidence(

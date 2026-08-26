@@ -5,6 +5,7 @@
   "$defs": {
     "Id": {"type": "string", "minLength": 1, "maxLength": 200},
     "Us": {"type": "integer", "minimum": 0},
+    "SignedUs": {"type": "integer"},
     "LibraryRoot": {
       "type": "object",
       "additionalProperties": false,
@@ -198,61 +199,287 @@
       "required": ["id", "startAlignedUs", "endAlignedUs", "mode"],
       "properties": {
         "id": {"$ref": "#/$defs/Id"},
-        "startAlignedUs": {"$ref": "#/$defs/Us"},
-        "endAlignedUs": {"$ref": "#/$defs/Us"},
+        "startAlignedUs": {"$ref": "#/$defs/SignedUs"},
+        "endAlignedUs": {"$ref": "#/$defs/SignedUs"},
         "mode": {"enum": ["KEEP", "EXCLUDE", "SLATE"]},
         "slateText": {"type": ["string", "null"], "maxLength": 500}
+      }
+    },
+    "TimelineSectionProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectId", "projectRevision", "alignmentDigest", "gapMode", "sections", "keepDurationUs", "excludedDurationUs", "slateDurationUs", "outputDurationUs", "digest"],
+      "properties": {
+        "projectId": {"$ref": "#/$defs/Id"},
+        "projectRevision": {"type": "integer", "minimum": 1},
+        "alignmentDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "gapMode": {"enum": ["EXCLUDE", "SLATE"]},
+        "sections": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/TimelineSection"}},
+        "keepDurationUs": {"$ref": "#/$defs/Us"},
+        "excludedDurationUs": {"$ref": "#/$defs/Us"},
+        "slateDurationUs": {"$ref": "#/$defs/Us"},
+        "outputDurationUs": {"$ref": "#/$defs/Us"},
+        "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "AlignmentEvidence": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["kind", "confidence"],
+      "properties": {
+        "kind": {"enum": ["TIMESTAMP_PRIOR", "AUDIO_CORRELATION"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "otherClipId": {"$ref": "#/$defs/Id"},
+        "correctionUs": {"$ref": "#/$defs/SignedUs"},
+        "limitations": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "AlignmentProposal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "clipId", "assetId", "classification", "proposedAlignment", "confidence", "automaticallyAcceptable", "requiresDriftConfirmation", "evidence", "limitations", "inputFingerprintDigest"],
+      "properties": {
+        "id": {"$ref": "#/$defs/Id"},
+        "clipId": {"$ref": "#/$defs/Id"},
+        "assetId": {"$ref": "#/$defs/Id"},
+        "classification": {"enum": ["AUDIO_CONFIRMED", "TIMESTAMP_ONLY", "CONFLICTING", "UNRESOLVED", "MANUAL_ACCEPTED"]},
+        "proposedAlignment": {"$ref": "#/$defs/ClipAlignmentTransform"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "automaticallyAcceptable": {"type": "boolean"},
+        "requiresDriftConfirmation": {"type": "boolean"},
+        "evidence": {"type": "array", "items": {"$ref": "#/$defs/AlignmentEvidence"}},
+        "limitations": {"type": "array", "items": {"type": "string"}},
+        "inputFingerprintDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "AlignmentProposalSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["audioConfirmed", "timestampOnly", "conflicting", "unresolved", "manualAccepted", "proposedDriftCorrections", "candidatePairs", "confirmedEdges", "signatureFailures", "analysisCapped"],
+      "properties": {
+        "audioConfirmed": {"type": "integer", "minimum": 0},
+        "timestampOnly": {"type": "integer", "minimum": 0},
+        "conflicting": {"type": "integer", "minimum": 0},
+        "unresolved": {"type": "integer", "minimum": 0},
+        "manualAccepted": {"type": "integer", "minimum": 0},
+        "proposedDriftCorrections": {"type": "integer", "minimum": 0},
+        "candidatePairs": {"type": "integer", "minimum": 0},
+        "confirmedEdges": {"type": "integer", "minimum": 0},
+        "signatureFailures": {"type": "integer", "minimum": 0},
+        "analysisCapped": {"type": "boolean"}
       }
     },
     "AlignmentProposalSet": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "projectId", "projectRevision", "selectionDigest", "inputDigest", "algorithm", "algorithmVersion", "configDigest", "status", "summary", "proposals", "createdAt"],
+      "required": ["id", "projectId", "projectRevision", "selectionDigest", "inputDigest", "digest", "algorithm", "algorithmVersion", "config", "configDigest", "status", "summary", "proposals", "limitations", "createdAt", "updatedAt"],
       "properties": {
         "id": {"$ref": "#/$defs/Id"},
         "projectId": {"$ref": "#/$defs/Id"},
         "projectRevision": {"type": "integer", "minimum": 1},
-        "selectionDigest": {"type": "string"},
-        "inputDigest": {"type": "string"},
-        "algorithm": {"type": "string"},
-        "algorithmVersion": {"type": "string"},
-        "configDigest": {"type": "string"},
-        "status": {"enum": ["PENDING", "PARTIALLY_ACCEPTED", "ACCEPTED", "REJECTED", "STALE", "SUPERSEDED"]},
-        "summary": {"type": "object"},
-        "proposals": {"type": "array", "items": {"type": "object"}},
-        "createdAt": {"type": "string", "format": "date-time"}
+        "selectionDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "inputDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "algorithm": {"const": "bounded-audio-evidence-graph"},
+        "algorithmVersion": {"type": "string", "minLength": 1},
+        "config": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["uncertaintyUs", "maxCandidatesPerClip", "maxPairComparisons", "signatureSampleRate", "signatureMaxSeconds", "visualMatching"],
+          "properties": {
+            "uncertaintyUs": {"type": "integer", "minimum": 0},
+            "maxCandidatesPerClip": {"type": "integer", "minimum": 1},
+            "maxPairComparisons": {"type": "integer", "minimum": 1},
+            "signatureSampleRate": {"type": "integer", "minimum": 1},
+            "signatureMaxSeconds": {"type": "integer", "minimum": 1},
+            "visualMatching": {"const": false}
+          }
+        },
+        "configDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "status": {"enum": ["PENDING", "PARTIALLY_RESOLVED", "RESOLVED", "ACCEPTED", "REJECTED", "STALE", "SUPERSEDED"]},
+        "summary": {"$ref": "#/$defs/AlignmentProposalSummary"},
+        "proposals": {"type": "array", "items": {"$ref": "#/$defs/AlignmentProposal"}},
+        "limitations": {"type": "array", "items": {"type": "string"}},
+        "acceptedProposalIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}},
+        "rejectedProposalIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}},
+        "invalidationReason": {"type": "string"},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "updatedAt": {"type": "string", "format": "date-time"}
+      }
+    },
+    "TimelineClipItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "clipId", "assetId", "logicalSourceId", "startAlignedUs", "endAlignedUs", "alignmentState", "confidence", "evidenceKinds", "relativePath", "warnings"],
+      "properties": {
+        "type": {"const": "CLIP"},
+        "clipId": {"$ref": "#/$defs/Id"},
+        "assetId": {"$ref": "#/$defs/Id"},
+        "logicalSourceId": {"$ref": "#/$defs/Id"},
+        "startAlignedUs": {"$ref": "#/$defs/SignedUs"},
+        "endAlignedUs": {"$ref": "#/$defs/SignedUs"},
+        "alignmentState": {"enum": ["PROVISIONAL", "ACCEPTED", "REVIEW_REQUIRED", "UNRESOLVED"]},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "evidenceKinds": {"type": "array", "items": {"type": "string"}},
+        "relativePath": {"type": "string"},
+        "warnings": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "TimelineBucketItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "startAlignedUs", "endAlignedUs", "clipCount", "sourceCount", "logicalSourceIds", "stateCounts", "warningCount"],
+      "properties": {
+        "type": {"const": "BUCKET"},
+        "startAlignedUs": {"$ref": "#/$defs/SignedUs"},
+        "endAlignedUs": {"$ref": "#/$defs/SignedUs"},
+        "clipCount": {"type": "integer", "minimum": 1},
+        "sourceCount": {"type": "integer", "minimum": 1},
+        "logicalSourceIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}},
+        "stateCounts": {"type": "object", "additionalProperties": {"type": "integer", "minimum": 0}},
+        "warningCount": {"type": "integer", "minimum": 0}
+      }
+    },
+    "TimelineUnplacedItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "clipId", "assetId", "logicalSourceId", "alignmentState", "relativePath", "warnings"],
+      "properties": {
+        "type": {"const": "UNPLACED"},
+        "clipId": {"$ref": "#/$defs/Id"},
+        "assetId": {"$ref": "#/$defs/Id"},
+        "logicalSourceId": {"$ref": "#/$defs/Id"},
+        "alignmentState": {"const": "UNRESOLVED"},
+        "relativePath": {"type": "string"},
+        "warnings": {"type": "array", "items": {"type": "string"}}
       }
     },
     "TimelineWindow": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["projectId", "revision", "startAlignedUs", "endAlignedUs", "resolutionUs", "mode", "items", "totalBeforeWindow", "alignmentDigest"],
+      "required": ["projectId", "revision", "startAlignedUs", "endAlignedUs", "resolutionUs", "mode", "items", "totalBeforeWindow", "totalInWindow", "unplacedCount", "unplacedItems", "alignmentDigest"],
       "properties": {
         "projectId": {"$ref": "#/$defs/Id"},
         "revision": {"type": "integer", "minimum": 1},
-        "startAlignedUs": {"$ref": "#/$defs/Us"},
-        "endAlignedUs": {"$ref": "#/$defs/Us"},
+        "startAlignedUs": {"$ref": "#/$defs/SignedUs"},
+        "endAlignedUs": {"$ref": "#/$defs/SignedUs"},
         "resolutionUs": {"type": "integer", "minimum": 1},
         "mode": {"enum": ["EXACT", "AGGREGATED"]},
-        "items": {"type": "array", "maxItems": 2000, "items": {"type": "object"}},
+        "items": {"type": "array", "maxItems": 2000, "items": {"oneOf": [{"$ref": "#/$defs/TimelineClipItem"}, {"$ref": "#/$defs/TimelineBucketItem"}]}},
         "totalBeforeWindow": {"type": "integer", "minimum": 0},
-        "alignmentDigest": {"type": "string"}
+        "totalInWindow": {"type": "integer", "minimum": 0},
+        "unplacedCount": {"type": "integer", "minimum": 0},
+        "unplacedItems": {"type": "array", "maxItems": 2000, "items": {"$ref": "#/$defs/TimelineUnplacedItem"}},
+        "alignmentDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
       }
     },
     "AlignmentSummary": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["projectId", "revision", "alignmentDigest", "evidenceSpan", "proposedOutputDurationUs", "confidenceCounts", "coverage", "conflicts", "readyForProgramDraft"],
+      "required": ["projectId", "revision", "alignmentDigest", "evidenceSpan", "proposedOutputDurationUs", "confidenceCounts", "coverage", "conflicts", "unplacedClipIds", "readyForProgramDraft"],
       "properties": {
         "projectId": {"$ref": "#/$defs/Id"},
         "revision": {"type": "integer", "minimum": 1},
-        "alignmentDigest": {"type": "string"},
-        "evidenceSpan": {"type": "object"},
+        "alignmentDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "evidenceSpan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["startAlignedUs", "endAlignedUs", "durationUs"],
+          "properties": {
+            "startAlignedUs": {"$ref": "#/$defs/SignedUs"},
+            "endAlignedUs": {"$ref": "#/$defs/SignedUs"},
+            "durationUs": {"$ref": "#/$defs/Us"}
+          }
+        },
         "proposedOutputDurationUs": {"$ref": "#/$defs/Us"},
-        "confidenceCounts": {"type": "object"},
-        "coverage": {"type": "object"},
-        "conflicts": {"type": "array", "items": {"type": "object"}},
+        "confidenceCounts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["accepted", "provisional", "reviewRequired", "unresolved", "audioConfirmed", "timestampOnly"],
+          "properties": {
+            "accepted": {"type": "integer", "minimum": 0},
+            "provisional": {"type": "integer", "minimum": 0},
+            "reviewRequired": {"type": "integer", "minimum": 0},
+            "unresolved": {"type": "integer", "minimum": 0},
+            "audioConfirmed": {"type": "integer", "minimum": 0},
+            "timestampOnly": {"type": "integer", "minimum": 0}
+          }
+        },
+        "coverage": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["evidenceCoverageUs", "acceptedCoverageUs", "unresolvedSoleCoverageUs", "acceptedPercent", "sourceCount"],
+          "properties": {
+            "evidenceCoverageUs": {"$ref": "#/$defs/Us"},
+            "acceptedCoverageUs": {"$ref": "#/$defs/Us"},
+            "unresolvedSoleCoverageUs": {"$ref": "#/$defs/Us"},
+            "acceptedPercent": {"type": "number", "minimum": 0, "maximum": 100},
+            "sourceCount": {"type": "integer", "minimum": 0}
+          }
+        },
+        "conflicts": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code", "clipId", "assetId", "blocking"],
+            "properties": {
+              "code": {"enum": ["SOURCE_UNAVAILABLE", "DURATION_UNRESOLVED", "TIMING_CONFLICT"]},
+              "clipId": {"$ref": "#/$defs/Id"},
+              "assetId": {"$ref": "#/$defs/Id"},
+              "blocking": {"type": "boolean"}
+            }
+          }
+        },
+        "unplacedClipIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}},
         "readyForProgramDraft": {"type": "boolean"}
+      }
+    },
+    "ProjectPreparation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectId", "revision", "phase", "sourceIdentity", "alignment", "hasProgram", "programDurationUs", "legacyProgramTruncation", "canAnalyzeAlignment", "canGenerateProgramDraft", "canEnterCut", "canEnterReview", "blockers"],
+      "properties": {
+        "projectId": {"$ref": "#/$defs/Id"},
+        "revision": {"type": "integer", "minimum": 1},
+        "phase": {"enum": ["SOURCE_REVIEW", "ALIGNMENT_REVIEW", "COMPOSITION_READY", "PROGRAM_DRAFT", "REVIEWED"]},
+        "sourceIdentity": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["ready", "confirmedCount", "provisionalCount", "provisionalSourceIds"],
+          "properties": {
+            "ready": {"type": "boolean"},
+            "confirmedCount": {"type": "integer", "minimum": 0},
+            "provisionalCount": {"type": "integer", "minimum": 0},
+            "provisionalSourceIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}}
+          }
+        },
+        "alignment": {"$ref": "#/$defs/AlignmentSummary"},
+        "hasProgram": {"type": "boolean"},
+        "programDurationUs": {"$ref": "#/$defs/Us"},
+        "legacyProgramTruncation": {"type": "boolean"},
+        "canAnalyzeAlignment": {"type": "boolean"},
+        "canGenerateProgramDraft": {"type": "boolean"},
+        "canEnterCut": {"type": "boolean"},
+        "canEnterReview": {"type": "boolean"},
+        "blockers": {"type": "array", "items": {"type": "object", "required": ["code"], "properties": {"code": {"enum": ["SOURCE_IDENTITY_UNCONFIRMED", "ALIGNMENT_REVIEW_REQUIRED", "PROGRAM_TRUNCATES_ALIGNED_MEDIA"]}}, "additionalProperties": true}}
+      }
+    },
+    "AudioWaveform": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assetId", "available", "points"],
+      "properties": {
+        "assetId": {"$ref": "#/$defs/Id"},
+        "available": {"type": "boolean"},
+        "reason": {"type": "string"},
+        "startSourceUs": {"$ref": "#/$defs/Us"},
+        "endSourceUs": {"$ref": "#/$defs/Us"},
+        "sampleRate": {"type": "integer", "minimum": 1},
+        "pointDurationUs": {"type": "integer", "minimum": 1},
+        "points": {"type": "array", "maxItems": 2000, "items": {"type": "integer", "minimum": 0, "maximum": 1000}},
+        "truncated": {"type": "boolean"},
+        "signatureDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
       }
     },
     "ProgramDraftPlan": {
