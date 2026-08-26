@@ -46,6 +46,9 @@ const state = {
   durationUs: 1,
   evidenceStartUs: 0,
   evidenceEndUs: 1,
+  timelineStartUs: 0,
+  timelineEndUs: 1,
+  timelineZoom: 0,
   programDurationUs: 1,
   renderPlan: null,
   artifact: null,
@@ -276,17 +279,54 @@ async function refreshPreparationState() {
   const extent = preparation.alignment.evidenceSpan;
   state.evidenceStartUs = Number(extent.startAlignedUs || 0);
   state.evidenceEndUs = Math.max(state.evidenceStartUs + 1, Number(extent.endAlignedUs || 0));
-  const spanUs = Math.max(1, state.evidenceEndUs - state.evidenceStartUs);
+  const previousCenterUs = (state.timelineStartUs + state.timelineEndUs) / 2;
+  setTimelineViewport(state.timelineZoom, Number.isFinite(previousCenterUs) ? previousCenterUs : state.evidenceStartUs);
+  await loadTimelineWindow();
+  state.durationUs = activeClockDurationUs();
+  syncWorkflowAvailability();
+}
+
+function setTimelineViewport(zoom = state.timelineZoom, centerUs = currentAlignedUs()) {
+  const fullSpanUs = Math.max(1, state.evidenceEndUs - state.evidenceStartUs);
+  state.timelineZoom = Math.max(0, Math.min(100, Number(zoom) || 0));
+  const minimumSpanUs = Math.min(fullSpanUs, 1_000_000);
+  const visibleSpanUs = Math.max(minimumSpanUs, fullSpanUs / Math.pow(2, state.timelineZoom / 20));
+  const boundedCenterUs = Math.max(state.evidenceStartUs + visibleSpanUs / 2, Math.min(state.evidenceEndUs - visibleSpanUs / 2, centerUs));
+  state.timelineStartUs = Math.round(boundedCenterUs - visibleSpanUs / 2);
+  state.timelineEndUs = Math.round(boundedCenterUs + visibleSpanUs / 2);
+}
+
+async function loadTimelineWindow() {
+  const spanUs = Math.max(1, state.timelineEndUs - state.timelineStartUs);
   state.timelineWindow = await client.getTimelineWindow({
     projectId: state.project.id,
     query: {
-      startAlignedUs: state.evidenceStartUs,
-      endAlignedUs: state.evidenceEndUs,
+      startAlignedUs: state.timelineStartUs,
+      endAlignedUs: state.timelineEndUs,
       resolutionUs: Math.max(1, Math.ceil(spanUs / 1600)),
     },
   });
-  state.durationUs = activeClockDurationUs();
-  syncWorkflowAvailability();
+  renderTimelineControls();
+}
+
+function renderTimelineControls() {
+  const slider = $("#timeline-zoom");
+  if (!slider) return;
+  slider.value = state.timelineZoom;
+  const fullSpanUs = Math.max(1, state.evidenceEndUs - state.evidenceStartUs);
+  const visibleSpanUs = Math.max(1, state.timelineEndUs - state.timelineStartUs);
+  $("#timeline-window-label").textContent = visibleSpanUs >= fullSpanUs - 1
+    ? `Full span · ${formatUs(fullSpanUs)}`
+    : `${formatUs(state.timelineStartUs)} – ${formatUs(state.timelineEndUs)} · ${formatUs(visibleSpanUs)} visible`;
+  $("#timeline-zoom-out").disabled = state.timelineZoom <= 0;
+  $("#timeline-zoom-in").disabled = state.timelineZoom >= 100;
+}
+
+async function changeTimelineZoom(zoom, centerUs = currentAlignedUs()) {
+  setTimelineViewport(zoom, centerUs);
+  await loadTimelineWindow();
+  renderSources();
+  updatePlayheadPositions();
 }
 
 async function loadLibraries() {
@@ -882,7 +922,7 @@ function renderSources() {
       const width = Math.max(1, track.querySelector(".track-clips").clientWidth);
       track.setPointerCapture(event.pointerId);
       track.onpointermove = moveEvent => {
-        const deltaUs = ((moveEvent.clientX - startX) / width) * Math.max(1, state.evidenceEndUs - state.evidenceStartUs);
+        const deltaUs = ((moveEvent.clientX - startX) / width) * Math.max(1, state.timelineEndUs - state.timelineStartUs);
         $("#sync-offset").value = Math.round(startMs + deltaUs / 1000);
       };
       const finishPointer = upEvent => {
@@ -921,7 +961,7 @@ function renderClipSelector(source) {
 }
 
 function trackMarkup(source) {
-  const spanUs = Math.max(1, state.evidenceEndUs - state.evidenceStartUs);
+  const spanUs = Math.max(1, state.timelineEndUs - state.timelineStartUs);
   const items = (state.timelineWindow?.items || []).filter(item =>
     item.type === "CLIP"
       ? item.logicalSourceId === source.id
@@ -930,14 +970,14 @@ function trackMarkup(source) {
   const clips = items.map(item => {
     const startUs = Number(item.startAlignedUs);
     const endUs = Number(item.endAlignedUs);
-    const left = Math.max(0, Math.min(100, ((startUs - state.evidenceStartUs) / spanUs) * 100));
+    const left = Math.max(0, Math.min(100, ((startUs - state.timelineStartUs) / spanUs) * 100));
     const width = Math.max(0.18, Math.min(100 - left, ((endUs - startUs) / spanUs) * 100));
     if (item.type === "BUCKET") {
       return `<i class="clip aggregate" title="${item.clipCount} clips in this evidence bucket" style="left:${left}%;width:${width}%;--source-color:${source.color}"></i>`;
     }
     const provisional = item.alignmentState === "PROVISIONAL" ? " provisional" : "";
     const warning = item.warnings?.length ? " warning" : "";
-    return `<i class="clip${provisional}${warning}" title="${safe(item.relativePath)} · ${safe(item.alignmentState)}" style="left:${left}%;width:${width}%;--source-color:${source.color}"></i>`;
+    return `<button class="clip${provisional}${warning}" data-timeline-clip="${safe(item.clipId)}" aria-label="${safe(item.relativePath)} · ${safe(item.alignmentState)}" title="${safe(item.relativePath)} · ${safe(item.alignmentState)}" style="left:${left}%;width:${width}%;--source-color:${source.color}"></button>`;
   }).join("");
   return `<div class="track-row" data-drag-source="${safe(source.id)}" tabindex="0" aria-label="${safe(source.label)} evidence track with ${source.clips.length} clips; use arrow keys for 10 millisecond nudges"><div class="track-label"><strong>${safe(source.label)}</strong><small>${source.clips.length} clips · ${source.identityState === "PROVISIONAL" ? "identity to review" : "confirmed source"}</small></div><div class="track-clips">${clips}</div></div>`;
 }
@@ -1000,7 +1040,7 @@ function renderSuggestions() {
   if (!proposalSet) {
     const unplaced = state.timelineWindow?.unplacedItems || [];
     container.innerHTML = unplaced.length
-      ? `<div class="review-queue">${unplaced.slice(0, 12).map(item => `<div class="confidence"><strong>Unplaced clip</strong><p>${safe(item.relativePath || item.assetId)}</p><small>Manual timing evidence required</small></div>`).join("")}</div>`
+      ? `<div class="review-queue">${unplaced.slice(0, 12).map(item => `<div class="confidence"><strong>Unplaced clip</strong><p><a class="timeline-clip-link" href="#alignment-timeline" data-focus-clip="${safe(item.clipId)}">${safe(item.relativePath || item.assetId)}</a></p><small>Manual timing evidence required</small></div>`).join("")}</div>`
       : '<p class="muted">Analyze overlaps to compare bounded cross-source audio evidence. Timestamp placement stays provisional.</p>';
     return;
   }
@@ -1017,10 +1057,37 @@ function renderSuggestions() {
       <div><strong>${summary.unresolved}</strong><small>unresolved</small></div>
     </div><small>${summary.candidatePairs} bounded comparisons · ${summary.confirmedEdges} supported edges · visual matching not used</small></div>
     ${highConfidence.length ? `<button class="btn primary wide" id="accept-high-confidence">Accept ${highConfidence.length} high-confidence result${highConfidence.length === 1 ? "" : "s"}</button>` : ""}
-    <div class="review-queue">${review.slice(0, 20).map(item => `<div class="confidence"><strong>${safe(item.classification.replaceAll("_", " "))} · ${Math.round(Number(item.confidence) * 100)}%</strong><p>${safe(state.mediaById.get(item.assetId)?.relative_path || item.assetId)}</p><small>${safe(item.limitations.join("; ") || "Review evidence before accepting")}</small><div class="link-row"><button class="btn" data-accept-proposal="${safe(item.id)}">Accept manually</button><button class="btn" data-reject-proposal="${safe(item.id)}">Reject</button></div></div>`).join("")}</div>`;
+    <div class="review-queue">${review.slice(0, 20).map(item => `<div class="confidence"><strong>${safe(item.classification.replaceAll("_", " "))} · ${Math.round(Number(item.confidence) * 100)}%</strong><p><a class="timeline-clip-link" href="#alignment-timeline" data-focus-clip="${safe(item.clipId)}">${safe(state.mediaById.get(item.assetId)?.relative_path || item.assetId)}</a></p><small>${safe(item.limitations.join("; ") || "Review evidence before accepting")}</small><div class="link-row"><button class="btn" data-accept-proposal="${safe(item.id)}">Accept manually</button><button class="btn" data-reject-proposal="${safe(item.id)}">Reject</button></div></div>`).join("")}</div>`;
   if ($("#accept-high-confidence")) $("#accept-high-confidence").onclick = () => acceptHighConfidence(proposalSet);
   $$('[data-accept-proposal]').forEach(button => { button.onclick = () => resolveAlignmentProposal(proposalSet, button.dataset.acceptProposal, true); });
   $$('[data-reject-proposal]').forEach(button => { button.onclick = () => resolveAlignmentProposal(proposalSet, button.dataset.rejectProposal, false); });
+}
+
+async function focusClipInTimeline(clipId, proposalSet = null) {
+  const clip = clipById(clipId);
+  if (!clip) return toast("This clip is no longer part of the project");
+  const proposal = proposalSet?.proposals?.find(item => item.clipId === clipId);
+  const alignment = proposal?.proposedAlignment || clipAlignment(clip);
+  const media = state.mediaById.get(clip.assetId);
+  const rate = (1_000_000 + Number(alignment.ratePpm || 0)) / 1_000_000;
+  const startUs = Number(alignment.anchorAlignedUs || 0) - Number(alignment.anchorSourceUs || 0) * rate;
+  const durationUs = Math.max(1, Number(media?.durationUs || 0) * rate);
+  const centerUs = startUs + durationUs / 2;
+  const fullSpanUs = Math.max(1, state.evidenceEndUs - state.evidenceStartUs);
+  const targetSpanUs = Math.min(fullSpanUs, Math.max(10_000_000, durationUs * 4));
+  const targetZoom = fullSpanUs <= targetSpanUs ? 0 : Math.min(100, Math.max(0, 20 * Math.log2(fullSpanUs / targetSpanUs)));
+  state.selectedClipId = clipId;
+  const sourceIndex = state.sources.findIndex(source => source.id === clip.logicalSourceId);
+  if (sourceIndex >= 0) state.selectedSource = sourceIndex;
+  setPlayhead(((centerUs - state.evidenceStartUs) / fullSpanUs) * 100);
+  await changeTimelineZoom(targetZoom, centerUs);
+  renderSourceInspector();
+  requestAnimationFrame(() => {
+    const target = $(`#alignment-tracks [data-timeline-clip="${CSS.escape(clipId)}"]`);
+    target?.classList.add("focused");
+    target?.focus({preventScroll: true});
+    $("#alignment-timeline").scrollIntoView({behavior: "smooth", block: "center"});
+  });
 }
 
 async function acceptHighConfidence(proposalSet) {
@@ -1331,7 +1398,7 @@ async function setAudioDecision(value, offsetUs = null) {
 async function setPlayhead(value) {
   state.playhead = Math.max(0, Math.min(100, Number(value)));
   state.durationUs = activeClockDurationUs();
-  $$(".playhead").forEach(node => { node.style.left = `${state.playhead}%`; });
+  updatePlayheadPositions();
   $(".scrubber").value = state.playhead;
   $("#align-time").textContent = formatUs(currentAlignedUs());
   $("#align-clock").textContent = `EVIDENCE ${formatUs(currentAlignedUs())}`;
@@ -1352,6 +1419,18 @@ async function setPlayhead(value) {
       // A later command refresh supplies authoritative state.
     }
   }, 120);
+}
+
+function updatePlayheadPositions() {
+  $$(".playhead:not(.alignment-playhead)").forEach(node => { node.style.left = `${state.playhead}%`; });
+  const alignedUs = currentAlignedUs();
+  const visibleSpanUs = Math.max(1, state.timelineEndUs - state.timelineStartUs);
+  const position = ((alignedUs - state.timelineStartUs) / visibleSpanUs) * 100;
+  const alignmentPlayhead = $(".alignment-playhead");
+  if (alignmentPlayhead) {
+    alignmentPlayhead.style.left = `${Math.max(0, Math.min(100, position))}%`;
+    alignmentPlayhead.hidden = position < 0 || position > 100;
+  }
 }
 
 function togglePlay() {
@@ -1625,6 +1704,14 @@ async function addFolderAndScan(path) {
 
 function setupEvents() {
   $$('[data-view]').forEach(button => { button.onclick = () => showView(button.dataset.view); });
+  $("#suggestion-list").addEventListener("click", event => {
+    const link = event.composedPath().find(node => node instanceof Element && node.matches?.("[data-focus-clip]"));
+    if (!link) return;
+    event.preventDefault();
+    toast("Locating clip in the evidence timeline…");
+    const proposalSet = state.proposalSets.find(item => item.proposals?.some(proposal => proposal.clipId === link.dataset.focusClip));
+    focusClipInTimeline(link.dataset.focusClip, proposalSet).catch(handleError);
+  });
   $("#scan-form").onsubmit = async event => {
     event.preventDefault();
     try {
@@ -1822,6 +1909,13 @@ function setupEvents() {
   $$('[data-action="rewind"]').forEach(button => { button.onclick = () => setPlayhead(state.playhead - (1_000_000_000 / activeClockDurationUs())); });
   $$('[data-action="forward"]').forEach(button => { button.onclick = () => setPlayhead(state.playhead + (1_000_000_000 / activeClockDurationUs())); });
   $(".scrubber").oninput = event => setPlayhead(Number(event.target.value));
+  $("#timeline-zoom").oninput = event => {
+    clearTimeout(changeTimelineZoom.timer);
+    changeTimelineZoom.timer = setTimeout(() => changeTimelineZoom(Number(event.target.value)).catch(handleError), 80);
+  };
+  $("#timeline-zoom-out").onclick = () => changeTimelineZoom(state.timelineZoom - 10).catch(handleError);
+  $("#timeline-zoom-in").onclick = () => changeTimelineZoom(state.timelineZoom + 10).catch(handleError);
+  $("#timeline-fit").onclick = () => changeTimelineZoom(0, (state.evidenceStartUs + state.evidenceEndUs) / 2).catch(handleError);
   $("#reviewed-check").onchange = updateRenderButton;
   $("#render-video").onclick = renderVideo;
   $("#output-path").oninput = () => {
