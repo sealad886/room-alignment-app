@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import errno
+import copy
 import json
 import signal
 import shutil
@@ -12,7 +13,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from room_alignment.domain import DomainError, digest_json, opaque_id
+from room_alignment.domain import DomainError, alignment_digest, digest_json, opaque_id
 from room_alignment.models import MediaRecord
 from room_alignment.render import (
     CanonicalRenderManager,
@@ -129,6 +130,77 @@ class CanonicalRenderTests(unittest.TestCase):
         self.assertEqual(manifest["manifestCanonicalization"], "room-alignment-canonical-json/v1")
         self.assertEqual(canonical_digest, digest_json(manifest))
         self.assertTrue(manifest["fidelity"]["sourceFilesModified"] is False)
+
+    def test_generated_slate_renders_and_is_disclosed_in_manifest(self):
+        project = copy.deepcopy(self.project)
+        source_id = project["logicalSources"][0]["id"]
+        clip_id = project["clips"][0]["id"]
+        slate_id = "slate-test"
+        project["timelineSections"] = [
+            {"id": "keep-a", "startAlignedUs": 0, "endAlignedUs": 400_000, "mode": "KEEP", "slateText": None},
+            {"id": "slate-gap", "startAlignedUs": 400_000, "endAlignedUs": 600_000, "mode": "SLATE", "slateText": "No recorded footage"},
+            {"id": "keep-b", "startAlignedUs": 600_000, "endAlignedUs": 1_000_000, "mode": "KEEP", "slateText": None},
+        ]
+        project["syntheticSlates"] = [
+            {
+                "id": slate_id,
+                "text": "No recorded footage",
+                "videoGenerated": True,
+                "audioMode": "SILENCE",
+                "provenance": {
+                    "sectionId": "slate-gap",
+                    "startAlignedUs": 400_000,
+                    "endAlignedUs": 600_000,
+                    "decision": "SLATE",
+                },
+            }
+        ]
+        project["videoBlocks"] = [
+            {"id": "video-a", "startUs": 0, "endUs": 400_000, "logicalSourceId": source_id, "pinnedClipId": clip_id, "startAlignedUs": 0, "endAlignedUs": 400_000, "sectionId": "keep-a", "syntheticSlateId": None},
+            {"id": "video-slate", "startUs": 400_000, "endUs": 600_000, "logicalSourceId": None, "pinnedClipId": None, "startAlignedUs": 400_000, "endAlignedUs": 600_000, "sectionId": "slate-gap", "syntheticSlateId": slate_id},
+            {"id": "video-b", "startUs": 600_000, "endUs": 1_000_000, "logicalSourceId": source_id, "pinnedClipId": clip_id, "startAlignedUs": 600_000, "endAlignedUs": 1_000_000, "sectionId": "keep-b", "syntheticSlateId": None},
+        ]
+        project["audioBlocks"] = [
+            {"id": "audio-a", "startUs": 0, "endUs": 400_000, "mode": "FOLLOW_VIDEO", "logicalSourceId": None, "clipId": None, "offsetUs": 0, "ratePpm": 0},
+            {"id": "audio-slate", "startUs": 400_000, "endUs": 600_000, "mode": "SILENCE", "logicalSourceId": None, "clipId": None, "offsetUs": 0, "ratePpm": 0},
+            {"id": "audio-b", "startUs": 600_000, "endUs": 1_000_000, "mode": "FOLLOW_VIDEO", "logicalSourceId": None, "clipId": None, "offsetUs": 0, "ratePpm": 0},
+        ]
+        project["alignmentDigest"] = alignment_digest(project)
+        project["programDraft"] = {
+            "id": "draft-test",
+            "selectionDigest": project["selectionSnapshot"]["digest"],
+            "alignmentDigest": project["alignmentDigest"],
+            "timelineSectionsDigest": digest_json(project["timelineSections"]),
+            "sectionProposalDigest": "proposal-test",
+            "gapMode": "SLATE",
+            "generatedAt": project["updatedAt"],
+            "strategy": "coverage-optimizer-v1",
+            "outputDurationUs": 1_000_000,
+            "sourceChanges": 2,
+        }
+        self.store.save_project(project)
+        plan = build_render_plan(
+            self.store,
+            project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "slate.mp4", "profile": "COMPATIBLE"},
+        )
+        self.assertEqual(plan["status"], "READY", plan["issues"])
+        self.assertTrue(any(item.get("synthetic") for item in plan["compiledProgram"]["videoSlices"]))
+        self.store.attest_review(plan["id"], plan["warningCodes"])
+        manager = CanonicalRenderManager(self.store)
+        started = manager.start(plan["id"])
+        deadline = time.monotonic() + 20
+        job = self.store.job(started["job"]["id"])
+        while time.monotonic() < deadline:
+            job = self.store.job(started["job"]["id"])
+            if job["status"] in {"SUCCEEDED", "FAILED", "CANCELED"}:
+                break
+            time.sleep(0.05)
+        self.assertEqual(job["status"], "SUCCEEDED", job)
+        manifest = json.loads((self.output / "slate.mp4.manifest.json").read_text(encoding="utf-8"))
+        self.assertTrue(manifest["fidelity"]["generatedSlateDisclosed"])
+        self.assertTrue(manifest["fidelity"]["generatedSilenceDisclosed"])
+        self.assertEqual(manifest["composition"]["syntheticSlates"][0]["text"], "No recorded footage")
 
     def test_project_change_invalidates_reviewed_plan(self):
         plan = build_render_plan(

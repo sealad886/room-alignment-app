@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schema", "manifestCanonicalization", "artifact", "project", "renderPlan", "sourceSetDigest", "provenanceResolutions",
-    "sources", "outputTimebase", "videoSlices", "audioSlices", "transforms", "warnings",
+    "selectionSnapshot", "alignment", "composition", "sources", "outputTimebase", "videoSlices", "audioSlices", "transforms", "warnings",
     "toolVersions", "fidelity", "manifestCanonicalContentSha256"
   ],
   "properties": {
@@ -27,8 +27,8 @@
     },
     "project": {
       "type": "object",
-      "required": ["id", "revision", "provenanceRevision"],
-      "properties": {"id": {"type": "string"}, "revision": {"type": "integer"}, "provenanceRevision": {"type": "integer"}}
+      "required": ["id", "revision", "provenanceRevision", "selectionDigest", "alignmentDigest", "timelineSectionsDigest"],
+      "properties": {"id": {"type": "string"}, "revision": {"type": "integer"}, "provenanceRevision": {"type": "integer"}, "selectionDigest": {"type": "string"}, "alignmentDigest": {"type": "string"}, "timelineSectionsDigest": {"type": "string"}}
     },
     "renderPlan": {
       "type": "object",
@@ -37,6 +37,21 @@
     },
     "sourceSetDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "provenanceResolutions": {"type": "array", "items": {"type": "object"}},
+    "selectionSnapshot": {"type": "object"},
+    "alignment": {
+      "type": "object", "additionalProperties": false, "required": ["digest", "clipTransforms"],
+      "properties": {"digest": {"type": "string"}, "clipTransforms": {"type": "array", "items": {"type": "object"}}}
+    },
+    "composition": {
+      "type": "object", "additionalProperties": false,
+      "required": ["timelineSections", "timelineSectionsDigest", "programDraft", "syntheticSlates"],
+      "properties": {
+        "timelineSections": {"type": "array", "items": {"$ref": "./timeline.schema.json#/$defs/TimelineSection"}},
+        "timelineSectionsDigest": {"type": "string"},
+        "programDraft": {"type": ["object", "null"]},
+        "syntheticSlates": {"type": "array", "items": {"type": "object"}}
+      }
+    },
     "sources": {
       "type": "array",
       "items": {
@@ -68,10 +83,10 @@
     "toolVersions": {"type": "object", "required": ["application", "ffmpeg", "ffprobe"], "additionalProperties": {"type": "string"}},
     "fidelity": {
       "type": "object", "additionalProperties": false,
-      "required": ["claim", "sourceFilesModified", "generatedSilenceDisclosed"],
+      "required": ["claim", "sourceFilesModified", "generatedSilenceDisclosed", "generatedSlateDisclosed"],
       "properties": {
         "claim": {"enum": ["compatible-reencode", "lossless-encode-after-processing"]},
-        "sourceFilesModified": {"const": false}, "generatedSilenceDisclosed": {"type": "boolean"}
+        "sourceFilesModified": {"const": false}, "generatedSilenceDisclosed": {"type": "boolean"}, "generatedSlateDisclosed": {"type": "boolean"}
       }
     },
     "manifestCanonicalContentSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
