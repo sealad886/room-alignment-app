@@ -1102,7 +1102,7 @@ function renderPreparation() {
     : "Source identities confirmed";
   $("#analyze-alignment").disabled = !preparation.canAnalyzeAlignment || !preparation.sourceIdentity.ready;
   $("#build-first-cut").disabled = !preparation.canGenerateProgramDraft;
-  $("#composition-actions").classList.toggle("pending", preparation.blockers.length > 0);
+  $("#composition-actions").classList.toggle("pending", preparation.blockers.length > 0 && !preparation.canGenerateProgramDraft);
   $("#build-first-cut").textContent = preparation.legacyProgramTruncation
     ? "Repair truncated program"
     : preparation.hasProgram ? "Rebuild first cut" : "Build first cut";
@@ -1114,7 +1114,7 @@ function renderPreparation() {
       ? "This clip can be used automatically. Its exact timing and source remain recorded in provenance."
       : "This clip remains visible, but it will not be used automatically until its timing is approved.";
   $("#alignment-task-copy").textContent = preparation.blockers.length
-    ? `${preparation.blockers.length} timing ${preparation.blockers.length === 1 ? "decision blocks" : "decisions block"} the first cut. Work through Required clips; other warnings can wait.`
+    ? `${preparation.blockers.length} required timeline ${preparation.blockers.length === 1 ? "decision blocks" : "decisions block"} the first cut. Follow the recommended action; optional warnings can wait.`
     : preparation.canGenerateProgramDraft
       ? "Required timing decisions are complete. Build the first cut now; any remaining warnings are optional review."
       : "Analyze overlaps to compare clip audio. Then approve timestamp estimates only where audio cannot give a stronger answer.";
@@ -1128,6 +1128,8 @@ function renderSuggestions() {
     && item.projectRevision === state.project.revision
   ) || state.proposalSets[0];
   if (!proposalSet) {
+    $("#analyze-alignment").textContent = "Analyze clip overlaps";
+    $("#analyze-alignment").classList.add("primary");
     const unplaced = state.timelineWindow?.unplacedItems || [];
     container.innerHTML = unplaced.length
       ? `<div class="review-queue">${unplaced.slice(0, 12).map(item => `<div class="confidence"><strong>Unplaced clip</strong><p><a class="timeline-clip-link" href="#alignment-timeline" data-focus-clip="${safe(item.clipId)}">${safe(item.relativePath || item.assetId)}</a></p><small>Manual timing evidence required</small></div>`).join("")}</div>`
@@ -1148,27 +1150,47 @@ function renderSuggestions() {
   });
   const blockers = state.alignmentSummary?.blockers || [];
   const warnings = state.alignmentSummary?.warnings || [];
-  const visibleReview = review.slice(0, state.alignmentQueueLimit);
-  const nextAction = blockers.length
-    ? `${blockers.length} required ${blockers.length === 1 ? "decision" : "decisions"}`
-    : highConfidence.length
-      ? `Approve ${highConfidence.length} audio ${highConfidence.length === 1 ? "match" : "matches"}`
-      : timestampOnly.length
-        ? `Review ${timestampOnly.length} timestamp ${timestampOnly.length === 1 ? "estimate" : "estimates"}`
-        : "Ready for the first cut";
+  const blockerClipIds = new Set(blockers.flatMap(item => item.clipIds || []));
+  const compositionBlockers = blockers.filter(item => item.code === "TIMELINE_SECTION_REQUIRED");
+  const blockerReview = review.filter(item => blockerClipIds.has(item.clipId));
+  const orderedReview = [...blockerReview, ...review.filter(item => !blockerClipIds.has(item.clipId))];
+  const visibleReview = orderedReview.slice(0, blockers.length ? 3 : state.alignmentQueueLimit);
+  const nextRequired = blockerReview[0] || (blockers.length ? review[0] : null);
+  const canBuild = blockers.length === 0 && state.preparation?.canGenerateProgramDraft;
+  const canContinue = blockers.length === 0 && state.preparation?.canEnterCut;
+  const recommendedAction = highConfidence.length
+    ? `<button class="btn primary recommended-action" id="accept-high-confidence">Approve all ${highConfidence.length} safe audio ${highConfidence.length === 1 ? "match" : "matches"}<small>Recommended · applies the strongest evidence first</small></button>`
+    : blockers.length && timestampOnly.some(item => blockerClipIds.has(item.clipId))
+      ? `<button class="btn primary recommended-action" id="review-timestamp-priors">Review timestamp estimates needed for coverage<small>Preview their effect before anything is approved</small></button>`
+      : compositionBlockers.length && state.preparation?.canGenerateProgramDraft
+        ? `<button class="btn primary recommended-action" data-build-recommended="true">Resolve uncovered time and rebuild the first cut<small>Recommended · uses your “Time with no recorded footage” choice below</small></button>`
+        : nextRequired
+        ? `<button class="btn primary recommended-action" data-focus-clip="${safe(nextRequired.clipId)}" data-open-review-queue="true">Review the next required clip<small>We’ll locate it and show the decisions you can make</small></button>`
+        : canContinue
+          ? `<button class="btn primary recommended-action" data-continue-recommended="true">Continue to Cut<small>Timing and the first cut are ready</small></button>`
+          : canBuild
+          ? `<button class="btn primary recommended-action" data-build-recommended="true">Build the first cut<small>Required timing decisions are complete</small></button>`
+          : `<p class="help">No automatic next action is available. Select an unresolved clip from the review queue to place it manually.</p>`;
+  const currentStep = highConfidence.length ? 2 : blockers.length ? 3 : 4;
+  const analyzeButton = $("#analyze-alignment");
+  analyzeButton.textContent = "Run overlap analysis again";
+  analyzeButton.classList.remove("primary");
   container.innerHTML = `
-    <div class="alignment-overview" role="list" aria-label="Alignment status">
-      <div class="next-action" role="listitem"><small>Do this next</small><strong>${safe(nextAction)}</strong></div>
-      <div role="listitem"><strong>${highConfidence.length}</strong><small>audio matches ready to approve</small></div>
-      <div role="listitem"><strong>${timestampOnly.length}</strong><small>timestamp estimates to review</small></div>
-      <div role="listitem"><strong>${blockers.length}</strong><small>clips blocking the first cut</small></div>
-    </div>
-    <div class="alignment-actions">${highConfidence.length ? `<button class="btn primary" id="accept-high-confidence">Approve ${highConfidence.length} audio ${highConfidence.length === 1 ? "match" : "matches"}</button>` : ""}${timestampOnly.length ? `<button class="btn primary" id="review-timestamp-priors">Review ${timestampOnly.length} timestamp ${timestampOnly.length === 1 ? "estimate" : "estimates"}</button>` : ""}</div>
-    ${blockers.length ? `<div class="confidence blocked"><strong>Required before the first cut</strong><p>${blockers.map(item => `${formatUs(Number(item.endAlignedUs || 0) - Number(item.startAlignedUs || 0))} needs an approved clip`).join("<br>")}</p></div>` : ""}
-    ${review.length ? `<details class="alignment-review-cases"><summary>Open clip review queue <span>${review.length} clips</span></summary><p class="help">These clips are held out of automatic cutting until you approve or exclude them. Open a clip to locate it on the timeline.</p><div class="review-queue">${visibleReview.map(item => `<div class="confidence"><strong>${item.classification === "TIMESTAMP_ONLY" ? "Timestamp estimate" : item.classification === "CONFLICTING" ? "Evidence disagrees" : "Timing not found"}</strong><p><a class="timeline-clip-link" href="#alignment-timeline" data-focus-clip="${safe(item.clipId)}">${safe(state.mediaById.get(item.assetId)?.relative_path || item.assetId)}</a></p><small>${safe((item.limitations || []).join("; ") || "Open this clip on the timeline before deciding")}</small><div class="link-row"><button class="btn" data-accept-proposal="${safe(item.id)}">Approve timing</button><button class="btn" data-hold-clip="${safe(item.clipId)}">Review later</button><button class="btn" data-exclude-clip="${safe(item.clipId)}">Do not auto-use</button><button class="btn" data-reject-proposal="${safe(item.id)}">Reject result</button></div></div>`).join("")}</div>${review.length > visibleReview.length ? `<button class="btn wide" id="load-more-alignment">Show ${Math.min(50, review.length - visibleReview.length)} more</button>` : ""}</details>` : ""}
+    <ol class="alignment-steps" aria-label="Alignment workflow">
+      <li class="complete"><span>1</span><div><strong>Analyze overlaps</strong><small>Complete</small></div></li>
+      <li class="${currentStep === 2 ? "current" : highConfidence.length ? "upcoming" : "complete"}"><span>2</span><div><strong>Approve safe matches</strong><small>${highConfidence.length ? `${highConfidence.length} waiting` : "Complete"}</small></div></li>
+      <li class="${currentStep === 3 ? "current" : blockers.length ? "upcoming" : "complete"}"><span>3</span><div><strong>Resolve required time</strong><small>${blockers.length ? `${blockers.length} blocking` : "Complete"}</small></div></li>
+      <li class="${currentStep === 4 ? "current" : "upcoming"}"><span>4</span><div><strong>${state.preparation?.hasProgram ? "Continue to Cut" : "Build first cut"}</strong><small>${currentStep === 4 ? "Ready" : "After required time"}</small></div></li>
+    </ol>
+    <div class="recommended-next"><p class="eyebrow">Recommended next action</p>${recommendedAction}</div>
+    <div class="alignment-overview" role="list" aria-label="Alignment status"><div role="listitem"><strong>${highConfidence.length}</strong><small>safe audio matches waiting</small></div><div role="listitem"><strong>${timestampOnly.length}</strong><small>timestamp estimates available</small></div><div role="listitem"><strong>${blockers.length}</strong><small>required timeline decisions</small></div></div>
+    ${blockers.length ? `<div class="confidence blocked"><strong>Required before the first cut</strong><p>${blockers.map(item => item.code === "TIMELINE_SECTION_REQUIRED" ? `${formatUs(Number(item.endAlignedUs || 0) - Number(item.startAlignedUs || 0))} has no recorded footage. Choose how to handle it below.` : `${formatUs(Number(item.endAlignedUs || 0) - Number(item.startAlignedUs || 0))} needs an approved clip`).join("<br>")}</p></div>` : ""}
+    ${review.length ? `<details class="alignment-review-cases" ${blockerReview.length ? "open" : ""}><summary>Optional clip review queue <span>${review.length} clips · ${blockerReview.length} required</span></summary><p class="help">Open this only when the recommended action asks you to review a clip, or when you want to inspect optional evidence. Optional clips do not prevent the first cut.</p><div class="review-queue">${visibleReview.map(item => `<div class="confidence ${blockerClipIds.has(item.clipId) ? "required-review" : ""}"><strong>${blockerClipIds.has(item.clipId) ? "Required · " : "Optional · "}${item.classification === "TIMESTAMP_ONLY" ? "Timestamp estimate" : item.classification === "CONFLICTING" ? "Evidence disagrees" : "Timing not found"}</strong><p><a class="timeline-clip-link" href="#alignment-timeline" data-focus-clip="${safe(item.clipId)}">${safe(state.mediaById.get(item.assetId)?.relative_path || item.assetId)}</a></p><small>${safe((item.limitations || []).join("; ") || "Open this clip on the timeline before deciding")}</small><div class="link-row"><button class="btn primary" data-accept-proposal="${safe(item.id)}">Approve this timing</button><button class="btn" data-hold-clip="${safe(item.clipId)}">Review later</button><button class="btn" data-exclude-clip="${safe(item.clipId)}">Do not use automatically</button><button class="btn" data-reject-proposal="${safe(item.id)}">Reject this result</button></div></div>`).join("")}</div>${orderedReview.length > visibleReview.length ? `<button class="btn wide" id="load-more-alignment">Show ${Math.min(50, orderedReview.length - visibleReview.length)} more</button>` : ""}</details>` : ""}
     <details class="alignment-details"><summary>Technical analysis details</summary><div class="proposal-grid"><div><strong>${summary.audioConfirmed}</strong><small>audio-supported clips</small></div><div><strong>${summary.timestampOnly}</strong><small>timestamp-only clips</small></div><div><strong>${summary.conflicting}</strong><small>conflicts</small></div><div><strong>${summary.unresolved}</strong><small>unresolved</small></div></div><small>${summary.candidatePairs} bounded comparisons · ${summary.confirmedEdges} supported audio links · ±${Math.round(Number(proposalSet.config?.overlapSearchExtensionUs || state.settings.overlapSearchExtensionUs) / 1_000_000)}s search window · ${warnings.length} non-blocking warnings</small></details>`;
   if ($("#accept-high-confidence")) $("#accept-high-confidence").onclick = () => acceptHighConfidence(proposalSet);
   if ($("#review-timestamp-priors")) $("#review-timestamp-priors").onclick = () => acceptTimestampPriors(proposalSet);
+  if ($('[data-build-recommended]')) $('[data-build-recommended]').onclick = () => $("#build-first-cut").click();
+  if ($('[data-continue-recommended]')) $('[data-continue-recommended]').onclick = () => $("#continue-cut").click();
   if ($("#load-more-alignment")) $("#load-more-alignment").onclick = () => { state.alignmentQueueLimit += 50; renderSuggestions(); };
   $$('[data-accept-proposal]').forEach(button => { button.onclick = () => resolveAlignmentProposal(proposalSet, button.dataset.acceptProposal, true); });
   $$('[data-reject-proposal]').forEach(button => { button.onclick = () => resolveAlignmentProposal(proposalSet, button.dataset.rejectProposal, false); });
@@ -1907,6 +1929,10 @@ function setupEvents() {
     const link = event.composedPath().find(node => node instanceof Element && node.matches?.("[data-focus-clip]"));
     if (!link) return;
     event.preventDefault();
+    if (link.dataset.openReviewQueue) {
+      const queue = $(".alignment-review-cases");
+      if (queue) queue.open = true;
+    }
     toast("Locating clip in the evidence timeline…");
     const proposalSet = state.proposalSets.find(item => item.proposals?.some(proposal => proposal.clipId === link.dataset.focusClip));
     focusClipInTimeline(link.dataset.focusClip, proposalSet).catch(handleError);
