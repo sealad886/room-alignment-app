@@ -76,6 +76,26 @@ class AudioAlignmentAlgorithmTests(unittest.TestCase):
         self.assertEqual(adjustments["left"], 0)
         self.assertEqual(adjustments["right"], 2_000_000)
 
+    def test_outlier_pass_converges_consistent_long_chain(self) -> None:
+        edges = [
+            {
+                "leftClipId": "a",
+                "rightClipId": "b",
+                "correctionUs": 2_000_000,
+                "confidence": 0.9,
+            },
+            {
+                "leftClipId": "b",
+                "rightClipId": "c",
+                "correctionUs": 2_000_000,
+                "confidence": 0.9,
+            },
+        ]
+        adjustments, _support = _huber_graph_adjustments(
+            {"a", "b", "c"}, edges, "a", regularize=False
+        )
+        self.assertEqual(adjustments, {"a": 0, "b": 2_000_000, "c": 4_000_000})
+
     def test_envelope_and_gcc_phat_recover_right_clip_correction(self) -> None:
         base = pulse_signal()
         shifted = [0] * 80 + base[:-80]
@@ -413,6 +433,64 @@ class ProgramCompositionTests(unittest.TestCase):
         self.assertTrue(summary["readyForProgramDraft"])
         self.assertIn(
             "REDUNDANT_CONFLICTING_CLIP", {item["code"] for item in summary["warnings"]}
+        )
+
+    def test_redundant_missing_clip_warns_without_hiding_its_interval(self) -> None:
+        project, assets = self.project_with_recorded_gap()
+        assets["b-early"]["missing"] = True
+        summary = alignment_summary(project, assets)
+        self.assertTrue(summary["readyForProgramDraft"])
+        self.assertIn(
+            "REDUNDANT_UNAVAILABLE_CLIP", {item["code"] for item in summary["warnings"]}
+        )
+
+    def test_missing_sole_coverage_blocks_exact_interval(self) -> None:
+        project, assets = self.project_with_recorded_gap()
+        assets["a-late"]["missing"] = True
+        assets["b-late"]["missing"] = True
+        summary = alignment_summary(project, assets)
+        blocker = next(
+            item for item in summary["blockers"] if item["code"] == "SOLE_COVERAGE_UNAVAILABLE"
+        )
+        self.assertFalse(summary["readyForProgramDraft"])
+        self.assertEqual(
+            (blocker["startAlignedUs"], blocker["endAlignedUs"]),
+            (20_000_000, 30_000_000),
+        )
+
+    def test_selected_clip_without_duration_blocks_readiness(self) -> None:
+        project, assets = self.project_with_recorded_gap()
+        assets["b-early"]["durationUs"] = 0
+        assets["b-early"]["duration"] = 0
+        summary = alignment_summary(project, assets)
+        blocker = next(
+            item for item in summary["blockers"] if item["code"] == "DURATION_UNRESOLVED"
+        )
+        self.assertFalse(summary["readyForProgramDraft"])
+        self.assertEqual(
+            blocker["clipIds"],
+            [next(clip["id"] for clip in project["clips"] if clip["assetId"] == "b-early")],
+        )
+
+    def test_unassigned_evidence_between_timeline_sections_blocks_readiness(self) -> None:
+        project, assets = self.project_with_recorded_gap()
+        project["timelineSections"] = [
+            {
+                "id": "early-only",
+                "startAlignedUs": 0,
+                "endAlignedUs": 10_000_000,
+                "mode": "KEEP",
+                "slateText": None,
+            }
+        ]
+        summary = alignment_summary(project, assets)
+        blockers = [
+            item for item in summary["blockers"] if item["code"] == "TIMELINE_SECTION_REQUIRED"
+        ]
+        self.assertFalse(summary["readyForProgramDraft"])
+        self.assertEqual(
+            [(item["startAlignedUs"], item["endAlignedUs"]) for item in blockers],
+            [(20_000_000, 30_000_000)],
         )
 
     def test_sole_coverage_held_clip_blocks_exact_interval(self) -> None:

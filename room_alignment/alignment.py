@@ -609,14 +609,44 @@ def _huber_graph_adjustments(
     edges: list[dict[str, Any]],
     reference_clip_id: str,
     *,
-    regularize: bool = True,
+    regularize: bool = False,
 ) -> tuple[dict[str, int], dict[str, list[dict[str, Any]]]]:
     values = {clip_id: 0.0 for clip_id in clip_ids}
     support: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
     for edge in edges:
         support[edge["leftClipId"]].append(edge)
         support[edge["rightClipId"]].append(edge)
-    for _iteration in range(12):
+
+    # Seed every reachable node from evidence before robust refinement.  A
+    # fixed small Jacobi pass starting from zero converges too slowly for long
+    # chains and can misclassify consistent multi-second edges as outliers.
+    reached = {reference_clip_id}
+    pending = deque([reference_clip_id])
+    while pending:
+        current = pending.popleft()
+        for edge in sorted(
+            support.get(current, []),
+            key=lambda item: (
+                -float(item["confidence"]),
+                str(item["leftClipId"]),
+                str(item["rightClipId"]),
+            ),
+        ):
+            left_id = str(edge["leftClipId"])
+            right_id = str(edge["rightClipId"])
+            neighbor = right_id if current == left_id else left_id
+            if neighbor in reached:
+                continue
+            correction = float(edge["correctionUs"])
+            values[neighbor] = (
+                values[current] + correction
+                if current == left_id
+                else values[current] - correction
+            )
+            reached.add(neighbor)
+            pending.append(neighbor)
+
+    for _iteration in range(64):
         next_values = dict(values)
         for clip_id in values:
             if clip_id == reference_clip_id:
@@ -637,7 +667,14 @@ def _huber_graph_adjustments(
                 next_values[clip_id] = (
                     sum(value * weight for value, weight in observations) / total_weight
                 )
+        max_change = (
+            max(abs(next_values[key] - values[key]) for key in values)
+            if values
+            else 0.0
+        )
         values = next_values
+        if max_change < 0.5:
+            break
     return ({key: round(value) for key, value in values.items()}, dict(support))
 
 
@@ -858,7 +895,9 @@ def analyze_project_alignment(
                 consistent_edges.append(edge)
             else:
                 rejected_outliers += 1
-        solved, solved_support = _huber_graph_adjustments(nodes, consistent_edges, anchor)
+        solved, solved_support = _huber_graph_adjustments(
+            nodes, consistent_edges, anchor, regularize=False
+        )
         adjustments.update(solved)
         for clip_id, clip_support in solved_support.items():
             support[clip_id].extend(clip_support)

@@ -415,9 +415,18 @@ def alignment_digest(project: dict[str, Any]) -> str:
 
 
 def aligned_extent(
-    project: dict[str, Any], assets: dict[str, dict[str, Any]], *, include_provisional: bool = True
+    project: dict[str, Any],
+    assets: dict[str, dict[str, Any]],
+    *,
+    include_provisional: bool = True,
+    include_unavailable: bool = False,
 ) -> dict[str, int]:
-    ranges = _clip_ranges(project, assets, include_provisional=include_provisional)
+    ranges = _clip_ranges(
+        project,
+        assets,
+        include_provisional=include_provisional,
+        include_unavailable=include_unavailable,
+    )
     if not ranges:
         return {"startAlignedUs": 0, "endAlignedUs": 0, "durationUs": 0}
     start_us = min(int(item["startUs"]) for item in ranges)
@@ -481,15 +490,23 @@ def _difference_duration(
 def alignment_summary(
     project: dict[str, Any], assets: dict[str, dict[str, Any]]
 ) -> dict[str, Any]:
-    all_ranges = _clip_ranges(project, assets, include_provisional=True)
+    all_ranges = _clip_ranges(
+        project, assets, include_provisional=True, include_unavailable=True
+    )
     clips_by_id = {str(item["id"]): item for item in project.get("clips", [])}
     accepted_ranges = [
         item
         for item in all_ranges
         if _alignment_state(clips_by_id[str(item["clipId"])]) == "ACCEPTED"
         and _program_eligibility(clips_by_id[str(item["clipId"])]) == "ELIGIBLE"
+        and not assets[str(item["assetId"])].get("missing")
     ]
-    extent = aligned_extent(project, assets, include_provisional=True)
+    extent = aligned_extent(
+        project,
+        assets,
+        include_provisional=True,
+        include_unavailable=True,
+    )
     evidence_intervals = [(int(item["startUs"]), int(item["endUs"])) for item in all_ranges]
     accepted_intervals = [(int(item["startUs"]), int(item["endUs"])) for item in accepted_ranges]
     evidence_coverage_us = _interval_duration(evidence_intervals)
@@ -585,9 +602,10 @@ def alignment_summary(
             and end <= ordered_sections[section_index][1]
             else None
         )
-        if section is None:
+        has_evidence = any(active[category] for category in active)
+        if section is None and not has_evidence:
             continue
-        mode = section[2]
+        mode = section[2] if section is not None else "UNASSIGNED"
         accepted_eligible = sorted(active["accepted_eligible"])
         accepted_held = sorted(active["accepted_held"])
         provisional = sorted(active["provisional"])
@@ -595,7 +613,10 @@ def alignment_summary(
         unavailable = sorted(active["unavailable"])
         blocker_codes: list[str] = []
         warning_codes: list[str] = []
-        if mode == "EXCLUDE":
+        if mode == "UNASSIGNED":
+            readiness = "BLOCKED"
+            blocker_codes.append("TIMELINE_SECTION_REQUIRED")
+        elif mode == "EXCLUDE":
             readiness = "EXCLUDED"
         elif mode == "SLATE":
             readiness = "SYNTHETIC"
@@ -653,9 +674,29 @@ def alignment_summary(
         if sections
         else int(extent["durationUs"])
     )
+    unresolved_duration_clip_ids = sorted(
+        str(clip["id"])
+        for clip in project.get("clips", [])
+        if (
+            not assets.get(str(clip["assetId"]))
+            or _asset_duration_us(assets[str(clip["assetId"])]) <= 0
+        )
+        and _program_eligibility(clip) != "EXCLUDED"
+    )
+    if unresolved_duration_clip_ids:
+        blockers.append(
+            {
+                "code": "DURATION_UNRESOLVED",
+                "clipIds": unresolved_duration_clip_ids,
+                "blocking": True,
+                "remediationActions": ["RESCAN", "EXCLUDE_CLIP"],
+            }
+        )
     ready = bool(accepted_ranges) and not blockers
     unresolved_sole_coverage_us = _interval_duration(
-        (int(item["startAlignedUs"]), int(item["endAlignedUs"])) for item in blockers
+        (int(item["startAlignedUs"]), int(item["endAlignedUs"]))
+        for item in blockers
+        if "startAlignedUs" in item and "endAlignedUs" in item
     )
     return {
         "projectId": project["id"],
@@ -2138,11 +2179,12 @@ def _clip_ranges(
     *,
     include_provisional: bool = False,
     eligible_only: bool = False,
+    include_unavailable: bool = False,
 ) -> list[dict[str, Any]]:
     ranges: list[dict[str, Any]] = []
     for clip in project.get("clips", []):
         asset = assets.get(clip["assetId"])
-        if not asset or asset.get("missing"):
+        if not asset or (asset.get("missing") and not include_unavailable):
             continue
         state = clip.get("alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED")
         if state == "UNRESOLVED" or (not include_provisional and state != "ACCEPTED"):
