@@ -35,6 +35,8 @@ jobs:
           enable-cache: false
       - name: Validate release tag and version
         run: python scripts/check_release_version.py
+      - name: Install required media tools
+        run: brew install ffmpeg
       - name: Run source checks
         run: |
           python -m unittest discover -s tests -p 'test_*.py' -v
@@ -44,8 +46,6 @@ jobs:
           node --check web/app.js
       - name: Build wheel and source archive
         run: uv build --out-dir dist
-      - name: Install required media tools
-        run: brew install ffmpeg
       - name: Verify clean wheel install and runtime
         shell: bash
         run: |
