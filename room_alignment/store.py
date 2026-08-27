@@ -498,6 +498,7 @@ class Store:
                 "SELECT id,revision,document_json,updated_at FROM projects"
             )
             self._backfill_project_components(db)
+            self._stale_legacy_alignment_proposals(db)
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             db.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version,applied_at,details_json) VALUES(?,?,?)",
@@ -506,6 +507,25 @@ class Store:
         self.interrupt_orphaned_jobs()
         self.compact_events()
         self.prune_cache()
+
+    @staticmethod
+    def _stale_legacy_alignment_proposals(db: sqlite3.Connection) -> None:
+        rows = list(
+            db.execute(
+                "SELECT id,set_json FROM alignment_proposal_sets "
+                "WHERE algorithm='bounded-audio-evidence-graph' AND algorithm_version!='3' "
+                "AND status IN ('PENDING','PARTIALLY_RESOLVED')"
+            )
+        )
+        for row in rows:
+            value = json.loads(row["set_json"])
+            value["status"] = "STALE"
+            value["invalidationReason"] = "Alignment solver version changed"
+            value["updatedAt"] = now_iso()
+            db.execute(
+                "UPDATE alignment_proposal_sets SET status='STALE',set_json=?,updated_at=? WHERE id=?",
+                (json.dumps(value), value["updatedAt"], row["id"]),
+            )
 
     def application_settings(self) -> dict[str, Any]:
         with self.connect() as db:
