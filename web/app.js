@@ -11,6 +11,8 @@ const state = {
     overlapSearchExtensionUs: 30_000_000,
     textScalePercent: 100,
     colorScheme: "DARKROOM",
+    renderVideoCodec: "H264_VIDEOTOOLBOX",
+    renderResolution: "FULL_HD_1080P",
   },
   library: null,
   media: [],
@@ -101,6 +103,8 @@ function populateSettingsForm(settings = state.settings) {
   $("#overlap-search-seconds").value = Math.round(Number(settings.overlapSearchExtensionUs) / 1_000_000);
   $("#text-scale").value = String(settings.textScalePercent);
   $("#color-scheme").value = settings.colorScheme;
+  $("#render-video-codec").value = settings.renderVideoCodec;
+  $("#render-resolution").value = settings.renderResolution;
 }
 
 function previewSettingsForm() {
@@ -126,6 +130,8 @@ async function saveSettings(event) {
       overlapSearchExtensionUs: Math.round(Number($("#overlap-search-seconds").value) * 1_000_000),
       textScalePercent: Number($("#text-scale").value),
       colorScheme: $("#color-scheme").value,
+      renderVideoCodec: $("#render-video-codec").value,
+      renderResolution: $("#render-resolution").value,
     });
     applyAppearanceSettings();
     $("#settings-dialog").close();
@@ -1598,6 +1604,8 @@ async function prepareReview({provisionGrant = false} = {}) {
     projectId: state.project.id,
     rawPath: $("#output-path").value.trim(),
     profile: $("#lossless-check").checked ? "ARCHIVAL_LOSSLESS" : "COMPATIBLE",
+    videoCodec: state.settings.renderVideoCodec,
+    resolution: state.settings.renderResolution,
   };
   $("#preflight-heading").textContent = "Building immutable render plan";
   $("#preflight-status").innerHTML = "<strong>Hashing selected sources</strong><p>Review will bind exact source bytes, decisions, transformations, destination, and warnings.</p>";
@@ -1618,7 +1626,9 @@ async function performReviewPreparation(request) {
     if (separator <= 0 || separator === request.rawPath.length - 1) throw new Error("Output must be an absolute file path");
     const directory = request.rawPath.slice(0, separator) || "/";
     const filename = request.rawPath.slice(separator + 1);
-    const suffix = request.profile === "ARCHIVAL_LOSSLESS" ? ".mkv" : ".mp4";
+    const suffix = request.profile === "ARCHIVAL_LOSSLESS"
+      ? ".mkv"
+      : request.videoCodec === "PRORES_VIDEOTOOLBOX" ? ".mov" : ".mp4";
     if (!filename.toLowerCase().endsWith(suffix)) throw new Error(`${request.profile} output filename must end with ${suffix}`);
     let grant = state.outputGrantByDirectory.get(directory);
     if (!grant || grant.revoked) {
@@ -1631,7 +1641,7 @@ async function performReviewPreparation(request) {
     if (request.version !== state.reviewPreparationVersion) return;
     const plan = await client.createRenderPlan(
       {projectId: request.projectId},
-      {outputGrantId: grant.id, filename, profile: request.profile},
+      {outputGrantId: grant.id, filename, profile: request.profile, videoCodec: request.videoCodec, resolution: request.resolution},
     );
     if (request.version !== state.reviewPreparationVersion) return;
     state.renderPlan = plan;
@@ -1656,6 +1666,8 @@ function renderReviewPlan() {
     ["Compiled audio slices", plan.compiledProgram.audioSlices.length],
     ["Source identities", plan.sources.length],
     ["Profile", plan.profile],
+    ["Reusable program", (plan.programDigest || plan.planDigest).slice(0, 16) + "…"],
+    ["Default output", `${safe(plan.renderVideoCodec)} · ${safe(plan.renderResolution)}`],
     ["Blocking issues", blocking.length],
   ].map(([label, value]) => `<div class="summary-row"><span>${safe(label)}</span><strong>${safe(value)}</strong></div>`).join("");
   $("#preflight-status").innerHTML = plan.status === "READY"
@@ -1678,7 +1690,26 @@ async function renderVideo() {
     if (preparationVersion !== state.reviewPreparationVersion || state.renderPlan?.id !== plan.id) {
       throw new Error("Output settings changed while review was being recorded; review the current plan again");
     }
-    const result = await client.startRender({planId: plan.id}, {});
+    const rawPath = $("#output-path").value.trim();
+    const separator = rawPath.lastIndexOf("/");
+    if (separator <= 0 || separator === rawPath.length - 1) throw new Error("Output must be an absolute file path");
+    const directory = rawPath.slice(0, separator) || "/";
+    const filename = rawPath.slice(separator + 1);
+    const expectedSuffix = state.settings.renderVideoCodec === "PRORES_VIDEOTOOLBOX" ? ".mov" : ".mp4";
+    if (!filename.toLowerCase().endsWith(expectedSuffix)) {
+      throw new Error(`${state.settings.renderVideoCodec} output filename must end with ${expectedSuffix}`);
+    }
+    let grant = state.outputGrantByDirectory.get(directory);
+    if (!grant || grant.revoked) {
+      grant = await client.createGrant({}, {path: directory, role: "WRITE_OUTPUT"});
+      state.outputGrantByDirectory.set(directory, grant);
+    }
+    const result = await client.startRender({planId: plan.id}, {
+      outputGrantId: grant.id,
+      filename,
+      videoCodec: state.settings.renderVideoCodec,
+      resolution: state.settings.renderResolution,
+    });
     state.renderJob = result.job;
     state.artifact = result.artifact;
     const panel = $("#render-progress");
@@ -2077,15 +2108,18 @@ function setupEvents() {
   $("#reviewed-check").onchange = updateRenderButton;
   $("#render-video").onclick = renderVideo;
   $("#output-path").oninput = () => {
+    if (state.renderPlan) {
+      $("#preflight-heading").textContent = "Reusable program ready";
+      $("#preflight-status").innerHTML = "<strong>Output settings are mutable</strong><p>The reviewed cut and source hashes will be reused for this output.</p>";
+      return;
+    }
     invalidateReviewPreparation();
-    $("#preflight-heading").textContent = "Output settings changed";
-    $("#preflight-status").innerHTML = "<strong>Preparing a new immutable plan</strong><p>The prior plan can no longer authorize rendering.</p>";
     clearTimeout(prepareReview.inputTimer);
     prepareReview.inputTimer = setTimeout(() => { if (state.view === "review") prepareReview(); }, 350);
   };
   $("#output-path").onblur = () => {
     clearTimeout(prepareReview.inputTimer);
-    if (state.view === "review") prepareReview({provisionGrant: true});
+    if (state.view === "review" && !state.renderPlan) prepareReview({provisionGrant: true});
   };
   $("#lossless-check").onchange = () => { if (state.view === "review") prepareReview(); };
   $("#download-manifest").onclick = async () => {

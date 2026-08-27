@@ -22,6 +22,7 @@ from room_alignment.render import (
     build_render_plan,
     build_v1_ffmpeg_command,
     build_v1_manifest,
+    configure_render_execution,
 )
 from room_alignment.scanner import probe, quick_fingerprint
 from room_alignment.store import Store
@@ -185,6 +186,40 @@ class CanonicalRenderTests(unittest.TestCase):
         self.assertEqual(command[4:6], ["-filter_complex_threads", "1"])
         self.assertIn(str(second_path), command)
         self.assertNotIn(str(self.media_path), command)
+
+    def test_reviewed_program_can_bind_multiple_hardware_output_executions(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "default.mp4"},
+        )
+        program_digest = plan["programDigest"]
+        hevc = configure_render_execution(
+            self.store,
+            plan,
+            {
+                "outputGrantId": self.output_grant_id,
+                "filename": "delivery-720.mp4",
+                "videoCodec": "HEVC_VIDEOTOOLBOX",
+                "resolution": "HD_720P",
+            },
+        )
+        prores = configure_render_execution(
+            self.store,
+            plan,
+            {
+                "outputGrantId": self.output_grant_id,
+                "filename": "master.mov",
+                "videoCodec": "PRORES_VIDEOTOOLBOX",
+                "resolution": "FULL_HD_1080P",
+            },
+        )
+        self.assertEqual(hevc["programDigest"], program_digest)
+        self.assertEqual(prores["programDigest"], program_digest)
+        self.assertNotEqual(hevc["executionDigest"], prores["executionDigest"])
+        self.assertEqual((hevc["normalization"]["width"], hevc["normalization"]["height"]), (1280, 720))
+        self.assertIn("hevc_videotoolbox", build_v1_ffmpeg_command(self.store, hevc, self.output / "hevc.mp4"))
+        self.assertIn("prores_videotoolbox", build_v1_ffmpeg_command(self.store, prores, self.output / "prores.mov"))
 
     def test_generated_slate_renders_and_is_disclosed_in_manifest(self):
         project = copy.deepcopy(self.project)
