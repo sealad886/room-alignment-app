@@ -91,6 +91,7 @@ function toast(message) {
 function applyAppearanceSettings(settings = state.settings) {
   const scale = Math.max(85, Math.min(140, Number(settings.textScalePercent || 100))) / 100;
   document.documentElement.dataset.theme = settings.colorScheme || "DARKROOM";
+  document.documentElement.dataset.textSize = scale > 1.1 ? "LARGE" : "STANDARD";
   document.documentElement.style.setProperty("--text-scale", String(scale));
   document.documentElement.style.setProperty("--inverse-text-scale", String(1 / scale));
   document.querySelector('meta[name="color-scheme"]')?.setAttribute(
@@ -1073,10 +1074,10 @@ function renderSourceInspector() {
   $("#sync-offset").value = Math.round(Number(alignment.anchorAlignedUs || 0) / 1000);
   $("#sync-rate").value = Number(alignment.ratePpm || 0);
   $("#confidence-label").textContent = clip?.alignmentState === "ACCEPTED"
-    ? `Accepted timing · ${Math.round(Number(clip.alignmentConfidence || 0) * 100)}% evidence confidence`
+    ? "Timing approved for the first cut"
     : clip?.alignmentState === "PROVISIONAL"
-      ? "Provisional timestamp placement · review required"
-      : "Timing unresolved · manual evidence required";
+      ? "Timestamp estimate needs review"
+      : "Timing needs a manual decision";
   $("#provenance-panel").innerHTML = provenanceMarkup(media) + (media ? `<form id="provenance-correction"><p class="eyebrow">Revisioned correction</p><label class="field"><span>Field</span><input id="resolution-field" required maxlength="100" placeholder="capturedAt"></label><label class="field"><span>Resolved value</span><input id="resolution-value" required maxlength="500"></label><label class="field"><span>Rationale (optional)</span><input id="resolution-rationale" maxlength="500"></label><button class="btn wide" type="submit">Record correction</button></form>` : "");
   if ($("#provenance-correction")) $("#provenance-correction").onsubmit = event => recordProvenanceCorrection(event, media);
 }
@@ -1084,8 +1085,9 @@ function renderSourceInspector() {
 function renderPreparation() {
   const preparation = state.preparation;
   if (!preparation) return;
+  const source = state.sources[state.selectedSource];
+  const clip = selectedAlignmentClip(source);
   const alignment = preparation.alignment;
-  const counts = alignment.confidenceCounts;
   const evidenceDuration = alignment.evidenceSpan.durationUs;
   $("#event-title").textContent = state.project.name;
   $("#preparation-summary").innerHTML = `
@@ -1100,14 +1102,22 @@ function renderPreparation() {
     : "Source identities confirmed";
   $("#analyze-alignment").disabled = !preparation.canAnalyzeAlignment || !preparation.sourceIdentity.ready;
   $("#build-first-cut").disabled = !preparation.canGenerateProgramDraft;
+  $("#composition-actions").classList.toggle("pending", preparation.blockers.length > 0);
   $("#build-first-cut").textContent = preparation.legacyProgramTruncation
     ? "Repair truncated program"
     : preparation.hasProgram ? "Rebuild first cut" : "Build first cut";
   $("#continue-cut").disabled = !preparation.canEnterCut;
   const unplaced = state.timelineWindow?.unplacedCount || 0;
   $("#confidence-label").closest(".confidence").querySelector("p").textContent = unplaced
-    ? `${unplaced} clip${unplaced === 1 ? " is" : "s are"} waiting in the unplaced review queue.`
-    : `${counts.accepted} accepted · ${counts.provisional} provisional · ${counts.reviewRequired} conflicting.`;
+    ? `${unplaced} clip${unplaced === 1 ? " has" : "s have"} no usable time yet. Use the workbench to locate and place ${unplaced === 1 ? "it" : "them"}.`
+    : clip?.alignmentState === "ACCEPTED"
+      ? "This clip can be used automatically. Its exact timing and source remain recorded in provenance."
+      : "This clip remains visible, but it will not be used automatically until its timing is approved.";
+  $("#alignment-task-copy").textContent = preparation.blockers.length
+    ? `${preparation.blockers.length} timing ${preparation.blockers.length === 1 ? "decision blocks" : "decisions block"} the first cut. Work through Required clips; other warnings can wait.`
+    : preparation.canGenerateProgramDraft
+      ? "Required timing decisions are complete. Build the first cut now; any remaining warnings are optional review."
+      : "Analyze overlaps to compare clip audio. Then approve timestamp estimates only where audio cannot give a stronger answer.";
   syncWorkflowAvailability();
 }
 
@@ -1121,7 +1131,7 @@ function renderSuggestions() {
     const unplaced = state.timelineWindow?.unplacedItems || [];
     container.innerHTML = unplaced.length
       ? `<div class="review-queue">${unplaced.slice(0, 12).map(item => `<div class="confidence"><strong>Unplaced clip</strong><p><a class="timeline-clip-link" href="#alignment-timeline" data-focus-clip="${safe(item.clipId)}">${safe(item.relativePath || item.assetId)}</a></p><small>Manual timing evidence required</small></div>`).join("")}</div>`
-      : `<p class="muted">Analyze overlaps to compare bounded cross-source audio evidence across a ±${Math.round(Number(state.settings.overlapSearchExtensionUs) / 1_000_000)} second timestamp window. Timestamp placement stays provisional.</p>`;
+      : `<p class="muted"><strong>No overlap analysis yet.</strong><br>Start the analysis to check whether sound shared between cameras can improve their timestamp estimates. Nothing is changed until you approve a result.</p>`;
     return;
   }
   const summary = proposalSet.summary;
@@ -1136,30 +1146,27 @@ function renderSuggestions() {
     const backendAllowsTimestampAcceptance = item.timestampPriorAcceptable ?? item.classification === "TIMESTAMP_ONLY";
     return backendAllowsTimestampAcceptance && !clipAlreadyAccepted;
   });
-  const conflicting = review.filter(item => item.classification === "CONFLICTING");
-  const unresolved = review.filter(item => item.classification === "UNRESOLVED");
   const blockers = state.alignmentSummary?.blockers || [];
   const warnings = state.alignmentSummary?.warnings || [];
   const visibleReview = review.slice(0, state.alignmentQueueLimit);
+  const nextAction = blockers.length
+    ? `${blockers.length} required ${blockers.length === 1 ? "decision" : "decisions"}`
+    : highConfidence.length
+      ? `Approve ${highConfidence.length} audio ${highConfidence.length === 1 ? "match" : "matches"}`
+      : timestampOnly.length
+        ? `Review ${timestampOnly.length} timestamp ${timestampOnly.length === 1 ? "estimate" : "estimates"}`
+        : "Ready for the first cut";
   container.innerHTML = `
-    <div class="confidence"><strong>${safe(proposalSet.status)} · audio evidence graph</strong><div class="proposal-grid">
-      <div><strong>${summary.audioConfirmed}</strong><small>audio-confirmed</small></div>
-      <div><strong>${summary.timestampOnly}</strong><small>timestamp-only</small></div>
-      <div><strong>${summary.conflicting}</strong><small>conflicting</small></div>
-      <div><strong>${summary.unresolved}</strong><small>unresolved</small></div>
-    </div><small>${summary.candidatePairs} bounded comparisons · ${summary.confirmedEdges} supported edges · ±${Math.round(Number(proposalSet.config?.overlapSearchExtensionUs || state.settings.overlapSearchExtensionUs) / 1_000_000)}s timestamp search · visual matching not used</small></div>
-    <div class="alignment-queue-tabs" role="list" aria-label="Alignment review queues">
-      <span role="listitem"><strong>${highConfidence.length}</strong> audio-confirmed</span>
-      <span role="listitem"><strong>${timestampOnly.length}</strong> timestamp-only</span>
-      <span role="listitem" class="${conflicting.length ? "blocked" : ""}"><strong>${conflicting.length}</strong> conflicting</span>
-      <span role="listitem" class="${blockers.length ? "blocked" : ""}"><strong>${blockers.length}</strong> required</span>
-      <span role="listitem"><strong>${warnings.length}</strong> redundant warnings</span>
+    <div class="alignment-overview" role="list" aria-label="Alignment status">
+      <div class="next-action" role="listitem"><small>Do this next</small><strong>${safe(nextAction)}</strong></div>
+      <div role="listitem"><strong>${highConfidence.length}</strong><small>audio matches ready to approve</small></div>
+      <div role="listitem"><strong>${timestampOnly.length}</strong><small>timestamp estimates to review</small></div>
+      <div role="listitem"><strong>${blockers.length}</strong><small>clips blocking the first cut</small></div>
     </div>
-    ${highConfidence.length ? `<button class="btn primary wide" id="accept-high-confidence">Accept ${highConfidence.length} high-confidence result${highConfidence.length === 1 ? "" : "s"}</button>` : ""}
-    ${timestampOnly.length ? `<button class="btn primary wide" id="review-timestamp-priors">Review and accept ${timestampOnly.length} timestamp placement${timestampOnly.length === 1 ? "" : "s"}</button>` : ""}
-    ${blockers.length ? `<div class="confidence blocked"><strong>Required before first cut</strong><p>${blockers.map(item => `${safe(item.code.replaceAll("_", " "))} · ${formatUs(Number(item.endAlignedUs || 0) - Number(item.startAlignedUs || 0))}`).join("<br>")}</p></div>` : ""}
-    <div class="review-queue">${visibleReview.map(item => `<div class="confidence"><strong>${safe(item.classification.replaceAll("_", " "))} · ${Math.round(Number(item.confidence) * 100)}%</strong><p><a class="timeline-clip-link" href="#alignment-timeline" data-focus-clip="${safe(item.clipId)}">${safe(state.mediaById.get(item.assetId)?.relative_path || item.assetId)}</a></p><small>${safe((item.limitations || []).join("; ") || "Review evidence before accepting")}</small><div class="link-row"><button class="btn" data-accept-proposal="${safe(item.id)}">Accept manually</button><button class="btn" data-hold-clip="${safe(item.clipId)}">Hold</button><button class="btn" data-exclude-clip="${safe(item.clipId)}">Exclude from first cut</button><button class="btn" data-reject-proposal="${safe(item.id)}">Reject suggestion</button></div></div>`).join("")}</div>
-    ${review.length > visibleReview.length ? `<button class="btn wide" id="load-more-alignment">Show ${Math.min(50, review.length - visibleReview.length)} more</button>` : ""}`;
+    <div class="alignment-actions">${highConfidence.length ? `<button class="btn primary" id="accept-high-confidence">Approve ${highConfidence.length} audio ${highConfidence.length === 1 ? "match" : "matches"}</button>` : ""}${timestampOnly.length ? `<button class="btn primary" id="review-timestamp-priors">Review ${timestampOnly.length} timestamp ${timestampOnly.length === 1 ? "estimate" : "estimates"}</button>` : ""}</div>
+    ${blockers.length ? `<div class="confidence blocked"><strong>Required before the first cut</strong><p>${blockers.map(item => `${formatUs(Number(item.endAlignedUs || 0) - Number(item.startAlignedUs || 0))} needs an approved clip`).join("<br>")}</p></div>` : ""}
+    ${review.length ? `<details class="alignment-review-cases"><summary>Open clip review queue <span>${review.length} clips</span></summary><p class="help">These clips are held out of automatic cutting until you approve or exclude them. Open a clip to locate it on the timeline.</p><div class="review-queue">${visibleReview.map(item => `<div class="confidence"><strong>${item.classification === "TIMESTAMP_ONLY" ? "Timestamp estimate" : item.classification === "CONFLICTING" ? "Evidence disagrees" : "Timing not found"}</strong><p><a class="timeline-clip-link" href="#alignment-timeline" data-focus-clip="${safe(item.clipId)}">${safe(state.mediaById.get(item.assetId)?.relative_path || item.assetId)}</a></p><small>${safe((item.limitations || []).join("; ") || "Open this clip on the timeline before deciding")}</small><div class="link-row"><button class="btn" data-accept-proposal="${safe(item.id)}">Approve timing</button><button class="btn" data-hold-clip="${safe(item.clipId)}">Review later</button><button class="btn" data-exclude-clip="${safe(item.clipId)}">Do not auto-use</button><button class="btn" data-reject-proposal="${safe(item.id)}">Reject result</button></div></div>`).join("")}</div>${review.length > visibleReview.length ? `<button class="btn wide" id="load-more-alignment">Show ${Math.min(50, review.length - visibleReview.length)} more</button>` : ""}</details>` : ""}
+    <details class="alignment-details"><summary>Technical analysis details</summary><div class="proposal-grid"><div><strong>${summary.audioConfirmed}</strong><small>audio-supported clips</small></div><div><strong>${summary.timestampOnly}</strong><small>timestamp-only clips</small></div><div><strong>${summary.conflicting}</strong><small>conflicts</small></div><div><strong>${summary.unresolved}</strong><small>unresolved</small></div></div><small>${summary.candidatePairs} bounded comparisons · ${summary.confirmedEdges} supported audio links · ±${Math.round(Number(proposalSet.config?.overlapSearchExtensionUs || state.settings.overlapSearchExtensionUs) / 1_000_000)}s search window · ${warnings.length} non-blocking warnings</small></details>`;
   if ($("#accept-high-confidence")) $("#accept-high-confidence").onclick = () => acceptHighConfidence(proposalSet);
   if ($("#review-timestamp-priors")) $("#review-timestamp-priors").onclick = () => acceptTimestampPriors(proposalSet);
   if ($("#load-more-alignment")) $("#load-more-alignment").onclick = () => { state.alignmentQueueLimit += 50; renderSuggestions(); };
