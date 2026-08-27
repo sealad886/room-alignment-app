@@ -237,7 +237,7 @@
     "AlignmentProposal": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "clipId", "assetId", "classification", "proposedAlignment", "confidence", "automaticallyAcceptable", "requiresDriftConfirmation", "evidence", "limitations", "inputFingerprintDigest"],
+      "required": ["id", "clipId", "assetId", "classification", "proposedAlignment", "confidence", "automaticallyAcceptable", "timestampPriorAcceptable", "requiresDriftConfirmation", "evidence", "limitations", "inputFingerprintDigest"],
       "properties": {
         "id": {"$ref": "#/$defs/Id"},
         "clipId": {"$ref": "#/$defs/Id"},
@@ -255,6 +255,7 @@
         "rejectedOutlierCount": {"type": "integer", "minimum": 0},
         "timestampUncertaintyUs": {"type": ["integer", "null"], "minimum": 0},
         "automaticallyAcceptable": {"type": "boolean"},
+        "timestampPriorAcceptable": {"type": "boolean"},
         "requiresDriftConfirmation": {"type": "boolean"},
         "evidence": {"type": "array", "items": {"$ref": "#/$defs/AlignmentEvidence"}},
         "limitations": {"type": "array", "items": {"type": "string"}},

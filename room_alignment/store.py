@@ -2707,7 +2707,12 @@ class Store:
             and (
                 bool(item.get("automaticallyAcceptable"))
                 if mode == "HIGH_CONFIDENCE"
-                else item.get("classification") == "TIMESTAMP_ONLY"
+                else bool(
+                    item.get(
+                        "timestampPriorAcceptable",
+                        item.get("classification") == "TIMESTAMP_ONLY",
+                    )
+                )
                 and not item.get("requiresDriftConfirmation")
             )
         ]
@@ -3321,6 +3326,8 @@ class Store:
                 item["clipId"] for item in selected if item.get("requiresDriftConfirmation")
             ],
             "resultingReadiness": after["readyForProgramDraft"],
+            "remainingBlockerCount": len(after.get("blockers", [])),
+            "remainingBlockedUs": after["coverage"]["unresolvedSoleCoverageUs"],
             "warnings": after.get("warnings", []),
             "proposalIds": [item["id"] for item in selected],
             "createdAt": created_at,

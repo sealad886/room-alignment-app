@@ -253,6 +253,8 @@ class AudioAlignmentAlgorithmTests(unittest.TestCase):
         self.assertTrue(proposals["reference-right"]["automaticallyAcceptable"])
         self.assertFalse(proposals["later-left"]["automaticallyAcceptable"])
         self.assertFalse(proposals["later-right"]["automaticallyAcceptable"])
+        self.assertTrue(proposals["later-left"]["timestampPriorAcceptable"])
+        self.assertTrue(proposals["later-right"]["timestampPriorAcceptable"])
         self.assertIn(
             "unconfirmed timestamp anchor",
             " ".join(proposals["later-left"]["limitations"]),
@@ -750,6 +752,8 @@ class ProposalSetStoreTests(unittest.TestCase):
             "scope": {"kind": "ALIGNED_RANGE", "startAlignedUs": 14_000, "endAlignedUs": 16_000},
         })
         self.assertEqual(preview["mode"], "TIMESTAMP_PRIOR")
+        self.assertEqual(preview["remainingBlockerCount"], 0)
+        self.assertGreaterEqual(preview["remainingBlockedUs"], 0)
         result = self.store.apply_project_command(project["id"], {
             "commandId": "accept-timestamp", "expectedRevision": project["revision"],
             "commandType": "AcceptAlignmentProposalSet", "payload": {
@@ -781,6 +785,32 @@ class ProposalSetStoreTests(unittest.TestCase):
                 {"kind": "ALIGNED_RANGE", "startAlignedUs": "soon", "endAlignedUs": 5},
                 set(),
             )
+
+    def test_timestamp_acceptance_includes_disconnected_audio_component(self) -> None:
+        proposal_set = {
+            "proposals": [
+                {
+                    "id": "audio-relative",
+                    "clipId": "clip-audio",
+                    "classification": "AUDIO_CONFIRMED",
+                    "automaticallyAcceptable": False,
+                    "timestampPriorAcceptable": True,
+                    "requiresDriftConfirmation": False,
+                },
+                {
+                    "id": "conflict",
+                    "clipId": "clip-conflict",
+                    "classification": "CONFLICTING",
+                    "automaticallyAcceptable": False,
+                    "timestampPriorAcceptable": False,
+                    "requiresDriftConfirmation": False,
+                },
+            ]
+        }
+        selected = self.store._select_alignment_proposals(
+            proposal_set, "TIMESTAMP_PRIOR", {"kind": "PROJECT"}, set()
+        )
+        self.assertEqual([item["id"] for item in selected], ["audio-relative"])
 
 
 if __name__ == "__main__":

@@ -1023,6 +1023,18 @@ def analyze_project_alignment(
                 "Component placement relies on an unconfirmed timestamp anchor"
             )
         absolute_confidence = 1.0 if manual else min(0.65, float(clip.get("alignmentConfidence", 0.55)))
+        # A disconnected audio component can be strongly synchronized internally
+        # while its absolute project-clock placement still relies on the camera
+        # timestamp.  Keep that richer AUDIO_CONFIRMED classification, but make
+        # the timestamp-anchored placement available to the explicit preview and
+        # confirmation workflow.  Existing accepted/manual transforms are never
+        # candidates for this bulk operation.
+        timestamp_prior_acceptable = (
+            current_state != "ACCEPTED"
+            and classification in {"AUDIO_CONFIRMED", "TIMESTAMP_ONLY"}
+            and not bool(adjusted.rate_ppm)
+            and not automatic
+        )
         proposals.append(
             {
                 "id": opaque_id("alignment_proposal"),
@@ -1043,6 +1055,7 @@ def analyze_project_alignment(
                 "rejectedOutlierCount": component["rejectedOutlierCount"] if component else 0,
                 "timestampUncertaintyUs": overlap_search_extension_us,
                 "automaticallyAcceptable": automatic,
+                "timestampPriorAcceptable": timestamp_prior_acceptable,
                 "requiresDriftConfirmation": bool(adjusted.rate_ppm),
                 "evidence": evidence_items,
                 "limitations": limitations,
