@@ -260,6 +260,7 @@ class ProgramCompositionTests(unittest.TestCase):
         )
         for clip in project["clips"]:
             clip["alignmentState"] = "ACCEPTED"
+            clip["programEligibility"] = "ELIGIBLE"
             clip["alignmentConfidence"] = 0.95 if clip["assetId"].startswith("a-") else 0.8
             clip["alignmentEvidence"] = ["audio-correlation"]
         return project, {item["id"]: item for item in assets}
@@ -348,6 +349,7 @@ class ProgramCompositionTests(unittest.TestCase):
         project, assets = self.project_with_recorded_gap()
         for clip in project["clips"]:
             clip["alignmentState"] = "ACCEPTED"
+            clip["programEligibility"] = "ELIGIBLE"
         proposal = timeline_section_proposal(project, assets, "EXCLUDE")
         draft = generate_program_draft(
             project,
@@ -364,6 +366,48 @@ class ProgramCompositionTests(unittest.TestCase):
         self.assertLess(preparation["programDurationUs"], preparation["alignment"]["evidenceSpan"]["durationUs"])
         self.assertFalse(preparation["legacyProgramTruncation"])
         self.assertTrue(preparation["canEnterCut"])
+
+    def test_redundant_conflict_warns_while_accepted_eligible_coverage_is_ready(self) -> None:
+        project, assets = self.project_with_recorded_gap()
+        for clip in project["clips"]:
+            clip["alignmentState"] = "ACCEPTED"
+            clip["programEligibility"] = "ELIGIBLE"
+        conflicting = next(clip for clip in project["clips"] if clip["assetId"] == "b-early")
+        conflicting["alignmentState"] = "REVIEW_REQUIRED"
+        conflicting["programEligibility"] = "HELD_FOR_REVIEW"
+        summary = alignment_summary(project, assets)
+        self.assertTrue(summary["readyForProgramDraft"])
+        self.assertIn(
+            "REDUNDANT_CONFLICTING_CLIP", {item["code"] for item in summary["warnings"]}
+        )
+
+    def test_sole_coverage_held_clip_blocks_exact_interval(self) -> None:
+        project, assets = self.project_with_recorded_gap()
+        for clip in project["clips"]:
+            clip["alignmentState"] = "ACCEPTED"
+            clip["programEligibility"] = "ELIGIBLE"
+        for clip in project["clips"]:
+            if clip["assetId"].endswith("late"):
+                clip["programEligibility"] = "HELD_FOR_REVIEW"
+        summary = alignment_summary(project, assets)
+        self.assertFalse(summary["readyForProgramDraft"])
+        blocker = next(
+            item for item in summary["blockers"] if item["code"] == "SOLE_COVERAGE_TIMING_UNRESOLVED"
+        )
+        self.assertEqual((blocker["startAlignedUs"], blocker["endAlignedUs"]), (20_000_000, 30_000_000))
+
+    def test_eligibility_requires_accepted_alignment(self) -> None:
+        project, assets = self.project_with_recorded_gap()
+        clip = project["clips"][0]
+        clip["alignmentState"] = "PROVISIONAL"
+        clip["programEligibility"] = "HELD_FOR_REVIEW"
+        with self.assertRaisesRegex(Exception, "Only accepted clips"):
+            apply_command(
+                project,
+                "SetClipProgramEligibility",
+                {"clipIds": [clip["id"]], "programEligibility": "ELIGIBLE"},
+                assets,
+            )
 
 
 class ProposalSetStoreTests(unittest.TestCase):

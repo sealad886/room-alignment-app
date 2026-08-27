@@ -2703,6 +2703,14 @@ class Store:
                 # Existing source decisions predate explicit preparation state. Preserve
                 # them as accepted instead of turning a migration into a new decision.
                 source.setdefault("identityState", "USER_CONFIRMED")
+            for clip in canonical.get("clips", []):
+                state = clip.get(
+                    "alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED"
+                )
+                clip.setdefault(
+                    "programEligibility",
+                    "ELIGIBLE" if state == "ACCEPTED" else "HELD_FOR_REVIEW",
+                )
             asset_ids = [str(item["assetId"]) for item in canonical.get("clips", [])]
             snapshot = canonical.setdefault(
                 "selectionSnapshot",

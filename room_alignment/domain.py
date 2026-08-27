@@ -16,6 +16,7 @@ MAX_RATE_PPM = 2_000
 AUDIO_MODES = {"FOLLOW_VIDEO", "FIXED_SOURCE", "FIXED_CLIP", "SILENCE"}
 ANCHOR_MODES = {"PROGRAM_TIME", "SOURCE_TIME"}
 ALIGNMENT_STATES = {"PROVISIONAL", "ACCEPTED", "REVIEW_REQUIRED", "UNRESOLVED"}
+PROGRAM_ELIGIBILITY_STATES = {"ELIGIBLE", "HELD_FOR_REVIEW", "EXCLUDED"}
 SOURCE_IDENTITY_STATES = {"PROVISIONAL", "USER_CONFIRMED"}
 TIMELINE_SECTION_MODES = {"KEEP", "EXCLUDE", "SLATE"}
 BLOCKING = "BLOCKING"
@@ -36,7 +37,8 @@ COMMAND_PAYLOAD_FIELDS = {
         "referenceClipId", "referenceSourceUs", "targetClipId", "targetSourceUs"
     },
     "AcceptAlignmentProposalSet": {
-        "proposalSetId", "digest", "mode", "confirmDrift", "alignments"
+        "proposalSetId", "digest", "mode", "scope", "previewId", "previewDigest",
+        "confirmTimestampUncertainty", "confirmDrift", "alignments"
     },
     "AcceptAlignmentProposal": {
         "proposalSetId", "proposalId", "digest", "confirmLowConfidence", "confirmDrift",
@@ -44,6 +46,11 @@ COMMAND_PAYLOAD_FIELDS = {
     },
     "RejectAlignmentProposal": {"proposalSetId", "proposalId", "digest"},
     "RejectAlignmentProposalSet": {"proposalSetId", "digest"},
+    "SetClipProgramEligibility": {"clipIds", "programEligibility", "rationale"},
+    "SetRangeProgramEligibility": {
+        "startAlignedUs", "endAlignedUs", "sourceIds", "currentEligibilityFilter",
+        "programEligibility", "rationale",
+    },
     "SetTimelineSections": {"sections"},
     "GenerateProgramDraft": {
         "alignmentDigest", "selectionDigest", "gapMode", "sectionProposalDigest", "replaceExisting",
@@ -309,6 +316,9 @@ def new_project(
                 "id": opaque_id("clip"),
                 "assetId": asset["id"],
                 "logicalSourceId": source_id,
+                "programEligibility": (
+                    "ELIGIBLE" if initialize_legacy_program else "HELD_FOR_REVIEW"
+                ),
             }
             if initialize_legacy_program:
                 clip["sync"] = SyncTransform().to_dict()
@@ -321,6 +331,7 @@ def new_project(
                             anchor_aligned_us=(captured - evidence_origin_us) if captured is not None else 0
                         ).to_dict(),
                         "alignmentState": state,
+                        "programEligibility": "HELD_FOR_REVIEW",
                         "alignmentConfidence": 0.6 if captured is not None else 0.0,
                         "alignmentEvidence": ["timestamp"] if captured is not None else [],
                     }
@@ -416,6 +427,15 @@ def _alignment_state(clip: dict[str, Any]) -> str:
     return str(clip.get("alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED"))
 
 
+def _program_eligibility(clip: dict[str, Any]) -> str:
+    return str(
+        clip.get(
+            "programEligibility",
+            "ELIGIBLE" if _alignment_state(clip) == "ACCEPTED" else "HELD_FOR_REVIEW",
+        )
+    )
+
+
 def _union_intervals(intervals: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
     ordered = sorted((int(start), int(end)) for start, end in intervals if int(end) > int(start))
     merged: list[tuple[int, int]] = []
@@ -465,6 +485,7 @@ def alignment_summary(
         item
         for item in all_ranges
         if _alignment_state(clips_by_id[str(item["clipId"])]) == "ACCEPTED"
+        and _program_eligibility(clips_by_id[str(item["clipId"])]) == "ELIGIBLE"
     ]
     extent = aligned_extent(project, assets, include_provisional=True)
     evidence_intervals = [(int(item["startUs"]), int(item["endUs"])) for item in all_ranges]
@@ -475,44 +496,129 @@ def alignment_summary(
     counts = {state: 0 for state in sorted(ALIGNMENT_STATES)}
     audio_confirmed = 0
     timestamp_only = 0
-    conflicts: list[dict[str, Any]] = []
+    eligibility_counts = {state: 0 for state in sorted(PROGRAM_ELIGIBILITY_STATES)}
     for clip in project.get("clips", []):
         state = _alignment_state(clip)
         counts[state] = counts.get(state, 0) + 1
+        eligibility = _program_eligibility(clip)
+        eligibility_counts[eligibility] = eligibility_counts.get(eligibility, 0) + 1
         evidence = set(clip.get("alignmentEvidence", []))
         if "audio-correlation" in evidence:
             audio_confirmed += 1
         elif "timestamp" in evidence or "timestamp-prior" in evidence:
             timestamp_only += 1
-        asset = assets.get(clip["assetId"])
-        if not asset or asset.get("missing"):
-            conflicts.append(
-                {
-                    "code": "SOURCE_UNAVAILABLE",
-                    "clipId": clip["id"],
-                    "assetId": clip["assetId"],
-                    "blocking": True,
-                }
-            )
-        elif _asset_duration_us(asset) <= 0:
-            conflicts.append(
-                {
-                    "code": "DURATION_UNRESOLVED",
-                    "clipId": clip["id"],
-                    "assetId": clip["assetId"],
-                    "blocking": True,
-                }
-            )
-        if state == "REVIEW_REQUIRED":
-            conflicts.append(
-                {
-                    "code": "TIMING_CONFLICT",
-                    "clipId": clip["id"],
-                    "assetId": clip["assetId"],
-                    "blocking": True,
-                }
-            )
+    evidence_union = _union_intervals(evidence_intervals)
     sections = project.get("timelineSections", [])
+    required_sections = (
+        [
+            (int(item["startAlignedUs"]), int(item["endAlignedUs"]), str(item["mode"]))
+            for item in sections
+        ]
+        if sections
+        else [(start, end, "KEEP") for start, end in evidence_union]
+    )
+    boundaries = {
+        value
+        for start, end, _mode in required_sections
+        for value in (start, end)
+    }
+    boundaries.update(
+        value for item in all_ranges for value in (int(item["startUs"]), int(item["endUs"]))
+    )
+    ordered_boundaries = sorted(boundaries)
+    coverage_intervals: list[dict[str, Any]] = []
+    blockers: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    for start, end in zip(ordered_boundaries, ordered_boundaries[1:]):
+        section = next(
+            (
+                (section_start, section_end, mode)
+                for section_start, section_end, mode in required_sections
+                if section_start <= start and end <= section_end
+            ),
+            None,
+        )
+        if section is None:
+            continue
+        mode = section[2]
+        overlapping = [
+            item
+            for item in all_ranges
+            if int(item["startUs"]) < end and int(item["endUs"]) > start
+        ]
+        accepted_eligible: list[str] = []
+        accepted_held: list[str] = []
+        provisional: list[str] = []
+        conflicting: list[str] = []
+        unavailable: list[str] = []
+        for item in overlapping:
+            clip = clips_by_id[str(item["clipId"])]
+            asset = assets.get(str(item["assetId"]))
+            state = _alignment_state(clip)
+            eligibility = _program_eligibility(clip)
+            target = (
+                unavailable
+                if not asset or asset.get("missing")
+                else accepted_eligible
+                if state == "ACCEPTED" and eligibility == "ELIGIBLE"
+                else accepted_held
+                if state == "ACCEPTED"
+                else conflicting
+                if state == "REVIEW_REQUIRED"
+                else provisional
+            )
+            target.append(str(item["clipId"]))
+        blocker_codes: list[str] = []
+        warning_codes: list[str] = []
+        if mode == "EXCLUDE":
+            readiness = "EXCLUDED"
+        elif mode == "SLATE":
+            readiness = "SYNTHETIC"
+        elif accepted_eligible:
+            readiness = "READY_WITH_WARNINGS" if (provisional or conflicting or unavailable) else "READY"
+            if provisional:
+                warning_codes.append("REDUNDANT_TIMESTAMP_ONLY_CLIP")
+            if conflicting:
+                warning_codes.append("REDUNDANT_CONFLICTING_CLIP")
+            if unavailable:
+                warning_codes.append("REDUNDANT_UNAVAILABLE_CLIP")
+        else:
+            readiness = "BLOCKED"
+            if conflicting:
+                blocker_codes.append("SOLE_COVERAGE_CONFLICTING")
+            elif unavailable:
+                blocker_codes.append("SOLE_COVERAGE_UNAVAILABLE")
+            elif provisional or accepted_held:
+                blocker_codes.append("SOLE_COVERAGE_TIMING_UNRESOLVED")
+            else:
+                blocker_codes.append("NO_ACCEPTED_ELIGIBLE_VIDEO")
+        interval = {
+            "startAlignedUs": start,
+            "endAlignedUs": end,
+            "sectionMode": mode,
+            "acceptedEligibleVideoClipIds": accepted_eligible,
+            "acceptedHeldVideoClipIds": accepted_held,
+            "provisionalVideoClipIds": provisional,
+            "conflictingVideoClipIds": conflicting,
+            "unavailableVideoClipIds": unavailable,
+            "ambiguityState": "NONE",
+            "readiness": readiness,
+            "blockerCodes": blocker_codes,
+            "warningCodes": warning_codes,
+        }
+        coverage_intervals.append(interval)
+        for code in blocker_codes:
+            blockers.append({
+                "code": code, "startAlignedUs": start, "endAlignedUs": end,
+                "clipIds": sorted(set(accepted_held + provisional + conflicting + unavailable)),
+                "blocking": True,
+                "remediationActions": ["ACCEPT_ALIGNMENT", "EDIT_ALIGNMENT", "EXCLUDE_RANGE", "ADD_SLATE"],
+            })
+        for code in warning_codes:
+            warnings.append({
+                "code": code, "startAlignedUs": start, "endAlignedUs": end,
+                "clipIds": sorted(set(provisional + conflicting + unavailable)), "blocking": False,
+            })
     proposed_output_duration_us = (
         sum(
             int(section["endAlignedUs"]) - int(section["startAlignedUs"])
@@ -522,9 +628,7 @@ def alignment_summary(
         if sections
         else int(extent["durationUs"])
     )
-    ready = bool(accepted_ranges) and unresolved_sole_coverage_us == 0 and not any(
-        item.get("blocking") for item in conflicts
-    )
+    ready = bool(accepted_ranges) and not blockers
     return {
         "projectId": project["id"],
         "revision": int(project["revision"]),
@@ -539,6 +643,11 @@ def alignment_summary(
             "audioConfirmed": audio_confirmed,
             "timestampOnly": timestamp_only,
         },
+        "eligibilityCounts": {
+            "eligible": eligibility_counts.get("ELIGIBLE", 0),
+            "heldForReview": eligibility_counts.get("HELD_FOR_REVIEW", 0),
+            "excluded": eligibility_counts.get("EXCLUDED", 0),
+        },
         "coverage": {
             "evidenceCoverageUs": evidence_coverage_us,
             "acceptedCoverageUs": accepted_coverage_us,
@@ -550,7 +659,10 @@ def alignment_summary(
             ),
             "sourceCount": len({item["logicalSourceId"] for item in all_ranges}),
         },
-        "conflicts": conflicts,
+        "coverageIntervals": coverage_intervals,
+        "blockers": blockers,
+        "warnings": warnings,
+        "conflicts": blockers + warnings,
         "unplacedClipIds": [
             str(clip["id"])
             for clip in project.get("clips", [])
@@ -615,14 +727,7 @@ def project_preparation(
             }
         )
     if not alignment_ready:
-        blockers.append(
-            {
-                "code": "ALIGNMENT_REVIEW_REQUIRED",
-                "count": int(alignment["confidenceCounts"].get("provisional", 0))
-                + int(alignment["confidenceCounts"].get("reviewRequired", 0))
-                + int(alignment["confidenceCounts"].get("unresolved", 0)),
-            }
-        )
+        blockers.extend(alignment.get("blockers", []))
     if legacy_truncation:
         blockers.append(
             {
@@ -727,6 +832,7 @@ def timeline_window(
                 "startAlignedUs": int(item["startUs"]),
                 "endAlignedUs": int(item["endUs"]),
                 "alignmentState": state,
+                "programEligibility": _program_eligibility(clip),
                 "confidence": float(clip.get("alignmentConfidence", 1.0 if "sync" in clip else 0.0)),
                 "evidenceKinds": list(clip.get("alignmentEvidence", [])),
                 "relativePath": str(asset.get("relative_path", "")),
@@ -884,6 +990,11 @@ def validate_project(project: dict[str, Any]) -> None:
         state = clip.get("alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED")
         if state not in ALIGNMENT_STATES:
             raise DomainError("VALIDATION_FAILED", f"Clip {clip['id']} has an invalid alignment state")
+        eligibility = _program_eligibility(clip)
+        if eligibility not in PROGRAM_ELIGIBILITY_STATES:
+            raise DomainError("VALIDATION_FAILED", f"Clip {clip['id']} has invalid program eligibility")
+        if eligibility == "ELIGIBLE" and state != "ACCEPTED":
+            raise DomainError("VALIDATION_FAILED", f"Clip {clip['id']} must be accepted before eligibility")
     for section in project.get("timelineSections", []):
         if section.get("mode") not in TIMELINE_SECTION_MODES:
             raise DomainError("VALIDATION_FAILED", f"Timeline section {section.get('id')} has an invalid mode")
@@ -1021,6 +1132,10 @@ def apply_command(
         ),
         "RejectAlignmentProposal": lambda _p, _payload: None,
         "RejectAlignmentProposalSet": lambda _p, _payload: None,
+        "SetClipProgramEligibility": _set_clip_program_eligibility,
+        "SetRangeProgramEligibility": lambda p, command_payload: _set_range_program_eligibility(
+            p, command_payload, assets
+        ),
         "SetTimelineSections": _set_timeline_sections,
         "GenerateProgramDraft": lambda p, command_payload: _replace(
             p, generate_program_draft(p, assets, command_payload)
@@ -1301,6 +1416,49 @@ def _set_alignment(
         clip["alignmentState"] = "ACCEPTED"
         clip["alignmentConfidence"] = max(0.0, min(1.0, float(confidence)))
         clip["alignmentEvidence"] = list(evidence or ["manual"])
+        if _program_eligibility(clip) != "EXCLUDED":
+            clip["programEligibility"] = "ELIGIBLE"
+
+
+def _set_clip_program_eligibility(project: dict[str, Any], payload: dict[str, Any]) -> None:
+    eligibility = str(payload.get("programEligibility", ""))
+    if eligibility not in PROGRAM_ELIGIBILITY_STATES:
+        raise DomainError("VALIDATION_FAILED", "Unknown program eligibility")
+    clip_ids = [str(value) for value in payload.get("clipIds", [])]
+    if not clip_ids or len(clip_ids) != len(set(clip_ids)):
+        raise DomainError("VALIDATION_FAILED", "clipIds must contain unique project clips")
+    for clip_id in clip_ids:
+        clip = _find(project["clips"], clip_id, "project clip")
+        if eligibility == "ELIGIBLE" and _alignment_state(clip) != "ACCEPTED":
+            raise DomainError("CLIP_NOT_ACCEPTED", "Only accepted clips can become eligible")
+        clip["programEligibility"] = eligibility
+        clip["programEligibilityRationale"] = str(payload.get("rationale", ""))[:1000]
+
+
+def _set_range_program_eligibility(
+    project: dict[str, Any], payload: dict[str, Any], assets: dict[str, dict[str, Any]]
+) -> None:
+    start_us = int(payload.get("startAlignedUs", 0))
+    end_us = int(payload.get("endAlignedUs", 0))
+    if end_us <= start_us:
+        raise DomainError("VALIDATION_FAILED", "Eligibility range must have positive duration")
+    source_ids = {str(value) for value in payload.get("sourceIds", [])}
+    current = {str(value) for value in payload.get("currentEligibilityFilter", [])}
+    clip_ids = [
+        str(item["clipId"])
+        for item in _clip_ranges(project, assets, include_provisional=True)
+        if int(item["startUs"]) < end_us
+        and int(item["endUs"]) > start_us
+        and (not source_ids or str(item["logicalSourceId"]) in source_ids)
+        and (
+            not current
+            or _program_eligibility(_find(project["clips"], str(item["clipId"]), "project clip"))
+            in current
+        )
+    ]
+    if not clip_ids:
+        raise DomainError("VALIDATION_FAILED", "Eligibility range contains no matching clips")
+    _set_clip_program_eligibility(project, {**payload, "clipIds": clip_ids})
 
 
 def timeline_section_proposal(
@@ -1315,7 +1473,7 @@ def timeline_section_proposal(
         raise DomainError("VALIDATION_FAILED", "gapMode must be EXCLUDE or SLATE")
     accepted = _union_intervals(
         (int(item["startUs"]), int(item["endUs"]))
-        for item in _clip_ranges(project, assets)
+        for item in _clip_ranges(project, assets, eligible_only=True)
     )
     if not accepted:
         raise DomainError("COVERAGE_INVALID", "No accepted aligned media is available for composition")
@@ -1616,7 +1774,7 @@ def generate_program_draft(
     result["videoBlocks"] = []
     result["audioBlocks"] = []
     result["syntheticSlates"] = []
-    clip_range_index = _build_clip_range_index(_clip_ranges(result, assets))
+    clip_range_index = _build_clip_range_index(_clip_ranges(result, assets, eligible_only=True))
     for mapping in mappings:
         if mapping["mode"] == "SLATE":
             slate_id = opaque_id("slate")
@@ -1951,6 +2109,7 @@ def _clip_ranges(
     assets: dict[str, dict[str, Any]],
     *,
     include_provisional: bool = False,
+    eligible_only: bool = False,
 ) -> list[dict[str, Any]]:
     ranges: list[dict[str, Any]] = []
     for clip in project.get("clips", []):
@@ -1959,6 +2118,8 @@ def _clip_ranges(
             continue
         state = clip.get("alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED")
         if state == "UNRESOLVED" or (not include_provisional and state != "ACCEPTED"):
+            continue
+        if eligible_only and _program_eligibility(clip) != "ELIGIBLE":
             continue
         duration_us = _asset_duration_us(asset)
         if duration_us <= 0:
