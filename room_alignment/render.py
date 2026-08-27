@@ -764,21 +764,27 @@ def configure_render_execution(
 ) -> dict[str, Any]:
     """Bind mutable delivery settings without rebuilding the reviewed program snapshot."""
     plan = json.loads(json.dumps(program_plan))
-    codec_key = str(settings.get("videoCodec", plan.get("renderVideoCodec", "H264_VIDEOTOOLBOX")))
+    archival = plan["profile"] == "ARCHIVAL_LOSSLESS"
+    codec_key = (
+        "FFV1"
+        if archival
+        else str(settings.get("videoCodec", plan.get("renderVideoCodec", "H264_VIDEOTOOLBOX")))
+    )
     resolution_key = str(settings.get("resolution", plan.get("renderResolution", "FULL_HD_1080P")))
-    if codec_key not in VIDEO_OUTPUTS:
+    if not archival and codec_key not in VIDEO_OUTPUTS:
         raise DomainError("VALIDATION_FAILED", "Unknown hardware video codec")
     if resolution_key not in OUTPUT_RESOLUTIONS:
         raise DomainError("VALIDATION_FAILED", "Unknown output resolution")
-    spec = VIDEO_OUTPUTS[codec_key]
+    spec = None if archival else VIDEO_OUTPUTS[codec_key]
     width, height = OUTPUT_RESOLUTIONS[resolution_key]
     output_grant_id = str(settings.get("outputGrantId", plan.get("output", {}).get("grantId", "")))
     filename = str(settings.get("filename", plan.get("output", {}).get("filename", "")))
     output = store.output_path(output_grant_id, filename)
-    if output.suffix.lower() != spec["suffix"]:
+    expected_suffix = ".mkv" if archival else spec["suffix"]
+    if output.suffix.lower() != expected_suffix:
         raise DomainError(
             "VALIDATION_FAILED",
-            f"{codec_key} output filename must end with {spec['suffix']}",
+            f"{plan['profile']} output filename must end with {expected_suffix}",
         )
     manifest = output.with_name(output.name + ".manifest.json")
     issues = [
@@ -794,16 +800,16 @@ def configure_render_execution(
         })
     plan["renderVideoCodec"] = codec_key
     plan["renderResolution"] = resolution_key
-    plan["container"] = spec["container"]
-    plan["videoCodec"] = spec["codec"]
-    plan["videoEncoder"] = spec["encoder"]
-    plan["hardwareAccelerated"] = True
-    plan["audioCodec"] = spec["audio"]
+    plan["container"] = "matroska" if archival else spec["container"]
+    plan["videoCodec"] = "ffv1" if archival else spec["codec"]
+    plan["videoEncoder"] = "ffv1" if archival else spec["encoder"]
+    plan["hardwareAccelerated"] = not archival
+    plan["audioCodec"] = "pcm_s24le" if archival else spec["audio"]
     plan["normalization"] = {
         **plan["normalization"],
         "width": width,
         "height": height,
-        "pixelFormat": "yuv420p",
+        "pixelFormat": "source-compatible" if archival else "yuv420p",
     }
     plan["output"] = {"grantId": output_grant_id, "filename": filename}
     plan["estimatedBytes"] = _estimate_output_bytes(
