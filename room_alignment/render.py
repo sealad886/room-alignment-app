@@ -602,7 +602,13 @@ def build_v1_ffmpeg_command(store: Store, plan: dict[str, Any], output: Path) ->
         else:
             source = _planned_source(store, planned_sources, item["assetId"])
             source_duration = (item["sourceEndUs"] - item["sourceStartUs"]) / 1_000_000
-            command += ["-ss", _seconds(item["sourceStartUs"]), "-t", f"{source_duration:.6f}", "-i", str(source)]
+            command += [
+                "-hwaccel", "videotoolbox",
+                "-hwaccel_output_format", "videotoolbox_vld",
+                "-ss", _seconds(item["sourceStartUs"]),
+                "-t", f"{source_duration:.6f}",
+                "-i", str(source),
+            ]
     audio_base = len(video)
     for item in audio:
         output_duration = (item["endUs"] - item["startUs"]) / 1_000_000
@@ -629,9 +635,15 @@ def build_v1_ffmpeg_command(store: Store, plan: dict[str, Any], output: Path) ->
         else:
             source_duration = (item["sourceEndUs"] - item["sourceStartUs"]) / 1_000_000
             speed = output_duration / source_duration if source_duration else 1
+            media = store.media_record(item["assetId"])
+            source_width = max(1, int(media.get("width") or norm["width"]))
+            source_height = max(1, int(media.get("height") or norm["height"]))
+            scale = min(norm["width"] / source_width, norm["height"] / source_height)
+            fit_width = max(2, int(source_width * scale) // 2 * 2)
+            fit_height = max(2, int(source_height * scale) // 2 * 2)
             filters.append(
                 f"[{index}:v:0]setpts=(PTS-STARTPTS)*{speed:.12f},"
-                f"scale={norm['width']}:{norm['height']}:force_original_aspect_ratio=decrease,"
+                f"scale_vt={fit_width}:{fit_height},hwdownload,format=nv12,"
                 f"pad={norm['width']}:{norm['height']}:(ow-iw)/2:(oh-ih)/2,"
                 f"fps={norm['frameRate']:.6f},setsar=1[v{index}]"
             )
