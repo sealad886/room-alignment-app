@@ -16,6 +16,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .domain import (
+    ClipAlignmentTransform,
     DomainError,
     alignment_digest,
     alignment_summary,
@@ -2692,9 +2693,10 @@ class Store:
             if kind == "EVENTS":
                 return str(item.get("eventId")) in event_ids
             if kind == "ALIGNED_RANGE":
-                anchor = int(item.get("proposedAlignment", {}).get("anchorAlignedUs", 0))
-                proposed_end = int(item.get("proposedEndAlignedUs", anchor + 1))
-                return anchor < end_us and proposed_end > start_us
+                transform = ClipAlignmentTransform.from_dict(item.get("proposedAlignment"))
+                proposed_start = transform.source_to_aligned(0)
+                proposed_end = int(item.get("proposedEndAlignedUs") or proposed_start + 1)
+                return proposed_start < end_us and proposed_end > start_us
             return True
 
         return [

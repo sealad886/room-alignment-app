@@ -591,7 +591,12 @@ class ProposalSetStoreTests(unittest.TestCase):
             "proposals": [{
                 "id": "timestamp-proposal", "clipId": clip["id"], "assetId": "timestamp-asset",
                 "logicalSourceId": clip["logicalSourceId"], "classification": "TIMESTAMP_ONLY",
-                "proposedAlignment": {"anchorSourceUs": 0, "anchorAlignedUs": 10_000, "ratePpm": 0},
+                "proposedAlignment": {
+                    "anchorSourceUs": 5_000,
+                    "anchorAlignedUs": 20_000,
+                    "ratePpm": 0,
+                },
+                "proposedEndAlignedUs": 5_015_000,
                 "confidence": 0.55, "automaticallyAcceptable": False,
                 "requiresDriftConfirmation": False, "evidence": [], "limitations": [],
                 "inputFingerprintDigest": "4" * 64,
@@ -603,14 +608,16 @@ class ProposalSetStoreTests(unittest.TestCase):
         preview = self.store.create_alignment_acceptance_preview(project["id"], {
             "expectedRevision": project["revision"], "proposalSetId": proposal_set["id"],
             "proposalSetDigest": proposal_set["digest"], "mode": "TIMESTAMP_PRIOR",
-            "scope": {"kind": "PROJECT"},
+            "scope": {"kind": "ALIGNED_RANGE", "startAlignedUs": 14_000, "endAlignedUs": 16_000},
         })
         self.assertEqual(preview["mode"], "TIMESTAMP_PRIOR")
         result = self.store.apply_project_command(project["id"], {
             "commandId": "accept-timestamp", "expectedRevision": project["revision"],
             "commandType": "AcceptAlignmentProposalSet", "payload": {
                 "proposalSetId": proposal_set["id"], "digest": proposal_set["digest"],
-                "mode": "TIMESTAMP_PRIOR", "scope": {"kind": "PROJECT"},
+                "mode": "TIMESTAMP_PRIOR", "scope": {
+                    "kind": "ALIGNED_RANGE", "startAlignedUs": 14_000, "endAlignedUs": 16_000,
+                },
                 "previewId": preview["id"], "previewDigest": preview["digest"],
                 "confirmTimestampUncertainty": True,
             },
@@ -619,6 +626,8 @@ class ProposalSetStoreTests(unittest.TestCase):
         self.assertEqual(accepted["alignmentState"], "ACCEPTED")
         self.assertEqual(accepted["programEligibility"], "ELIGIBLE")
         self.assertEqual(accepted["alignmentEvidence"], ["timestamp-prior"])
+        self.assertEqual(accepted["alignment"]["anchorSourceUs"], 5_000)
+        self.assertEqual(accepted["alignment"]["anchorAlignedUs"], 20_000)
 
     def test_alignment_scope_rejects_malformed_collection_and_range_fields(self) -> None:
         proposal_set = {"proposals": []}
