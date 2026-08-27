@@ -182,6 +182,7 @@ class CanonicalRenderTests(unittest.TestCase):
         manifest = build_v1_manifest(plan)
         self.assertEqual(manifest["sources"][0]["rootId"], second["id"])
         command = build_v1_ffmpeg_command(self.store, plan, self.output / "partial.mp4")
+        self.assertEqual(command[4:6], ["-filter_complex_threads", "1"])
         self.assertIn(str(second_path), command)
         self.assertNotIn(str(self.media_path), command)
 
