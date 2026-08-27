@@ -629,6 +629,9 @@ def alignment_summary(
         else int(extent["durationUs"])
     )
     ready = bool(accepted_ranges) and not blockers
+    unresolved_sole_coverage_us = _interval_duration(
+        (int(item["startAlignedUs"]), int(item["endAlignedUs"])) for item in blockers
+    )
     return {
         "projectId": project["id"],
         "revision": int(project["revision"]),

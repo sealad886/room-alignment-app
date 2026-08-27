@@ -123,6 +123,14 @@
         </div>
       </form>
     </dialog>
+    <dialog id="timestamp-scope-dialog" class="confirmation-dialog" aria-labelledby="timestamp-scope-title" aria-describedby="timestamp-scope-description">
+      <form method="dialog">
+        <h2 id="timestamp-scope-title">Review timestamp placements</h2>
+        <p id="timestamp-scope-description" class="confirmation-message">Choose which non-conflicting timestamp-only clips to preview. No timing changes occur until the preview is confirmed.</p>
+        <label class="field"><span>Scope</span><select id="timestamp-scope-select"></select></label>
+        <div class="confirmation-actions"><button class="btn" value="cancel">Cancel</button><button class="btn primary" value="preview">Preview coverage</button></div>
+      </form>
+    </dialog>
     <dialog id="settings-dialog" class="settings-dialog" aria-labelledby="settings-title" aria-describedby="settings-description">
       <form id="settings-form">
         <div class="settings-heading"><div><p class="eyebrow">Workspace preferences</p><h2 id="settings-title">Settings</h2></div><button class="icon-btn" id="close-settings" type="button" aria-label="Close settings">×</button></div>

@@ -2549,14 +2549,18 @@ class Store:
             mode = str(payload.get("mode", "HIGH_CONFIDENCE"))
             if mode not in {"HIGH_CONFIDENCE", "TIMESTAMP_PRIOR"}:
                 raise DomainError("VALIDATION_FAILED", "Unknown proposal-set acceptance mode")
+            original_scope = payload.get("scope") or {"kind": "PROJECT"}
+            project_row = db.execute(
+                "SELECT document_json FROM projects WHERE id=?", (project_id,)
+            ).fetchone()
+            current_project = self._migrate_legacy_project(json.loads(project_row["document_json"]))
+            selection_scope = self._normalized_acceptance_scope_db(
+                db, current_project, original_scope
+            )
             selected = self._select_alignment_proposals(
-                value, mode, payload.get("scope") or {"kind": "PROJECT"}, already_resolved
+                value, mode, selection_scope, already_resolved
             )
             if mode == "TIMESTAMP_PRIOR":
-                project_row = db.execute(
-                    "SELECT document_json FROM projects WHERE id=?", (project_id,)
-                ).fetchone()
-                current_project = self._migrate_legacy_project(json.loads(project_row["document_json"]))
                 accepted_clip_ids = {
                     str(clip["id"])
                     for clip in current_project.get("clips", [])
@@ -2656,7 +2660,8 @@ class Store:
                 return str(item.get("eventId")) in event_ids
             if kind == "ALIGNED_RANGE":
                 anchor = int(item.get("proposedAlignment", {}).get("anchorAlignedUs", 0))
-                return start_us <= anchor < end_us
+                proposed_end = int(item.get("proposedEndAlignedUs", anchor + 1))
+                return anchor < end_us and proposed_end > start_us
             return True
 
         return [
@@ -2671,6 +2676,30 @@ class Store:
                 and not item.get("requiresDriftConfirmation")
             )
         ]
+
+    @staticmethod
+    def _normalized_acceptance_scope_db(
+        db: sqlite3.Connection, project: dict[str, Any], scope: dict[str, Any]
+    ) -> dict[str, Any]:
+        if str(scope.get("kind", "PROJECT")) != "EVENTS":
+            return scope
+        event_ids = [str(value) for value in scope.get("eventIds", [])]
+        generation_id = (project.get("selectionSnapshot") or {}).get("clusterGenerationId")
+        if not event_ids or not generation_id:
+            raise DomainError("SCOPE_INVALID", "Event scope requires the project's cluster generation")
+        placeholders = ",".join("?" for _item in event_ids)
+        asset_ids = {
+            str(row[0])
+            for row in db.execute(
+                f"SELECT asset_id FROM cluster_memberships WHERE generation_id=? "
+                f"AND event_id IN ({placeholders})",
+                (generation_id, *event_ids),
+            )
+        }
+        clip_ids = [
+            str(clip["id"]) for clip in project.get("clips", []) if str(clip["assetId"]) in asset_ids
+        ]
+        return {"kind": "CLIPS", "clipIds": clip_ids}
 
     def _validate_alignment_acceptance_db(
         self,
@@ -3191,7 +3220,9 @@ class Store:
         resolved = set(proposal_set.get("acceptedProposalIds", [])) | set(
             proposal_set.get("rejectedProposalIds", [])
         )
-        selected = self._select_alignment_proposals(proposal_set, mode, scope, resolved)
+        with self.connect() as db:
+            selection_scope = self._normalized_acceptance_scope_db(db, project, scope)
+        selected = self._select_alignment_proposals(proposal_set, mode, selection_scope, resolved)
         if mode == "TIMESTAMP_PRIOR":
             accepted_clip_ids = {
                 str(clip["id"])
@@ -3221,15 +3252,13 @@ class Store:
         }
         simulated = apply_command(project, "AcceptAlignmentProposalSet", expanded, assets)
         after = alignment_summary(simulated, assets)
-        ranges = sorted(
-            {
-                (
-                    int(item.get("proposedAlignment", {}).get("anchorAlignedUs", 0)),
-                    int(item.get("proposedAlignment", {}).get("anchorAlignedUs", 0)),
-                )
-                for item in selected
-            }
-        )
+        selected_clip_ids = {str(item["clipId"]) for item in selected}
+        ranges = [
+            (int(item["startAlignedUs"]), int(item["endAlignedUs"]))
+            for item in after.get("coverageIntervals", [])
+            if selected_clip_ids.intersection(item.get("acceptedEligibleVideoClipIds", []))
+        ]
+        ranges = _merge_time_ranges(ranges)
         created_at = now_iso()
         value = {
             "id": opaque_id("alignpreview"),
@@ -4905,6 +4934,16 @@ def _raw_timestamp_from_evidence(record: MediaRecord) -> object | None:
 
 def _stable_migration_id(prefix: str, *parts: object) -> str:
     return f"{prefix}_{digest_json([str(part) for part in parts])[:24]}"
+
+
+def _merge_time_ranges(ranges: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[list[int]] = []
+    for start, end in sorted((int(start), int(end)) for start, end in ranges if end > start):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
 
 
 def _storage_relative_path(root_id: str, relative_path: str) -> str:

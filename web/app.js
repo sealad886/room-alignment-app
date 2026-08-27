@@ -1160,7 +1160,8 @@ function renderSuggestions() {
 
 async function acceptTimestampPriors(proposalSet) {
   try {
-    const scope = {kind: "PROJECT"};
+    const scope = await chooseTimestampScope();
+    if (!scope) return;
     const preview = await client.createAlignmentAcceptancePreview({projectId: state.project.id}, {
       commandId: crypto.randomUUID(), expectedRevision: state.project.revision,
       proposalSetId: proposalSet.id, proposalSetDigest: proposalSet.digest,
@@ -1173,6 +1174,26 @@ async function acceptTimestampPriors(proposalSet) {
       previewId: preview.id, previewDigest: preview.digest, confirmTimestampUncertainty: true,
     })) toast(`${preview.affectedClipCount} timestamp placements accepted as one revision`);
   } catch (error) { handleError(error); }
+}
+
+function chooseTimestampScope() {
+  const dialog = $("#timestamp-scope-dialog");
+  const select = $("#timestamp-scope-select");
+  const source = state.sources[state.selectedSource];
+  const clip = selectedAlignmentClip(source);
+  const options = [
+    {label: "Entire project", scope: {kind: "PROJECT"}},
+    ...(source ? [{label: `Current source · ${source.label}`, scope: {kind: "SOURCES", sourceIds: [source.id]}}] : []),
+    ...(clip ? [{label: "Selected clip", scope: {kind: "CLIPS", clipIds: [clip.id]}}] : []),
+    {label: `Visible timeline · ${formatUs(state.timelineEndUs - state.timelineStartUs)}`, scope: {kind: "ALIGNED_RANGE", startAlignedUs: Math.round(state.timelineStartUs), endAlignedUs: Math.round(state.timelineEndUs)}},
+    ...(state.selectedEvents.size ? [{label: `${state.selectedEvents.size} selected event${state.selectedEvents.size === 1 ? "" : "s"}`, scope: {kind: "EVENTS", eventIds: [...state.selectedEvents]}}] : []),
+  ];
+  select.innerHTML = options.map((item, index) => `<option value="${index}">${safe(item.label)}</option>`).join("");
+  return new Promise(resolve => {
+    const finish = () => resolve(dialog.returnValue === "preview" ? options[Number(select.value)]?.scope || null : null);
+    dialog.addEventListener("close", finish, {once: true});
+    dialog.showModal();
+  });
 }
 
 async function setClipEligibility(clipId, programEligibility) {

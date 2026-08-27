@@ -15,7 +15,7 @@ All sensitive reads and every mutation require the bootstrapped local session. M
 - `/libraries/{libraryId}/media`, `/media/{mediaId}`, `/media/{mediaId}/preview`, `/media/{mediaId}/provenance/resolutions`
 - `/projects`, `/projects/{projectId}`, `/projects/{projectId}/commands`, `/projects/{projectId}/program`, `/projects/{projectId}/program-at`, `/projects/{projectId}/suggestions`, `/projects/{projectId}/alignment-jobs`, `/projects/{projectId}/render-plans`
 - project alignment summary, windowed evidence timeline, alignment proposal sets,
-  and delta command results
+  preview-bound alignment acceptance, and delta command results
 - `/render-plans/{planId}`, `/render-plans/{planId}/review`, `/render-plans/{planId}/render`
 - `/jobs/{jobId}`, `/jobs/{jobId}/cancel`, `/jobs/event-token`, `/events`
 - `/artifacts/{artifactId}`, `/artifacts/{artifactId}/video`, `/artifacts/{artifactId}/manifest`
@@ -29,6 +29,10 @@ Project creation may include `sourceGroups`, an exact partition of the selected 
 New project creation is evidence-only. `InitializeProgram` is deprecated and kept
 only for migration compatibility; `GenerateProgramDraft` is the authoritative
 first-cut command and binds selection plus alignment digests.
+
+`POST /projects/{projectId}/alignment-proposal-acceptance-previews` creates a short-lived, revision-bound preview for scoped high-confidence or timestamp-prior acceptance. Timestamp-prior `AcceptAlignmentProposalSet` commands bind its ID and digest and explicitly confirm timestamp uncertainty. Any project, proposal, scope, or expiry mismatch rejects the whole command.
+
+`SetClipProgramEligibility` and `SetRangeProgramEligibility` change optimizer eligibility without changing timing evidence. A clip must have accepted timing before it can become eligible.
 
 ## Events
 

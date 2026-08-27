@@ -973,6 +973,9 @@ def analyze_project_alignment(
                 "componentId": component["id"] if component else None,
                 "classification": classification,
                 "proposedAlignment": adjusted.to_dict(),
+                "proposedEndAlignedUs": adjusted.source_to_aligned(
+                    int(asset.get("durationUs") or round(float(asset.get("duration") or 0) * 1_000_000))
+                ),
                 "confidence": round(confidence, 6),
                 "relativeConfidence": component["relativeConfidence"] if component else 0.0,
                 "absoluteConfidence": round(absolute_confidence, 6),

@@ -24,5 +24,8 @@ Project document stores:
 - Program Audio segments
 - output timebase and optional wall-clock origin
 
-Segment provenance carries source clip ID, source/editorial ranges, sync offset, evidence, custom metadata, and transforms.
+Canonical project clips separate timing evidence from first-cut eligibility. `alignmentState` is `PROVISIONAL`, `ACCEPTED`, `REVIEW_REQUIRED`, or `UNRESOLVED`; `programEligibility` is `ELIGIBLE`, `HELD_FOR_REVIEW`, or `EXCLUDED`. Accepting timing makes a non-excluded clip eligible. Rejecting a proposal does not exclude media or erase an accepted transform.
 
+Preparation readiness sweeps explicit Keep, Exclude, and Slate sections. Keep requires accepted eligible coverage, Exclude requires none, and Slate creates provenance-bearing video plus explicit silence. Uncertain clips warn when redundant and block only across exact sole-coverage ranges.
+
+Segment provenance carries source clip ID, source/editorial ranges, sync offset, evidence, custom metadata, and transforms.

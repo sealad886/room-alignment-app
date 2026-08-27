@@ -421,6 +421,13 @@ def build_render_plan(
                 ),
                 "alignmentConfidence": item.get("alignmentConfidence"),
                 "alignmentEvidence": item.get("alignmentEvidence", []),
+                "programEligibility": item.get(
+                    "programEligibility",
+                    "ELIGIBLE"
+                    if item.get("alignmentState", "ACCEPTED" if item.get("sync") else "UNRESOLVED")
+                    == "ACCEPTED"
+                    else "HELD_FOR_REVIEW",
+                ),
             }
             for item in project.get("clips", [])
         ],
