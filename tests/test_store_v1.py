@@ -64,6 +64,8 @@ class StoreV1Tests(unittest.TestCase):
                 "overlapSearchExtensionUs": 75_000_000,
                 "textScalePercent": 115,
                 "colorScheme": "SLATE",
+                "renderVideoCodec": "HEVC_VIDEOTOOLBOX",
+                "renderResolution": "HD_720P",
             }
         )
         self.assertEqual(updated["overlapSearchExtensionUs"], 75_000_000)
@@ -75,6 +77,10 @@ class StoreV1Tests(unittest.TestCase):
             reopened.update_application_settings({"textScalePercent": 141})
         with self.assertRaisesRegex(DomainError, "color scheme"):
             reopened.update_application_settings({"colorScheme": "UNKNOWN"})
+        with self.assertRaisesRegex(DomainError, "hardware video codec"):
+            reopened.update_application_settings({"renderVideoCodec": "LIBX264"})
+        with self.assertRaisesRegex(DomainError, "render resolution"):
+            reopened.update_application_settings({"renderResolution": "8K"})
 
     def test_overlap_setting_change_stales_pending_alignment_proposals(self):
         record = self.record("settings-clip", "settings-clip.mp4")

@@ -114,6 +114,8 @@ class ServerBoundaryTests(unittest.TestCase):
             "overlapSearchExtensionUs": 90_000_000,
             "textScalePercent": 130,
             "colorScheme": "HIGH_CONTRAST",
+            "renderVideoCodec": "HEVC_VIDEOTOOLBOX",
+            "renderResolution": "UHD_2160P",
         }
         status, _headers, payload = self.request(
             "PUT", "/api/v1/settings", body=update, cookie=cookie

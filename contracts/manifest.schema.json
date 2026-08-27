@@ -5,7 +5,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema", "manifestCanonicalization", "artifact", "project", "renderPlan", "sourceSetDigest", "provenanceResolutions",
+    "schema", "manifestCanonicalization", "artifact", "project", "renderPlan", "programDigest", "renderExecutionDigest", "sourceSetDigest", "provenanceResolutions",
     "selectionSnapshot", "alignment", "composition", "sources", "outputTimebase", "videoSlices", "audioSlices", "transforms", "warnings",
     "toolVersions", "fidelity", "manifestCanonicalContentSha256"
   ],
@@ -35,6 +35,8 @@
       "required": ["id", "digest"],
       "properties": {"id": {"type": "string"}, "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}}
     },
+    "programDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "renderExecutionDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "sourceSetDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
     "provenanceResolutions": {"type": "array", "items": {"type": "object"}},
     "selectionSnapshot": {"type": "object"},
@@ -72,10 +74,10 @@
     "audioSlices": {"type": "array", "items": {"$ref": "./domain.schema.json#/$defs/CompiledAudioSlice"}},
     "transforms": {
       "type": "object",
-      "required": ["profile", "container", "videoCodec", "audioCodec", "normalization", "sourceMediaUnchanged", "streamCopy", "decodedAndReencoded"],
+      "required": ["profile", "container", "videoCodec", "videoEncoder", "hardwareAccelerated", "audioCodec", "normalization", "sourceMediaUnchanged", "streamCopy", "decodedAndReencoded"],
       "properties": {
         "profile": {"enum": ["COMPATIBLE", "ARCHIVAL_LOSSLESS"]}, "container": {"type": "string"},
-        "videoCodec": {"type": "string"}, "audioCodec": {"type": "string"}, "normalization": {"type": "object"},
+        "videoCodec": {"type": "string"}, "videoEncoder": {"type": ["string", "null"]}, "hardwareAccelerated": {"type": "boolean"}, "audioCodec": {"type": "string"}, "normalization": {"type": "object"},
         "sourceMediaUnchanged": {"const": true}, "streamCopy": {"type": "boolean"}, "decodedAndReencoded": {"type": "boolean"}
       }
     },

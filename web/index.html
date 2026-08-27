@@ -141,6 +141,12 @@
           <p class="help">Expands timestamp-based neighbor discovery and audio-correlation search in both directions. Larger windows help wireless-camera timestamp skew, but increase bounded comparison work.</p>
         </fieldset>
         <fieldset class="settings-section">
+          <legend>Video output</legend>
+          <label class="field"><span>Hardware video codec</span><select id="render-video-codec"><option value="H264_VIDEOTOOLBOX">H.264 · VideoToolbox</option><option value="HEVC_VIDEOTOOLBOX">HEVC · VideoToolbox</option><option value="PRORES_VIDEOTOOLBOX">Apple ProRes 422 · VideoToolbox</option></select></label>
+          <label class="field"><span>Resolution</span><select id="render-resolution"><option value="HD_720P">HD · 1280×720</option><option value="FULL_HD_1080P">Full HD · 1920×1080</option><option value="UHD_2160P">Ultra HD · 3840×2160</option></select></label>
+          <p class="help">These defaults remain mutable. Each render captures its own settings while reusing the same reviewed cut and source identities.</p>
+        </fieldset>
+        <fieldset class="settings-section">
           <legend>Appearance</legend>
           <label class="field"><span>Text size</span><select id="text-scale"><option value="90">Compact · 90%</option><option value="100">Standard · 100%</option><option value="115">Large · 115%</option><option value="130">Extra large · 130%</option></select></label>
           <label class="field"><span>Color scheme</span><select id="color-scheme"><option value="DARKROOM">Darkroom</option><option value="SLATE">Slate</option><option value="DAYLIGHT">Daylight</option><option value="HIGH_CONTRAST">High contrast</option></select></label>
