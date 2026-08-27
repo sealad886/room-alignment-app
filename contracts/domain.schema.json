@@ -125,7 +125,7 @@
     "ProjectClip": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["id", "assetId", "logicalSourceId"],
+      "required": ["id", "assetId", "logicalSourceId", "programEligibility"],
       "properties": {
         "id": {"$ref": "#/$defs/OpaqueId"},
         "assetId": {"$ref": "#/$defs/OpaqueId"},

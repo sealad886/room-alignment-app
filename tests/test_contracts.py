@@ -89,6 +89,8 @@ class ContractTests(unittest.TestCase):
             timestamp_acceptance["then"]["properties"]["confirmTimestampUncertainty"],
             {"const": True},
         )
+        domain = json.loads((ROOT / "contracts" / "domain.schema.json").read_text(encoding="utf-8"))
+        self.assertIn("programEligibility", domain["$defs"]["ProjectClip"]["required"])
 
     def test_all_normative_json_contracts_parse_and_are_served(self):
         contract = json.loads((ROOT / "contracts" / "openapi.json").read_text(encoding="utf-8"))
