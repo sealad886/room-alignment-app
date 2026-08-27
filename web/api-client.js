@@ -59,6 +59,15 @@
     ],
     "queryParameters": {}
   },
+  "createAlignmentAcceptancePreview": {
+    "binary": false,
+    "method": "POST",
+    "path": "/projects/{projectId}/alignment-proposal-acceptance-previews",
+    "pathParameters": [
+      "projectId"
+    ],
+    "queryParameters": {}
+  },
   "createEventToken": {
     "binary": false,
     "method": "POST",

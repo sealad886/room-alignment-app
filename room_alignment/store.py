@@ -36,7 +36,7 @@ from .provenance import normalize_timestamp
 from .scanner import media_record_from_dict, quick_fingerprint
 
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 PROJECT_SNAPSHOT_INTERVAL = 25
 MAX_JOB_EVENTS = 100_000
 MAX_CACHE_ENTRIES = 10_000
@@ -388,6 +388,19 @@ CREATE TABLE IF NOT EXISTS alignment_proposal_sets (
 );
 CREATE INDEX IF NOT EXISTS alignment_sets_project_created
   ON alignment_proposal_sets(project_id,created_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS alignment_acceptance_previews (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  project_revision INTEGER NOT NULL,
+  proposal_set_id TEXT NOT NULL REFERENCES alignment_proposal_sets(id) ON DELETE CASCADE,
+  proposal_digest TEXT NOT NULL,
+  preview_digest TEXT NOT NULL UNIQUE,
+  expires_at REAL NOT NULL,
+  preview_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS alignment_previews_project_created
+  ON alignment_acceptance_previews(project_id,created_at DESC,id DESC);
 CREATE TABLE IF NOT EXISTS render_plans (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -2533,13 +2546,50 @@ class Store:
             }
         selected: list[dict[str, Any]]
         if command_type == "AcceptAlignmentProposalSet":
-            if payload.get("mode", "HIGH_CONFIDENCE") != "HIGH_CONFIDENCE":
+            mode = str(payload.get("mode", "HIGH_CONFIDENCE"))
+            if mode not in {"HIGH_CONFIDENCE", "TIMESTAMP_PRIOR"}:
                 raise DomainError("VALIDATION_FAILED", "Unknown proposal-set acceptance mode")
-            selected = [
-                item
-                for item in proposals.values()
-                if item.get("automaticallyAcceptable") and item["id"] not in already_resolved
-            ]
+            selected = self._select_alignment_proposals(
+                value, mode, payload.get("scope") or {"kind": "PROJECT"}, already_resolved
+            )
+            if mode == "TIMESTAMP_PRIOR":
+                project_row = db.execute(
+                    "SELECT document_json FROM projects WHERE id=?", (project_id,)
+                ).fetchone()
+                current_project = self._migrate_legacy_project(json.loads(project_row["document_json"]))
+                accepted_clip_ids = {
+                    str(clip["id"])
+                    for clip in current_project.get("clips", [])
+                    if clip.get("alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED")
+                    == "ACCEPTED"
+                }
+                selected = [item for item in selected if str(item["clipId"]) not in accepted_clip_ids]
+                if not payload.get("confirmTimestampUncertainty"):
+                    raise DomainError(
+                        "TIMESTAMP_CONFIRMATION_REQUIRED",
+                        "Timestamp-prior acceptance requires explicit confirmation",
+                    )
+                preview = db.execute(
+                    "SELECT * FROM alignment_acceptance_previews WHERE id=?",
+                    (str(payload.get("previewId", "")),),
+                ).fetchone()
+                if (
+                    not preview
+                    or preview["project_id"] != project_id
+                    or int(preview["project_revision"]) != project_revision
+                    or preview["proposal_set_id"] != proposal_set_id
+                    or preview["proposal_digest"] != row["proposal_digest"]
+                    or preview["preview_digest"] != str(payload.get("previewDigest", ""))
+                    or float(preview["expires_at"]) <= time.time()
+                ):
+                    raise DomainError(
+                        "ACCEPTANCE_PREVIEW_STALE", "Alignment acceptance preview is stale"
+                    )
+                canonical_preview = json.loads(preview["preview_json"])
+                if canonical_preview.get("scopeDigest") != digest_json(payload.get("scope") or {"kind": "PROJECT"}):
+                    raise DomainError("ACCEPTANCE_PREVIEW_STALE", "Acceptance scope changed after preview")
+                if sorted(item["id"] for item in selected) != sorted(canonical_preview["proposalIds"]):
+                    raise DomainError("ACCEPTANCE_PREVIEW_STALE", "Applicable proposals changed after preview")
         else:
             proposal_id = str(payload.get("proposalId", ""))
             proposal = proposals.get(proposal_id)
@@ -2553,7 +2603,7 @@ class Store:
                 )
             selected = [proposal]
         if not selected:
-            raise DomainError("VALIDATION_FAILED", "Proposal set has no high-confidence alignments")
+            raise DomainError("VALIDATION_FAILED", "Proposal set has no applicable alignments")
         if any(item.get("requiresDriftConfirmation") for item in selected) and not payload.get("confirmDrift"):
             raise DomainError("VALIDATION_FAILED", "Proposed drift requires explicit confirmation")
         expanded = dict(payload)
@@ -2578,6 +2628,49 @@ class Store:
             "status": "PARTIALLY_RESOLVED",
             "acceptedProposalIds": [item["id"] for item in selected],
         }
+
+    @staticmethod
+    def _select_alignment_proposals(
+        proposal_set: dict[str, Any],
+        mode: str,
+        scope: dict[str, Any],
+        already_resolved: set[str],
+    ) -> list[dict[str, Any]]:
+        kind = str(scope.get("kind", "PROJECT"))
+        if kind not in {"PROJECT", "EVENTS", "SOURCES", "ALIGNED_RANGE", "CLIPS"}:
+            raise DomainError("SCOPE_INVALID", "Unknown alignment acceptance scope")
+        clip_ids = {str(value) for value in scope.get("clipIds", [])}
+        source_ids = {str(value) for value in scope.get("sourceIds", [])}
+        event_ids = {str(value) for value in scope.get("eventIds", [])}
+        start_us = int(scope.get("startAlignedUs", -2**63))
+        end_us = int(scope.get("endAlignedUs", 2**63 - 1))
+        if kind == "ALIGNED_RANGE" and end_us <= start_us:
+            raise DomainError("SCOPE_INVALID", "Aligned acceptance range must have positive duration")
+
+        def in_scope(item: dict[str, Any]) -> bool:
+            if kind == "CLIPS":
+                return str(item.get("clipId")) in clip_ids
+            if kind == "SOURCES":
+                return str(item.get("logicalSourceId")) in source_ids
+            if kind == "EVENTS":
+                return str(item.get("eventId")) in event_ids
+            if kind == "ALIGNED_RANGE":
+                anchor = int(item.get("proposedAlignment", {}).get("anchorAlignedUs", 0))
+                return start_us <= anchor < end_us
+            return True
+
+        return [
+            item
+            for item in proposal_set.get("proposals", [])
+            if item.get("id") not in already_resolved
+            and in_scope(item)
+            and (
+                bool(item.get("automaticallyAcceptable"))
+                if mode == "HIGH_CONFIDENCE"
+                else item.get("classification") == "TIMESTAMP_ONLY"
+                and not item.get("requiresDriftConfirmation")
+            )
+        ]
 
     def _validate_alignment_acceptance_db(
         self,
@@ -3070,6 +3163,115 @@ class Store:
             if not row:
                 raise DomainError("NOT_FOUND", "Alignment proposal set not found")
             return json.loads(row["set_json"])
+
+    def create_alignment_acceptance_preview(
+        self, project_id: str, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        project = self.project(project_id)
+        expected_revision = int(request.get("expectedRevision", 0))
+        if expected_revision != int(project["revision"]):
+            raise DomainError(
+                "REVISION_CONFLICT",
+                "Project revision changed",
+                {"currentRevision": int(project["revision"])},
+            )
+        proposal_set = self.alignment_proposal_set(str(request.get("proposalSetId", "")))
+        if proposal_set.get("projectId") != project_id or proposal_set.get("status") not in {
+            "PENDING", "PARTIALLY_RESOLVED"
+        }:
+            raise DomainError("PROPOSAL_SET_STALE", "Alignment proposal set is stale")
+        if str(request.get("proposalSetDigest", "")) != str(proposal_set.get("digest", "")):
+            raise DomainError("PROPOSAL_SET_STALE", "Alignment proposal set digest changed")
+        mode = str(request.get("mode", "TIMESTAMP_PRIOR"))
+        if mode not in {"HIGH_CONFIDENCE", "TIMESTAMP_PRIOR"}:
+            raise DomainError("VALIDATION_FAILED", "Unknown acceptance preview mode")
+        scope = request.get("scope") or {"kind": "PROJECT"}
+        if not isinstance(scope, dict):
+            raise DomainError("SCOPE_INVALID", "Acceptance scope must be an object")
+        resolved = set(proposal_set.get("acceptedProposalIds", [])) | set(
+            proposal_set.get("rejectedProposalIds", [])
+        )
+        selected = self._select_alignment_proposals(proposal_set, mode, scope, resolved)
+        if mode == "TIMESTAMP_PRIOR":
+            accepted_clip_ids = {
+                str(clip["id"])
+                for clip in project.get("clips", [])
+                if clip.get("alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED")
+                == "ACCEPTED"
+            }
+            selected = [item for item in selected if str(item["clipId"]) not in accepted_clip_ids]
+        if not selected:
+            raise DomainError("VALIDATION_FAILED", "No applicable alignment proposals in scope")
+        assets = self.media_records(item["assetId"] for item in project.get("clips", []))
+        before = alignment_summary(project, assets)
+        expanded = {
+            "alignments": [
+                {
+                    "proposalId": item["id"],
+                    "clipId": item["clipId"],
+                    "alignment": item["proposedAlignment"],
+                    "confidence": item["confidence"],
+                    "evidenceKinds": ["timestamp-prior"]
+                    if item.get("classification") == "TIMESTAMP_ONLY"
+                    else ["audio-correlation", "timestamp-prior"],
+                }
+                for item in selected
+            ],
+            "confirmDrift": False,
+        }
+        simulated = apply_command(project, "AcceptAlignmentProposalSet", expanded, assets)
+        after = alignment_summary(simulated, assets)
+        ranges = sorted(
+            {
+                (
+                    int(item.get("proposedAlignment", {}).get("anchorAlignedUs", 0)),
+                    int(item.get("proposedAlignment", {}).get("anchorAlignedUs", 0)),
+                )
+                for item in selected
+            }
+        )
+        created_at = now_iso()
+        value = {
+            "id": opaque_id("alignpreview"),
+            "projectId": project_id,
+            "projectRevision": int(project["revision"]),
+            "proposalSetId": proposal_set["id"],
+            "proposalSetDigest": proposal_set["digest"],
+            "scope": scope,
+            "scopeDigest": digest_json(scope),
+            "expiresAt": datetime.fromtimestamp(time.time() + 900, UTC).isoformat(),
+            "affectedProposalCount": len(selected),
+            "affectedClipCount": len({item["clipId"] for item in selected}),
+            "affectedEventCount": len({item.get("eventId") for item in selected if item.get("eventId")}),
+            "affectedSourceCount": len({item.get("logicalSourceId") for item in selected if item.get("logicalSourceId")}),
+            "affectedAlignedRanges": [
+                {"startAlignedUs": start, "endAlignedUs": end} for start, end in ranges
+            ],
+            "acceptedCoverageBeforeUs": before["coverage"]["acceptedCoverageUs"],
+            "acceptedCoverageAfterUs": after["coverage"]["acceptedCoverageUs"],
+            "soleCoverageBlockedBeforeUs": before["coverage"]["unresolvedSoleCoverageUs"],
+            "soleCoverageBlockedAfterUs": after["coverage"]["unresolvedSoleCoverageUs"],
+            "remainingCounts": after["confidenceCounts"],
+            "proposedDriftClipIds": [
+                item["clipId"] for item in selected if item.get("requiresDriftConfirmation")
+            ],
+            "resultingReadiness": after["readyForProgramDraft"],
+            "warnings": after.get("warnings", []),
+            "proposalIds": [item["id"] for item in selected],
+            "createdAt": created_at,
+        }
+        value["digest"] = digest_json(value)
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO alignment_acceptance_previews(id,project_id,project_revision,proposal_set_id,"
+                "proposal_digest,preview_digest,expires_at,preview_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    value["id"], project_id, project["revision"], proposal_set["id"],
+                    proposal_set["digest"], value["digest"], time.time() + 900,
+                    json.dumps(value), created_at,
+                ),
+            )
+        return value
 
     def _set_alignment_proposal_status_db(
         self,

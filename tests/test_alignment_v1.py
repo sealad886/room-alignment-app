@@ -533,6 +533,58 @@ class ProposalSetStoreTests(unittest.TestCase):
         self.assertEqual(resolved["acceptedProposalIds"], ["proposal-one"])
         self.assertEqual(resolved["rejectedProposalIds"], ["proposal-review"])
 
+    def test_timestamp_prior_acceptance_requires_matching_preview(self) -> None:
+        (self.source / "timestamp.mp4").write_bytes(b"media")
+        record = MediaRecord(
+            "timestamp-asset", self.library["id"], "timestamp.mp4", 5, 1,
+            duration=5, duration_us=5_000_000,
+            captured_at="2025-10-15T12:00:00+00:00", audio_codec="aac",
+            fingerprint={"size": 5, "modifiedNs": 1},
+        )
+        scan = self.store.begin_scan(self.library["id"], "FULL")
+        self.store.save_media_batch(scan["id"], [record])
+        self.store.finish_scan(scan["id"], "SUCCEEDED", {"videos": 1})
+        project = self.store.create_project("Timestamp", self.library["id"], ["timestamp-asset"])
+        clip = project["clips"][0]
+        proposal_set = {
+            "id": "timestamp-set", "projectId": project["id"],
+            "projectRevision": project["revision"],
+            "selectionDigest": project["selectionSnapshot"]["digest"],
+            "inputDigest": "1" * 64, "digest": "2" * 64,
+            "algorithm": "bounded-audio-evidence-graph", "algorithmVersion": "3",
+            "config": {"overlapSearchExtensionUs": 30_000_000},
+            "configDigest": "3" * 64, "status": "PENDING", "summary": {},
+            "proposals": [{
+                "id": "timestamp-proposal", "clipId": clip["id"], "assetId": "timestamp-asset",
+                "logicalSourceId": clip["logicalSourceId"], "classification": "TIMESTAMP_ONLY",
+                "proposedAlignment": {"anchorSourceUs": 0, "anchorAlignedUs": 10_000, "ratePpm": 0},
+                "confidence": 0.55, "automaticallyAcceptable": False,
+                "requiresDriftConfirmation": False, "evidence": [], "limitations": [],
+                "inputFingerprintDigest": "4" * 64,
+            }],
+            "limitations": [], "acceptedProposalIds": [], "rejectedProposalIds": [],
+            "createdAt": "2025-10-15T12:00:00+00:00", "updatedAt": "2025-10-15T12:00:00+00:00",
+        }
+        self.store.save_alignment_proposal_set(proposal_set)
+        preview = self.store.create_alignment_acceptance_preview(project["id"], {
+            "expectedRevision": project["revision"], "proposalSetId": proposal_set["id"],
+            "proposalSetDigest": proposal_set["digest"], "mode": "TIMESTAMP_PRIOR",
+            "scope": {"kind": "PROJECT"},
+        })
+        result = self.store.apply_project_command(project["id"], {
+            "commandId": "accept-timestamp", "expectedRevision": project["revision"],
+            "commandType": "AcceptAlignmentProposalSet", "payload": {
+                "proposalSetId": proposal_set["id"], "digest": proposal_set["digest"],
+                "mode": "TIMESTAMP_PRIOR", "scope": {"kind": "PROJECT"},
+                "previewId": preview["id"], "previewDigest": preview["digest"],
+                "confirmTimestampUncertainty": True,
+            },
+        })
+        accepted = result["project"]["clips"][0]
+        self.assertEqual(accepted["alignmentState"], "ACCEPTED")
+        self.assertEqual(accepted["programEligibility"], "ELIGIBLE")
+        self.assertEqual(accepted["alignmentEvidence"], ["timestamp-prior"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1221,6 +1221,15 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 5 and parts[2] == "projects" and parts[4] == "commands":
             preview = query.get("preview", ["false"])[0].lower() == "true"
             return self.respond(APP.store.apply_project_command(parts[3], body, preview))
+        if (
+            len(parts) == 5
+            and parts[2] == "projects"
+            and parts[4] == "alignment-proposal-acceptance-previews"
+        ):
+            return self.respond(
+                APP.store.create_alignment_acceptance_preview(parts[3], body),
+                HTTPStatus.CREATED,
+            )
         if len(parts) == 5 and parts[2] == "projects" and parts[4] == "alignment-jobs":
             return self.respond(APP.start_alignment_analysis(parts[3]), HTTPStatus.ACCEPTED)
         if len(parts) == 5 and parts[2] == "projects" and parts[4] == "render-plans":
