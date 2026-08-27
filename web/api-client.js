@@ -59,6 +59,15 @@
     ],
     "queryParameters": {}
   },
+  "createAlignmentAcceptancePreview": {
+    "binary": false,
+    "method": "POST",
+    "path": "/projects/{projectId}/alignment-proposal-acceptance-previews",
+    "pathParameters": [
+      "projectId"
+    ],
+    "queryParameters": {}
+  },
   "createEventToken": {
     "binary": false,
     "method": "POST",
@@ -103,6 +112,13 @@
     "pathParameters": [
       "projectId"
     ],
+    "queryParameters": {}
+  },
+  "getApplicationSettings": {
+    "binary": false,
+    "method": "GET",
+    "path": "/settings",
+    "pathParameters": [],
     "queryParameters": {}
   },
   "getArtifact": {
@@ -557,6 +573,13 @@
       "after": false,
       "token": true
     }
+  },
+  "updateApplicationSettings": {
+    "binary": false,
+    "method": "PUT",
+    "path": "/settings",
+    "pathParameters": [],
+    "queryParameters": {}
   },
   "updateLibraryTimePolicy": {
     "binary": false,

@@ -7,6 +7,11 @@ const client = new RoomAlignmentAPIClient();
 
 const state = {
   view: "library",
+  settings: {
+    overlapSearchExtensionUs: 30_000_000,
+    textScalePercent: 100,
+    colorScheme: "DARKROOM",
+  },
   library: null,
   media: [],
   mediaById: new Map(),
@@ -36,6 +41,7 @@ const state = {
   alignmentSummary: null,
   timelineWindow: null,
   proposalSets: [],
+  alignmentQueueLimit: 50,
   sources: [],
   selectedSource: 0,
   selectedClipId: null,
@@ -78,6 +84,61 @@ function toast(message) {
   node.classList.add("show");
   clearTimeout(toast.timer);
   toast.timer = setTimeout(() => node.classList.remove("show"), 3600);
+}
+
+function applyAppearanceSettings(settings = state.settings) {
+  const scale = Math.max(85, Math.min(140, Number(settings.textScalePercent || 100))) / 100;
+  document.documentElement.dataset.theme = settings.colorScheme || "DARKROOM";
+  document.documentElement.style.setProperty("--text-scale", String(scale));
+  document.documentElement.style.setProperty("--inverse-text-scale", String(1 / scale));
+  document.querySelector('meta[name="color-scheme"]')?.setAttribute(
+    "content",
+    settings.colorScheme === "DAYLIGHT" ? "light" : "dark",
+  );
+}
+
+function populateSettingsForm(settings = state.settings) {
+  $("#overlap-search-seconds").value = Math.round(Number(settings.overlapSearchExtensionUs) / 1_000_000);
+  $("#text-scale").value = String(settings.textScalePercent);
+  $("#color-scheme").value = settings.colorScheme;
+}
+
+function previewSettingsForm() {
+  applyAppearanceSettings({
+    ...state.settings,
+    textScalePercent: Number($("#text-scale").value),
+    colorScheme: $("#color-scheme").value,
+  });
+}
+
+function closeSettings({restore = true} = {}) {
+  if (restore) applyAppearanceSettings(state.settings);
+  $("#settings-dialog").close();
+}
+
+async function saveSettings(event) {
+  event.preventDefault();
+  const saveState = $("#settings-save-state");
+  saveState.textContent = "Saving…";
+  try {
+    const previousExtension = Number(state.settings.overlapSearchExtensionUs);
+    state.settings = await client.updateApplicationSettings({}, {
+      overlapSearchExtensionUs: Math.round(Number($("#overlap-search-seconds").value) * 1_000_000),
+      textScalePercent: Number($("#text-scale").value),
+      colorScheme: $("#color-scheme").value,
+    });
+    applyAppearanceSettings();
+    $("#settings-dialog").close();
+    if (Number(state.settings.overlapSearchExtensionUs) !== previousExtension && state.project) {
+      state.proposalSets = await client.listAlignmentProposalSets({projectId: state.project.id});
+      renderSuggestions();
+    }
+    toast("Settings saved locally");
+  } catch (error) {
+    saveState.textContent = "Could not save";
+    applyAppearanceSettings(state.settings);
+    handleError(error);
+  }
 }
 
 function confirmAction(message, {title = "Confirm change", confirmLabel = "Confirm"} = {}) {
@@ -1054,26 +1115,89 @@ function renderSuggestions() {
     const unplaced = state.timelineWindow?.unplacedItems || [];
     container.innerHTML = unplaced.length
       ? `<div class="review-queue">${unplaced.slice(0, 12).map(item => `<div class="confidence"><strong>Unplaced clip</strong><p><a class="timeline-clip-link" href="#alignment-timeline" data-focus-clip="${safe(item.clipId)}">${safe(item.relativePath || item.assetId)}</a></p><small>Manual timing evidence required</small></div>`).join("")}</div>`
-      : '<p class="muted">Analyze overlaps to compare bounded cross-source audio evidence. Timestamp placement stays provisional.</p>';
+      : `<p class="muted">Analyze overlaps to compare bounded cross-source audio evidence across a ±${Math.round(Number(state.settings.overlapSearchExtensionUs) / 1_000_000)} second timestamp window. Timestamp placement stays provisional.</p>`;
     return;
   }
   const summary = proposalSet.summary;
   const accepted = new Set(proposalSet.acceptedProposalIds || []);
   const rejected = new Set(proposalSet.rejectedProposalIds || []);
   const highConfidence = proposalSet.proposals.filter(item => item.automaticallyAcceptable && !accepted.has(item.id) && !rejected.has(item.id));
-  const review = proposalSet.proposals.filter(item => !item.automaticallyAcceptable && !accepted.has(item.id) && !rejected.has(item.id));
+  const pending = proposalSet.proposals.filter(item => !accepted.has(item.id) && !rejected.has(item.id));
+  const review = pending.filter(item => !item.automaticallyAcceptable);
+  const timestampOnly = review.filter(item => item.classification === "TIMESTAMP_ONLY");
+  const conflicting = review.filter(item => item.classification === "CONFLICTING");
+  const unresolved = review.filter(item => item.classification === "UNRESOLVED");
+  const blockers = state.alignmentSummary?.blockers || [];
+  const warnings = state.alignmentSummary?.warnings || [];
+  const visibleReview = review.slice(0, state.alignmentQueueLimit);
   container.innerHTML = `
     <div class="confidence"><strong>${safe(proposalSet.status)} · audio evidence graph</strong><div class="proposal-grid">
       <div><strong>${summary.audioConfirmed}</strong><small>audio-confirmed</small></div>
       <div><strong>${summary.timestampOnly}</strong><small>timestamp-only</small></div>
       <div><strong>${summary.conflicting}</strong><small>conflicting</small></div>
       <div><strong>${summary.unresolved}</strong><small>unresolved</small></div>
-    </div><small>${summary.candidatePairs} bounded comparisons · ${summary.confirmedEdges} supported edges · visual matching not used</small></div>
+    </div><small>${summary.candidatePairs} bounded comparisons · ${summary.confirmedEdges} supported edges · ±${Math.round(Number(proposalSet.config?.overlapSearchExtensionUs || state.settings.overlapSearchExtensionUs) / 1_000_000)}s timestamp search · visual matching not used</small></div>
+    <div class="alignment-queue-tabs" role="list" aria-label="Alignment review queues">
+      <span role="listitem"><strong>${highConfidence.length}</strong> audio-confirmed</span>
+      <span role="listitem"><strong>${timestampOnly.length}</strong> timestamp-only</span>
+      <span role="listitem" class="${conflicting.length ? "blocked" : ""}"><strong>${conflicting.length}</strong> conflicting</span>
+      <span role="listitem" class="${blockers.length ? "blocked" : ""}"><strong>${blockers.length}</strong> required</span>
+      <span role="listitem"><strong>${warnings.length}</strong> redundant warnings</span>
+    </div>
     ${highConfidence.length ? `<button class="btn primary wide" id="accept-high-confidence">Accept ${highConfidence.length} high-confidence result${highConfidence.length === 1 ? "" : "s"}</button>` : ""}
-    <div class="review-queue">${review.slice(0, 20).map(item => `<div class="confidence"><strong>${safe(item.classification.replaceAll("_", " "))} · ${Math.round(Number(item.confidence) * 100)}%</strong><p><a class="timeline-clip-link" href="#alignment-timeline" data-focus-clip="${safe(item.clipId)}">${safe(state.mediaById.get(item.assetId)?.relative_path || item.assetId)}</a></p><small>${safe(item.limitations.join("; ") || "Review evidence before accepting")}</small><div class="link-row"><button class="btn" data-accept-proposal="${safe(item.id)}">Accept manually</button><button class="btn" data-reject-proposal="${safe(item.id)}">Reject</button></div></div>`).join("")}</div>`;
+    ${timestampOnly.length ? `<button class="btn primary wide" id="review-timestamp-priors">Review and accept ${timestampOnly.length} timestamp placement${timestampOnly.length === 1 ? "" : "s"}</button>` : ""}
+    ${blockers.length ? `<div class="confidence blocked"><strong>Required before first cut</strong><p>${blockers.map(item => `${safe(item.code.replaceAll("_", " "))} · ${formatUs(Number(item.endAlignedUs || 0) - Number(item.startAlignedUs || 0))}`).join("<br>")}</p></div>` : ""}
+    <div class="review-queue">${visibleReview.map(item => `<div class="confidence"><strong>${safe(item.classification.replaceAll("_", " "))} · ${Math.round(Number(item.confidence) * 100)}%</strong><p><a class="timeline-clip-link" href="#alignment-timeline" data-focus-clip="${safe(item.clipId)}">${safe(state.mediaById.get(item.assetId)?.relative_path || item.assetId)}</a></p><small>${safe((item.limitations || []).join("; ") || "Review evidence before accepting")}</small><div class="link-row"><button class="btn" data-accept-proposal="${safe(item.id)}">Accept manually</button><button class="btn" data-hold-clip="${safe(item.clipId)}">Hold</button><button class="btn" data-exclude-clip="${safe(item.clipId)}">Exclude from first cut</button><button class="btn" data-reject-proposal="${safe(item.id)}">Reject suggestion</button></div></div>`).join("")}</div>
+    ${review.length > visibleReview.length ? `<button class="btn wide" id="load-more-alignment">Show ${Math.min(50, review.length - visibleReview.length)} more</button>` : ""}`;
   if ($("#accept-high-confidence")) $("#accept-high-confidence").onclick = () => acceptHighConfidence(proposalSet);
+  if ($("#review-timestamp-priors")) $("#review-timestamp-priors").onclick = () => acceptTimestampPriors(proposalSet);
+  if ($("#load-more-alignment")) $("#load-more-alignment").onclick = () => { state.alignmentQueueLimit += 50; renderSuggestions(); };
   $$('[data-accept-proposal]').forEach(button => { button.onclick = () => resolveAlignmentProposal(proposalSet, button.dataset.acceptProposal, true); });
   $$('[data-reject-proposal]').forEach(button => { button.onclick = () => resolveAlignmentProposal(proposalSet, button.dataset.rejectProposal, false); });
+  $$('[data-hold-clip]').forEach(button => { button.onclick = () => setClipEligibility(button.dataset.holdClip, "HELD_FOR_REVIEW"); });
+  $$('[data-exclude-clip]').forEach(button => { button.onclick = () => setClipEligibility(button.dataset.excludeClip, "EXCLUDED"); });
+}
+
+async function acceptTimestampPriors(proposalSet) {
+  try {
+    const scope = await chooseTimestampScope();
+    if (!scope) return;
+    const preview = await client.createAlignmentAcceptancePreview({projectId: state.project.id}, {
+      commandId: crypto.randomUUID(), expectedRevision: state.project.revision,
+      proposalSetId: proposalSet.id, proposalSetDigest: proposalSet.digest,
+      mode: "TIMESTAMP_PRIOR", scope,
+    });
+    const message = `${preview.affectedClipCount} non-conflicting clips will use timestamp-prior placement.\n\nAccepted coverage: ${formatUs(preview.acceptedCoverageBeforeUs)} → ${formatUs(preview.acceptedCoverageAfterUs)}\nRemaining blockers: ${preview.resultingReadiness ? "none" : preview.remainingCounts.reviewRequired + preview.remainingCounts.unresolved}\n\nWireless-camera timestamps may reflect hub receipt time rather than exact capture time. Conflicting clips are excluded from this action.`;
+    if (!await confirmAction(message, {title: "Accept timestamp placements", confirmLabel: "Accept placements"})) return;
+    if (await command("AcceptAlignmentProposalSet", {
+      proposalSetId: proposalSet.id, digest: proposalSet.digest, mode: "TIMESTAMP_PRIOR", scope,
+      previewId: preview.id, previewDigest: preview.digest, confirmTimestampUncertainty: true,
+    })) toast(`${preview.affectedClipCount} timestamp placements accepted as one revision`);
+  } catch (error) { handleError(error); }
+}
+
+function chooseTimestampScope() {
+  const dialog = $("#timestamp-scope-dialog");
+  const select = $("#timestamp-scope-select");
+  const source = state.sources[state.selectedSource];
+  const clip = selectedAlignmentClip(source);
+  const options = [
+    {label: "Entire project", scope: {kind: "PROJECT"}},
+    ...(source ? [{label: `Current source · ${source.label}`, scope: {kind: "SOURCES", sourceIds: [source.id]}}] : []),
+    ...(clip ? [{label: "Selected clip", scope: {kind: "CLIPS", clipIds: [clip.id]}}] : []),
+    {label: `Visible timeline · ${formatUs(state.timelineEndUs - state.timelineStartUs)}`, scope: {kind: "ALIGNED_RANGE", startAlignedUs: Math.round(state.timelineStartUs), endAlignedUs: Math.round(state.timelineEndUs)}},
+    ...(state.selectedEvents.size ? [{label: `${state.selectedEvents.size} selected event${state.selectedEvents.size === 1 ? "" : "s"}`, scope: {kind: "EVENTS", eventIds: [...state.selectedEvents]}}] : []),
+  ];
+  select.innerHTML = options.map((item, index) => `<option value="${index}">${safe(item.label)}</option>`).join("");
+  return new Promise(resolve => {
+    const finish = () => resolve(dialog.returnValue === "preview" ? options[Number(select.value)]?.scope || null : null);
+    dialog.addEventListener("close", finish, {once: true});
+    dialog.showModal();
+  });
+}
+
+async function setClipEligibility(clipId, programEligibility) {
+  await command("SetClipProgramEligibility", {clipIds: [clipId], programEligibility});
 }
 
 async function focusClipInTimeline(clipId, proposalSet = null) {
@@ -1718,6 +1842,20 @@ async function addFolderAndScan(path) {
 
 function setupEvents() {
   $$('[data-view]').forEach(button => { button.onclick = () => showView(button.dataset.view); });
+  $("#open-settings").onclick = () => {
+    populateSettingsForm();
+    $("#settings-save-state").textContent = "";
+    $("#settings-dialog").showModal();
+  };
+  $("#close-settings").onclick = () => closeSettings();
+  $("#cancel-settings").onclick = () => closeSettings();
+  $("#settings-dialog").addEventListener("cancel", event => {
+    event.preventDefault();
+    closeSettings();
+  });
+  $("#settings-form").onsubmit = saveSettings;
+  $("#text-scale").onchange = previewSettingsForm;
+  $("#color-scheme").onchange = previewSettingsForm;
   $("#suggestion-list").addEventListener("click", event => {
     const link = event.composedPath().find(node => node instanceof Element && node.matches?.("[data-focus-clip]"));
     if (!link) return;
@@ -1991,6 +2129,12 @@ function handleError(error) {
 async function start() {
   try {
     await client.getSession();
+    try {
+      state.settings = await client.getApplicationSettings();
+    } catch (error) {
+      console.warn("Using default application settings", error);
+    }
+    applyAppearanceSettings();
     $("#library-time-zone").value = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
     setupEvents();
     connectEventFeed();

@@ -4,11 +4,20 @@
 
 ```bash
 room-alignment serve --no-open --data-dir /path/to/state
+room-alignment stop --data-dir /path/to/state
 ```
 
 Health is intentionally non-sensitive at `/api/health`. A second process using the same state directory fails before scheduling work. Graceful shutdown rejects new work, requests scan cancellation, terminates owned render process trees, persists job transitions, and releases ownership. On restart, in-flight analyses/scans are `INTERRUPTED`; renders are never blindly reattached and become `FAILED_RECOVERABLE` where appropriate.
 
+`room-alignment stop` reads process identity only from the contended state lock; it does not search or signal processes by name. Graceful shutdown clears that identity while still holding the lock, then unlocks and closes the file. It is idempotent when no process owns that directory. Use `--timeout SECONDS --force` only when graceful shutdown cannot complete; force mode sends `SIGKILL` to the still-validated lock owner after the timeout.
+
 Run `room-alignment doctor` before first use or after changing Python/FFmpeg. It checks installed frontend/schema resources and FFmpeg/FFprobe availability without exposing absolute paths.
+
+## Application settings
+
+Settings are available from every workflow phase and persist in `room-alignment.sqlite3`. Overlap search extends timestamp-derived clip ranges before and after each clip and applies the same bound to audio-correlation lag search. Default is 30 seconds; allowed range is 0–300 seconds. Increasing it may prepare more audio signatures and comparisons, but analysis remains limited to eight candidates per clip and 2,000 pairs per job. A changed overlap setting marks pending alignment proposal sets stale; run **Analyze overlaps** again. Text size and color scheme changes are presentation-only.
+
+For a large project blocked in Align, review the **Required before first cut** queue first. Accept high-confidence audio results, then use **Review and accept timestamp placements** to inspect the scoped coverage change before confirming. Redundant conflicts may remain held; exact sole-coverage ranges remain blockers.
 
 Build/install validation uses a temporary virtual environment and state directory:
 
@@ -36,6 +45,8 @@ room-alignment admin backup STATE.sqlite3 BACKUP.sqlite3
 room-alignment admin verify BACKUP.sqlite3
 room-alignment admin dry-run-migrate BACKUP.sqlite3
 ```
+
+Schema version 9 adds preview-bound alignment acceptance. Canonical project migration backfills accepted clips as eligible and other clips as held for review. Existing manual transforms and programs are preserved; run overlap analysis again when an older pending proposal set becomes stale.
 
 Stop the application before restore. Restore verifies the input, refuses without `--replace`, takes the state lock, creates a verified `*.pre-restore-*` rollback copy, stages the replacement, and atomically replaces the DB.
 

@@ -78,6 +78,19 @@ class ContractTests(unittest.TestCase):
         self.assertIn("SetAudioMode", command_types)
         self.assertIn("ReconcileBoundary", command_types)
         self.assertNotIn("InitializeProgram", command_types)
+        timestamp_acceptance = commands["$defs"]["AcceptAlignmentProposalSet"]["properties"][
+            "payload"
+        ]["allOf"][0]
+        self.assertEqual(
+            timestamp_acceptance["then"]["required"],
+            ["scope", "previewId", "previewDigest", "confirmTimestampUncertainty"],
+        )
+        self.assertEqual(
+            timestamp_acceptance["then"]["properties"]["confirmTimestampUncertainty"],
+            {"const": True},
+        )
+        domain = json.loads((ROOT / "contracts" / "domain.schema.json").read_text(encoding="utf-8"))
+        self.assertIn("programEligibility", domain["$defs"]["ProjectClip"]["required"])
 
     def test_all_normative_json_contracts_parse_and_are_served(self):
         contract = json.loads((ROOT / "contracts" / "openapi.json").read_text(encoding="utf-8"))
@@ -104,6 +117,20 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(frame_rate, {"type": "number", "minimum": 1, "maximum": 240})
         timeline_schema = json.loads(
             (ROOT / "contracts" / "timeline.schema.json").read_text(encoding="utf-8")
+        )
+        proposal_config = timeline_schema["$defs"]["AlignmentProposalSet"]["properties"]["config"]
+        self.assertIn("overlapSearchExtensionUs", proposal_config["required"])
+        self.assertNotIn("uncertaintyUs", proposal_config["properties"])
+        preview_path = contract["paths"][
+            "/projects/{projectId}/alignment-proposal-acceptance-previews"
+        ]["post"]
+        self.assertEqual(
+            preview_path["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AlignmentAcceptancePreviewCreate",
+        )
+        self.assertEqual(
+            preview_path["responses"]["201"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AlignmentAcceptancePreview",
         )
         self.assertIn("ClusterFacets", timeline_schema["$defs"])
         facets_response = contract["paths"][

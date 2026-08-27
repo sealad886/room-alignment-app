@@ -68,6 +68,31 @@ def _stop(process: subprocess.Popen[str]) -> None:
         raise RuntimeError(f"Installed server exited with {process.returncode}: {stderr}")
 
 
+def _stop_via_cli(
+    command: Path,
+    state_dir: Path,
+    cwd: Path,
+    environment: dict[str, str],
+    process: subprocess.Popen[str],
+) -> None:
+    result = subprocess.run(
+        [str(command), "stop", "--data-dir", str(state_dir)],
+        cwd=cwd,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"Installed stop command failed: {result.stderr[:500]}")
+    payload = json.loads(result.stdout)
+    if payload != {"forced": False, "status": "STOPPED"}:
+        raise RuntimeError(f"Installed stop command returned an unexpected result: {payload}")
+    if process.wait(timeout=5) != 0:
+        raise RuntimeError("Installed server exited unsuccessfully after stop command")
+
+
 def _launch(command: Path, state_dir: Path, cwd: Path, environment: dict[str, str]) -> subprocess.Popen[str]:
     return subprocess.Popen(
         [str(command), "serve", "--no-open", "--host", "127.0.0.1", "--port", "0", "--data-dir", str(state_dir)],
@@ -158,7 +183,11 @@ def verify(wheel: Path) -> dict[str, object]:
             if openapi.get("openapi") != "3.1.0":
                 raise RuntimeError("Installed OpenAPI contract did not load")
         finally:
-            _stop(process)
+            if process.poll() is None:
+                try:
+                    _stop_via_cli(command, state_dir, root, clean_environment, process)
+                finally:
+                    _stop(process)
 
         administration = subprocess.run(
             [str(command), "admin", "verify", str(state_dir / "room-alignment.sqlite3")],
@@ -187,6 +216,7 @@ def verify(wheel: Path) -> dict[str, object]:
         "health": "ok",
         "openapi": "3.1.0",
         "sigterm": "clean",
+        "stopCommand": "ok",
         "stateLockReuse": "ok",
         "stateAdmin": "ok",
         "sourceTreeIndependent": True,

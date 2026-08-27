@@ -14,7 +14,7 @@
         "SplitLogicalSource", "ArchiveLogicalSource", "AssignClip", "ConfirmSourceIdentities", "SetReferenceSource",
         "SetSyncTransform", "SetClipAlignment", "AlignMarkedMoments",
         "AcceptAlignmentProposalSet", "AcceptAlignmentProposal", "RejectAlignmentProposal",
-        "RejectAlignmentProposalSet", "SetTimelineSections",
+        "RejectAlignmentProposalSet", "SetClipProgramEligibility", "SetRangeProgramEligibility", "SetTimelineSections",
         "GenerateProgramDraft", "AddVideoBlock", "SplitVideoBlock",
         "MoveVideoBoundary", "DeleteVideoBlock", "AssignVideoSource", "PinVideoClip", "CutToSource",
         "AddAudioBlock", "SplitAudioBlock", "MoveAudioBoundary", "DeleteAudioBlock", "SetAudioMode",
@@ -43,6 +43,8 @@
         {"$ref": "#/$defs/AcceptAlignmentProposal"},
         {"$ref": "#/$defs/RejectAlignmentProposal"},
         {"$ref": "#/$defs/RejectAlignmentProposalSet"},
+        {"$ref": "#/$defs/SetClipProgramEligibility"},
+        {"$ref": "#/$defs/SetRangeProgramEligibility"},
         {"$ref": "#/$defs/SetTimelineSections"},
         {"$ref": "#/$defs/GenerateProgramDraft"},
         {"$ref": "#/$defs/AddVideoBlock"},
@@ -106,8 +108,24 @@
     "AlignMarkedMoments": {
       "properties": {"commandType": {"const": "AlignMarkedMoments"}, "payload": {"type": "object", "additionalProperties": false, "required": ["referenceClipId", "referenceSourceUs", "targetClipId", "targetSourceUs"], "properties": {"referenceClipId": {"$ref": "#/$defs/Id"}, "referenceSourceUs": {"$ref": "#/$defs/Us"}, "targetClipId": {"$ref": "#/$defs/Id"}, "targetSourceUs": {"$ref": "#/$defs/Us"}}}}
     },
+    "AcceptanceScope": {
+      "type": "object", "additionalProperties": false, "required": ["kind"],
+      "properties": {
+        "kind": {"enum": ["PROJECT", "EVENTS", "SOURCES", "ALIGNED_RANGE", "CLIPS"]},
+        "eventIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}},
+        "sourceIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}},
+        "startAlignedUs": {"type": "integer"}, "endAlignedUs": {"type": "integer"},
+        "clipIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}}
+      },
+      "allOf": [
+        {"if": {"properties": {"kind": {"const": "EVENTS"}}, "required": ["kind"]}, "then": {"required": ["eventIds"]}},
+        {"if": {"properties": {"kind": {"const": "SOURCES"}}, "required": ["kind"]}, "then": {"required": ["sourceIds"]}},
+        {"if": {"properties": {"kind": {"const": "ALIGNED_RANGE"}}, "required": ["kind"]}, "then": {"required": ["startAlignedUs", "endAlignedUs"]}},
+        {"if": {"properties": {"kind": {"const": "CLIPS"}}, "required": ["kind"]}, "then": {"required": ["clipIds"]}}
+      ]
+    },
     "AcceptAlignmentProposalSet": {
-      "properties": {"commandType": {"const": "AcceptAlignmentProposalSet"}, "payload": {"type": "object", "additionalProperties": false, "required": ["proposalSetId", "digest", "mode"], "properties": {"proposalSetId": {"$ref": "#/$defs/Id"}, "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "mode": {"const": "HIGH_CONFIDENCE"}, "confirmDrift": {"type": "boolean"}}}}
+      "properties": {"commandType": {"const": "AcceptAlignmentProposalSet"}, "payload": {"type": "object", "additionalProperties": false, "required": ["proposalSetId", "digest", "mode"], "properties": {"proposalSetId": {"$ref": "#/$defs/Id"}, "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "mode": {"enum": ["HIGH_CONFIDENCE", "TIMESTAMP_PRIOR"]}, "scope": {"$ref": "#/$defs/AcceptanceScope"}, "previewId": {"$ref": "#/$defs/Id"}, "previewDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "confirmTimestampUncertainty": {"type": "boolean"}, "confirmDrift": {"type": "boolean"}}, "allOf": [{"if": {"properties": {"mode": {"const": "TIMESTAMP_PRIOR"}}, "required": ["mode"]}, "then": {"required": ["scope", "previewId", "previewDigest", "confirmTimestampUncertainty"], "properties": {"confirmTimestampUncertainty": {"const": true}}}}]}}
     },
     "AcceptAlignmentProposal": {
       "properties": {"commandType": {"const": "AcceptAlignmentProposal"}, "payload": {"type": "object", "additionalProperties": false, "required": ["proposalSetId", "proposalId", "digest"], "properties": {"proposalSetId": {"$ref": "#/$defs/Id"}, "proposalId": {"$ref": "#/$defs/Id"}, "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "confirmLowConfidence": {"type": "boolean"}, "confirmDrift": {"type": "boolean"}}}}
@@ -117,6 +135,12 @@
     },
     "RejectAlignmentProposalSet": {
       "properties": {"commandType": {"const": "RejectAlignmentProposalSet"}, "payload": {"type": "object", "additionalProperties": false, "required": ["proposalSetId", "digest"], "properties": {"proposalSetId": {"$ref": "#/$defs/Id"}, "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}}
+    },
+    "SetClipProgramEligibility": {
+      "properties": {"commandType": {"const": "SetClipProgramEligibility"}, "payload": {"type": "object", "additionalProperties": false, "required": ["clipIds", "programEligibility"], "properties": {"clipIds": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}}, "programEligibility": {"enum": ["ELIGIBLE", "HELD_FOR_REVIEW", "EXCLUDED"]}, "rationale": {"type": "string", "maxLength": 1000}}}}
+    },
+    "SetRangeProgramEligibility": {
+      "properties": {"commandType": {"const": "SetRangeProgramEligibility"}, "payload": {"type": "object", "additionalProperties": false, "required": ["startAlignedUs", "endAlignedUs", "programEligibility"], "properties": {"startAlignedUs": {"type": "integer"}, "endAlignedUs": {"type": "integer"}, "sourceIds": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/Id"}}, "currentEligibilityFilter": {"type": "array", "uniqueItems": true, "items": {"enum": ["ELIGIBLE", "HELD_FOR_REVIEW", "EXCLUDED"]}}, "programEligibility": {"enum": ["ELIGIBLE", "HELD_FOR_REVIEW", "EXCLUDED"]}, "rationale": {"type": "string", "maxLength": 1000}}}}
     },
     "SetTimelineSections": {
       "properties": {"commandType": {"const": "SetTimelineSections"}, "payload": {"type": "object", "additionalProperties": false, "required": ["sections"], "properties": {"sections": {"type": "array", "minItems": 1, "items": {"$ref": "./timeline.schema.json#/$defs/TimelineSection"}}}}}

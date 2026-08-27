@@ -28,6 +28,7 @@ from .alignment import (
     analyze_project_alignment,
 )
 from .domain import DomainError, program_at
+from .lifecycle import clear_owner, write_owner
 from .render import CanonicalRenderManager, RenderManager, build_render_plan
 from .scanner import iter_scan_records
 from .store import Store, TERMINAL_JOB_STATES
@@ -128,6 +129,7 @@ class App:
         except BlockingIOError as error:
             self._lock_file.close()
             raise RuntimeError("Another Room Alignment process owns this state directory") from error
+        write_owner(self._lock_file)
         self.store = Store(self.data_dir / "room-alignment.sqlite3")
         self.audio_signatures = AudioSignatureCache(self.store)
         self.legacy_render = RenderManager(self.store)
@@ -178,9 +180,12 @@ class App:
             except DomainError:
                 pass
         try:
-            fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+            clear_owner(self._lock_file)
         finally:
-            self._lock_file.close()
+            try:
+                fcntl.flock(self._lock_file.fileno(), fcntl.LOCK_UN)
+            finally:
+                self._lock_file.close()
 
     def start_scan(
         self,
@@ -355,6 +360,7 @@ class App:
 
     def start_alignment_analysis(self, project_id: str) -> dict[str, object]:
         project = self.store.project(project_id)
+        settings = self.store.application_settings()
         self.store.active_library_root_paths(project["libraryId"])
         with self.lock:
             if len(self.analysis_reserved) >= 2:
@@ -374,6 +380,7 @@ class App:
                     project,
                     assets,
                     self.audio_signatures,
+                    overlap_search_extension_us=int(settings["overlapSearchExtensionUs"]),
                     canceled=lambda: self.closing or self._job_stopping(job["id"]),
                     progress=lambda value, message: self.store.transition_job(
                         job["id"], "RUNNING", value, message
@@ -722,6 +729,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/v1/session":
             _session_id, session = self.session()
             return self.respond({"authenticated": True, "csrfToken": session["csrf"]})
+        if path == "/api/v1/settings":
+            return self.respond(APP.store.application_settings())
         if path == "/api/v1/openapi.json":
             return self.respond(CONTRACT.read_bytes(), content_type="application/json; charset=utf-8")
         if path == "/api/v1/grants":
@@ -998,6 +1007,18 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as error:
             self.error(error)
 
+    def do_PUT(self) -> None:
+        self._set_request_id()
+        try:
+            self.enforce_request_boundary(mutation=True)
+            path = urlparse(self.path).path
+            body = self.json_body()
+            if path != "/api/v1/settings":
+                raise DomainError("NOT_FOUND", "API resource not found")
+            return self.respond(APP.store.update_application_settings(body))
+        except Exception as error:
+            self.error(error)
+
     def post_api(self, path: str, query: dict[str, list[str]], body: dict[str, object]) -> None:
         if path == "/api/v1/grants":
             return self.respond(
@@ -1200,6 +1221,15 @@ class Handler(BaseHTTPRequestHandler):
         if len(parts) == 5 and parts[2] == "projects" and parts[4] == "commands":
             preview = query.get("preview", ["false"])[0].lower() == "true"
             return self.respond(APP.store.apply_project_command(parts[3], body, preview))
+        if (
+            len(parts) == 5
+            and parts[2] == "projects"
+            and parts[4] == "alignment-proposal-acceptance-previews"
+        ):
+            return self.respond(
+                APP.store.create_alignment_acceptance_preview(parts[3], body),
+                HTTPStatus.CREATED,
+            )
         if len(parts) == 5 and parts[2] == "projects" and parts[4] == "alignment-jobs":
             return self.respond(APP.start_alignment_analysis(parts[3]), HTTPStatus.ACCEPTED)
         if len(parts) == 5 and parts[2] == "projects" and parts[4] == "render-plans":

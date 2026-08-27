@@ -58,6 +58,52 @@ class StoreV1Tests(unittest.TestCase):
         output = self.store.create_grant(self.output, "WRITE_OUTPUT")
         self.assertEqual(output["role"], "WRITE_OUTPUT")
 
+    def test_application_settings_persist_with_bounded_values(self):
+        updated = self.store.update_application_settings(
+            {
+                "overlapSearchExtensionUs": 75_000_000,
+                "textScalePercent": 115,
+                "colorScheme": "SLATE",
+            }
+        )
+        self.assertEqual(updated["overlapSearchExtensionUs"], 75_000_000)
+        reopened = Store(self.store.path)
+        self.assertEqual(reopened.application_settings(), updated)
+        with self.assertRaisesRegex(DomainError, "between 0 and 300 seconds"):
+            reopened.update_application_settings({"overlapSearchExtensionUs": 300_000_001})
+        with self.assertRaisesRegex(DomainError, "Text scale"):
+            reopened.update_application_settings({"textScalePercent": 141})
+        with self.assertRaisesRegex(DomainError, "color scheme"):
+            reopened.update_application_settings({"colorScheme": "UNKNOWN"})
+
+    def test_overlap_setting_change_stales_pending_alignment_proposals(self):
+        record = self.record("settings-clip", "settings-clip.mp4")
+        self.scan("FULL", [record])
+        project = self.store.create_project("Settings", self.library["id"], [record.id])
+        proposal_set = {
+            "id": "settings-proposal-set",
+            "projectId": project["id"],
+            "projectRevision": project["revision"],
+            "selectionDigest": project["selectionSnapshot"]["digest"],
+            "inputDigest": "a" * 64,
+            "digest": "b" * 64,
+            "algorithm": "bounded-audio-evidence-graph",
+            "algorithmVersion": "2",
+            "config": {"overlapSearchExtensionUs": 30_000_000},
+            "configDigest": "c" * 64,
+            "status": "PENDING",
+            "summary": {},
+            "proposals": [],
+            "limitations": [],
+            "createdAt": "2025-10-15T12:00:00+00:00",
+            "updatedAt": "2025-10-15T12:00:00+00:00",
+        }
+        self.store.save_alignment_proposal_set(proposal_set)
+        self.store.update_application_settings({"overlapSearchExtensionUs": 60_000_000})
+        saved = self.store.alignment_proposal_sets(project["id"])[0]
+        self.assertEqual(saved["status"], "STALE")
+        self.assertEqual(saved["invalidationReason"], "Overlap search settings changed")
+
     def test_grant_identity_change_fails_closed(self):
         moved = Path(self.temp.name) / "moved-source"
         self.root.rename(moved)

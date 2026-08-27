@@ -120,7 +120,7 @@ class StateAdministrationTests(unittest.TestCase):
             result = dry_run_migration(state)
 
             self.assertEqual(result["integrity"], "ok")
-            self.assertEqual(result["schemaVersion"], 7)
+            self.assertEqual(result["schemaVersion"], 9)
 
 
 if __name__ == "__main__":

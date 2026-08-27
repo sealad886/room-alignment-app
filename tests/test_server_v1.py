@@ -104,6 +104,29 @@ class ServerBoundaryTests(unittest.TestCase):
         self.assertEqual("UNAUTHENTICATED", payload["error"]["code"])
         self.assertNotIn(str(self.source), json.dumps(payload))
 
+    def test_application_settings_are_authenticated_persisted_and_csrf_protected(self) -> None:
+        cookie, csrf = self.bootstrap()
+        status, _headers, settings = self.request("GET", "/api/v1/settings", cookie=cookie)
+        self.assertEqual(status, 200)
+        self.assertEqual(settings["overlapSearchExtensionUs"], 30_000_000)
+
+        update = {
+            "overlapSearchExtensionUs": 90_000_000,
+            "textScalePercent": 130,
+            "colorScheme": "HIGH_CONTRAST",
+        }
+        status, _headers, payload = self.request(
+            "PUT", "/api/v1/settings", body=update, cookie=cookie
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(payload["error"]["code"], "FORBIDDEN")
+        status, _headers, payload = self.request(
+            "PUT", "/api/v1/settings", body=update, cookie=cookie, csrf=csrf
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload | {"updatedAt": None}, update | {"updatedAt": None})
+        self.assertEqual(self.app.store.application_settings()["colorScheme"], "HIGH_CONTRAST")
+
     def test_host_origin_and_csrf_boundaries(self) -> None:
         status, _headers, payload = self.request("GET", "/api/health", host="attacker.invalid")
         self.assertEqual(403, status)
@@ -301,6 +324,7 @@ class ServerBoundaryTests(unittest.TestCase):
         cookie, csrf = self.bootstrap()
         requests = [
             ("POST", "/api/v1/grants", {}, csrf),
+            ("PUT", "/api/v1/settings", {"textScalePercent": "huge"}, csrf),
             ("GET", "/api/v1/libraries/library/media?limit=bad", None, None),
             ("GET", "/api/v1/projects/project/revisions/not-an-integer", None, None),
             ("GET", "/api/v1/projects/project/program-at?outputUs=bad", None, None),

@@ -32,6 +32,17 @@ room-alignment
 
 The command starts the loopback service and opens a one-time secure browser URL. The default state directory is `~/.room-alignment`; use `room-alignment serve --data-dir PATH`, `--port`, and `--no-open` for explicit operation. The legacy `room-alignment --no-open ...` option shape remains supported. `python -m room_alignment` launches the same installed entry point.
 
+In-app Settings persist in the same local database as project state. They control a symmetric 0–300 second overlap-analysis search extension, four text sizes, and four color schemes. The 30-second default helps compensate for capture-to-hub timestamp skew while existing per-clip and whole-job comparison caps keep analysis bounded.
+
+Stop the process owning the default or an explicit state directory:
+
+```bash
+room-alignment stop
+room-alignment stop --data-dir PATH
+```
+
+Shutdown is graceful by default. `--timeout SECONDS --force` permits a forced stop only after the validated state-directory owner fails to release its lock.
+
 Administrative state operations use the same package:
 
 ```bash

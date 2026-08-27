@@ -162,3 +162,6 @@
 | REQ-156 | Implemented | Clean-wheel verifier installs with no index/dependencies, bootstraps session, loads UI/health/system/OpenAPI, stops, and relaunches from outside repository. |
 | REQ-157 | Implemented | Package diagnostics disclose bounded versions/resource readiness without absolute state, source, or package paths, and enforce FFmpeg/FFprobe major version 6 or newer. |
 | REQ-158 | Implemented | Build and verification never scan/bundle source media, publish artifacts, install globally, sign, notarize, or redistribute FFmpeg. |
+| REQ-159 | Verified | Persisted app setting expands overlap-candidate and audio-correlation search symmetrically from 0–300 seconds while preserving per-clip/job bounds. |
+| REQ-160 | Verified | Settings use authenticated versioned API and canonical SQLite state; analysis-setting changes stale pending proposals without revising projects. |
+| REQ-161 | Implemented | Keyboard-accessible in-app Settings offers four text sizes and four named color schemes, applies saved appearance at session startup, and keeps source/render behavior unchanged. |

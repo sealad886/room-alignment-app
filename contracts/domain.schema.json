@@ -125,7 +125,7 @@
     "ProjectClip": {
       "type": "object",
       "additionalProperties": true,
-      "required": ["id", "assetId", "logicalSourceId"],
+      "required": ["id", "assetId", "logicalSourceId", "programEligibility"],
       "properties": {
         "id": {"$ref": "#/$defs/OpaqueId"},
         "assetId": {"$ref": "#/$defs/OpaqueId"},
@@ -134,6 +134,9 @@
         "alignmentState": {"enum": ["PROVISIONAL", "ACCEPTED", "REVIEW_REQUIRED", "UNRESOLVED"]},
         "alignmentConfidence": {"type": "number", "minimum": 0, "maximum": 1},
         "alignmentEvidence": {"type": "array", "items": {"type": "string"}},
+        "programEligibility": {"enum": ["ELIGIBLE", "HELD_FOR_REVIEW", "EXCLUDED"]},
+        "alignmentProposalId": {"type": ["string", "null"]},
+        "acceptedAlignmentDecisionId": {"type": ["string", "null"]},
         "sync": {"$ref": "#/$defs/SyncTransform", "deprecated": true}
       },
       "anyOf": [

@@ -16,6 +16,7 @@ from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from .domain import (
+    ClipAlignmentTransform,
     DomainError,
     alignment_digest,
     alignment_summary,
@@ -36,11 +37,18 @@ from .provenance import normalize_timestamp
 from .scanner import media_record_from_dict, quick_fingerprint
 
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 9
 PROJECT_SNAPSHOT_INTERVAL = 25
 MAX_JOB_EVENTS = 100_000
 MAX_CACHE_ENTRIES = 10_000
 MAX_CACHE_BYTES = 2 * 1024 * 1024 * 1024
+DEFAULT_APPLICATION_SETTINGS = {
+    "overlapSearchExtensionUs": 30_000_000,
+    "textScalePercent": 100,
+    "colorScheme": "DARKROOM",
+}
+COLOR_SCHEMES = {"DARKROOM", "SLATE", "DAYLIGHT", "HIGH_CONTRAST"}
+TEXT_SCALES = {90, 100, 115, 130}
 TERMINAL_JOB_STATES = {"CANCELED", "SUCCEEDED", "FAILED", "INTERRUPTED", "FAILED_RECOVERABLE"}
 JOB_STATES = {
     "QUEUED",
@@ -68,6 +76,13 @@ PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL, details_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS application_settings (
+  singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+  overlap_search_extension_us INTEGER NOT NULL DEFAULT 30000000,
+  text_scale_percent INTEGER NOT NULL DEFAULT 100,
+  color_scheme TEXT NOT NULL DEFAULT 'DARKROOM',
+  updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS directory_grants (
   id TEXT PRIMARY KEY,
@@ -374,6 +389,19 @@ CREATE TABLE IF NOT EXISTS alignment_proposal_sets (
 );
 CREATE INDEX IF NOT EXISTS alignment_sets_project_created
   ON alignment_proposal_sets(project_id,created_at DESC,id DESC);
+CREATE TABLE IF NOT EXISTS alignment_acceptance_previews (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+  project_revision INTEGER NOT NULL,
+  proposal_set_id TEXT NOT NULL REFERENCES alignment_proposal_sets(id) ON DELETE CASCADE,
+  proposal_digest TEXT NOT NULL,
+  preview_digest TEXT NOT NULL UNIQUE,
+  expires_at REAL NOT NULL,
+  preview_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS alignment_previews_project_created
+  ON alignment_acceptance_previews(project_id,created_at DESC,id DESC);
 CREATE TABLE IF NOT EXISTS render_plans (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
@@ -452,6 +480,16 @@ class Store:
         self._backup_before_migration()
         with self.connect() as db:
             db.executescript(SCHEMA)
+            db.execute(
+                "INSERT OR IGNORE INTO application_settings(singleton,overlap_search_extension_us,"
+                "text_scale_percent,color_scheme,updated_at) VALUES(1,?,?,?,?)",
+                (
+                    DEFAULT_APPLICATION_SETTINGS["overlapSearchExtensionUs"],
+                    DEFAULT_APPLICATION_SETTINGS["textScalePercent"],
+                    DEFAULT_APPLICATION_SETTINGS["colorScheme"],
+                    now_iso(),
+                ),
+            )
             self._ensure_legacy_columns(db)
             self._backfill_directory_grant_identities(db)
             self._backfill_library_roots(db)
@@ -461,6 +499,7 @@ class Store:
                 "SELECT id,revision,document_json,updated_at FROM projects"
             )
             self._backfill_project_components(db)
+            self._stale_legacy_alignment_proposals(db)
             db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
             db.execute(
                 "INSERT OR IGNORE INTO schema_migrations(version,applied_at,details_json) VALUES(?,?,?)",
@@ -469,6 +508,103 @@ class Store:
         self.interrupt_orphaned_jobs()
         self.compact_events()
         self.prune_cache()
+
+    @staticmethod
+    def _stale_legacy_alignment_proposals(db: sqlite3.Connection) -> None:
+        rows = list(
+            db.execute(
+                "SELECT id,set_json FROM alignment_proposal_sets "
+                "WHERE algorithm='bounded-audio-evidence-graph' AND algorithm_version!='3' "
+                "AND status IN ('PENDING','PARTIALLY_RESOLVED')"
+            )
+        )
+        for row in rows:
+            value = json.loads(row["set_json"])
+            value["status"] = "STALE"
+            value["invalidationReason"] = "Alignment solver version changed"
+            value["updatedAt"] = now_iso()
+            db.execute(
+                "UPDATE alignment_proposal_sets SET status='STALE',set_json=?,updated_at=? WHERE id=?",
+                (json.dumps(value), value["updatedAt"], row["id"]),
+            )
+
+    def application_settings(self) -> dict[str, Any]:
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT overlap_search_extension_us,text_scale_percent,color_scheme,updated_at "
+                "FROM application_settings WHERE singleton=1"
+            ).fetchone()
+            if not row:
+                return {**DEFAULT_APPLICATION_SETTINGS, "updatedAt": None}
+            return {
+                "overlapSearchExtensionUs": int(row["overlap_search_extension_us"]),
+                "textScalePercent": int(row["text_scale_percent"]),
+                "colorScheme": str(row["color_scheme"]),
+                "updatedAt": row["updated_at"],
+            }
+
+    def update_application_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
+        allowed = {"overlapSearchExtensionUs", "textScalePercent", "colorScheme"}
+        unknown = set(settings) - allowed
+        if unknown:
+            raise DomainError(
+                "VALIDATION_FAILED",
+                f"Unknown application setting: {sorted(unknown)[0]}",
+            )
+        current = self.application_settings()
+        def integer_setting(name: str, fallback: object) -> int:
+            value = settings.get(name, fallback)
+            if not isinstance(value, int) or isinstance(value, bool):
+                raise DomainError("VALIDATION_FAILED", f"{name} must be an integer")
+            return value
+
+        overlap_us = integer_setting(
+            "overlapSearchExtensionUs", current["overlapSearchExtensionUs"]
+        )
+        text_scale = integer_setting("textScalePercent", current["textScalePercent"])
+        color_scheme = str(settings.get("colorScheme", current["colorScheme"]))
+        if not 0 <= overlap_us <= 300_000_000:
+            raise DomainError(
+                "VALIDATION_FAILED",
+                "Overlap search extension must be between 0 and 300 seconds",
+            )
+        if text_scale not in TEXT_SCALES:
+            raise DomainError("VALIDATION_FAILED", "Text scale must be 90, 100, 115, or 130 percent")
+        if color_scheme not in COLOR_SCHEMES:
+            raise DomainError("VALIDATION_FAILED", "Unknown color scheme")
+        updated_at = now_iso()
+        with self._lock, self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                "INSERT INTO application_settings(singleton,overlap_search_extension_us,"
+                "text_scale_percent,color_scheme,updated_at) VALUES(1,?,?,?,?) "
+                "ON CONFLICT(singleton) DO UPDATE SET overlap_search_extension_us=excluded.overlap_search_extension_us,"
+                "text_scale_percent=excluded.text_scale_percent,color_scheme=excluded.color_scheme,"
+                "updated_at=excluded.updated_at",
+                (overlap_us, text_scale, color_scheme, updated_at),
+            )
+            if overlap_us != int(current["overlapSearchExtensionUs"]):
+                rows = list(
+                    db.execute(
+                        "SELECT id,set_json FROM alignment_proposal_sets "
+                        "WHERE status IN ('PENDING','PARTIALLY_RESOLVED')"
+                    )
+                )
+                for row in rows:
+                    value = json.loads(row["set_json"])
+                    value["status"] = "STALE"
+                    value["invalidationReason"] = "Overlap search settings changed"
+                    value["updatedAt"] = updated_at
+                    db.execute(
+                        "UPDATE alignment_proposal_sets SET status='STALE',set_json=?,updated_at=? WHERE id=?",
+                        (json.dumps(value), updated_at, row["id"]),
+                    )
+        return {
+            "overlapSearchExtensionUs": overlap_us,
+            "textScalePercent": text_scale,
+            "colorScheme": color_scheme,
+            "updatedAt": updated_at,
+        }
 
     def _backup_before_migration(self) -> None:
         if not self.path.exists() or self.path.stat().st_size == 0:
@@ -2431,13 +2567,59 @@ class Store:
             }
         selected: list[dict[str, Any]]
         if command_type == "AcceptAlignmentProposalSet":
-            if payload.get("mode", "HIGH_CONFIDENCE") != "HIGH_CONFIDENCE":
+            mode = str(payload.get("mode", "HIGH_CONFIDENCE"))
+            if mode not in {"HIGH_CONFIDENCE", "TIMESTAMP_PRIOR"}:
                 raise DomainError("VALIDATION_FAILED", "Unknown proposal-set acceptance mode")
-            selected = [
-                item
-                for item in proposals.values()
-                if item.get("automaticallyAcceptable") and item["id"] not in already_resolved
-            ]
+            original_scope = payload.get("scope") or {"kind": "PROJECT"}
+            project_row = db.execute(
+                "SELECT document_json FROM projects WHERE id=?", (project_id,)
+            ).fetchone()
+            current_project = self._migrate_legacy_project(json.loads(project_row["document_json"]))
+            selection_scope = self._normalized_acceptance_scope_db(
+                db, current_project, original_scope
+            )
+            selected = self._select_alignment_proposals(
+                value, mode, selection_scope, already_resolved
+            )
+            if mode == "TIMESTAMP_PRIOR":
+                accepted_clip_ids = {
+                    str(clip["id"])
+                    for clip in current_project.get("clips", [])
+                    if clip.get("alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED")
+                    == "ACCEPTED"
+                }
+                selected = [item for item in selected if str(item["clipId"]) not in accepted_clip_ids]
+                if not payload.get("confirmTimestampUncertainty"):
+                    raise DomainError(
+                        "TIMESTAMP_CONFIRMATION_REQUIRED",
+                        "Timestamp-prior acceptance requires explicit confirmation",
+                    )
+                preview = db.execute(
+                    "SELECT * FROM alignment_acceptance_previews WHERE id=?",
+                    (str(payload.get("previewId", "")),),
+                ).fetchone()
+                if (
+                    not preview
+                    or preview["project_id"] != project_id
+                    or int(preview["project_revision"]) != project_revision
+                    or preview["proposal_set_id"] != proposal_set_id
+                    or preview["proposal_digest"] != row["proposal_digest"]
+                    or preview["preview_digest"] != str(payload.get("previewDigest", ""))
+                    or float(preview["expires_at"]) <= time.time()
+                ):
+                    raise DomainError(
+                        "ACCEPTANCE_PREVIEW_STALE", "Alignment acceptance preview is stale"
+                    )
+                canonical_preview = json.loads(preview["preview_json"])
+                if canonical_preview.get("mode") != mode:
+                    raise DomainError(
+                        "ACCEPTANCE_PREVIEW_STALE",
+                        "Acceptance mode changed after preview",
+                    )
+                if canonical_preview.get("scopeDigest") != digest_json(payload.get("scope") or {"kind": "PROJECT"}):
+                    raise DomainError("ACCEPTANCE_PREVIEW_STALE", "Acceptance scope changed after preview")
+                if sorted(item["id"] for item in selected) != sorted(canonical_preview["proposalIds"]):
+                    raise DomainError("ACCEPTANCE_PREVIEW_STALE", "Applicable proposals changed after preview")
         else:
             proposal_id = str(payload.get("proposalId", ""))
             proposal = proposals.get(proposal_id)
@@ -2451,7 +2633,7 @@ class Store:
                 )
             selected = [proposal]
         if not selected:
-            raise DomainError("VALIDATION_FAILED", "Proposal set has no high-confidence alignments")
+            raise DomainError("VALIDATION_FAILED", "Proposal set has no applicable alignments")
         if any(item.get("requiresDriftConfirmation") for item in selected) and not payload.get("confirmDrift"):
             raise DomainError("VALIDATION_FAILED", "Proposed drift requires explicit confirmation")
         expanded = dict(payload)
@@ -2476,6 +2658,83 @@ class Store:
             "status": "PARTIALLY_RESOLVED",
             "acceptedProposalIds": [item["id"] for item in selected],
         }
+
+    @staticmethod
+    def _select_alignment_proposals(
+        proposal_set: dict[str, Any],
+        mode: str,
+        scope: dict[str, Any],
+        already_resolved: set[str],
+    ) -> list[dict[str, Any]]:
+        kind = str(scope.get("kind", "PROJECT"))
+        if kind not in {"PROJECT", "EVENTS", "SOURCES", "ALIGNED_RANGE", "CLIPS"}:
+            raise DomainError("SCOPE_INVALID", "Unknown alignment acceptance scope")
+        for field in ("clipIds", "sourceIds", "eventIds"):
+            if field in scope and not isinstance(scope[field], list):
+                raise DomainError("SCOPE_INVALID", f"{field} must be an array")
+        clip_ids = {str(value) for value in scope.get("clipIds", [])}
+        source_ids = {str(value) for value in scope.get("sourceIds", [])}
+        event_ids = {str(value) for value in scope.get("eventIds", [])}
+        try:
+            start_us = int(scope.get("startAlignedUs", -2**63))
+            end_us = int(scope.get("endAlignedUs", 2**63 - 1))
+        except (TypeError, ValueError) as error:
+            raise DomainError(
+                "SCOPE_INVALID", "Aligned range bounds must be integers"
+            ) from error
+        if kind == "ALIGNED_RANGE" and end_us <= start_us:
+            raise DomainError("SCOPE_INVALID", "Aligned acceptance range must have positive duration")
+
+        def in_scope(item: dict[str, Any]) -> bool:
+            if kind == "CLIPS":
+                return str(item.get("clipId")) in clip_ids
+            if kind == "SOURCES":
+                return str(item.get("logicalSourceId")) in source_ids
+            if kind == "EVENTS":
+                return str(item.get("eventId")) in event_ids
+            if kind == "ALIGNED_RANGE":
+                transform = ClipAlignmentTransform.from_dict(item.get("proposedAlignment"))
+                proposed_start = transform.source_to_aligned(0)
+                proposed_end = int(item.get("proposedEndAlignedUs") or proposed_start + 1)
+                return proposed_start < end_us and proposed_end > start_us
+            return True
+
+        return [
+            item
+            for item in proposal_set.get("proposals", [])
+            if item.get("id") not in already_resolved
+            and in_scope(item)
+            and (
+                bool(item.get("automaticallyAcceptable"))
+                if mode == "HIGH_CONFIDENCE"
+                else item.get("classification") == "TIMESTAMP_ONLY"
+                and not item.get("requiresDriftConfirmation")
+            )
+        ]
+
+    @staticmethod
+    def _normalized_acceptance_scope_db(
+        db: sqlite3.Connection, project: dict[str, Any], scope: dict[str, Any]
+    ) -> dict[str, Any]:
+        if str(scope.get("kind", "PROJECT")) != "EVENTS":
+            return scope
+        event_ids = [str(value) for value in scope.get("eventIds", [])]
+        generation_id = (project.get("selectionSnapshot") or {}).get("clusterGenerationId")
+        if not event_ids or not generation_id:
+            raise DomainError("SCOPE_INVALID", "Event scope requires the project's cluster generation")
+        placeholders = ",".join("?" for _item in event_ids)
+        asset_ids = {
+            str(row[0])
+            for row in db.execute(
+                f"SELECT asset_id FROM cluster_memberships WHERE generation_id=? "
+                f"AND event_id IN ({placeholders})",
+                (generation_id, *event_ids),
+            )
+        }
+        clip_ids = [
+            str(clip["id"]) for clip in project.get("clips", []) if str(clip["assetId"]) in asset_ids
+        ]
+        return {"kind": "CLIPS", "clipIds": clip_ids}
 
     def _validate_alignment_acceptance_db(
         self,
@@ -2601,6 +2860,14 @@ class Store:
                 # Existing source decisions predate explicit preparation state. Preserve
                 # them as accepted instead of turning a migration into a new decision.
                 source.setdefault("identityState", "USER_CONFIRMED")
+            for clip in canonical.get("clips", []):
+                state = clip.get(
+                    "alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED"
+                )
+                clip.setdefault(
+                    "programEligibility",
+                    "ELIGIBLE" if state == "ACCEPTED" else "HELD_FOR_REVIEW",
+                )
             asset_ids = [str(item["assetId"]) for item in canonical.get("clips", [])]
             snapshot = canonical.setdefault(
                 "selectionSnapshot",
@@ -2883,6 +3150,9 @@ class Store:
             if not project_row:
                 raise DomainError("NOT_FOUND", "Project not found")
             current = self._migrate_legacy_project(json.loads(project_row["document_json"]))
+            settings_row = db.execute(
+                "SELECT overlap_search_extension_us FROM application_settings WHERE singleton=1"
+            ).fetchone()
             if (
                 int(project_row["revision"]) != int(value["projectRevision"])
                 or str((current.get("selectionSnapshot") or {}).get("digest", ""))
@@ -2890,6 +3160,12 @@ class Store:
             ):
                 value["status"] = "STALE"
                 value["invalidationReason"] = "Project changed before analysis completed"
+                value["updatedAt"] = now_iso()
+            elif settings_row and int(
+                value.get("config", {}).get("overlapSearchExtensionUs", -1)
+            ) != int(settings_row["overlap_search_extension_us"]):
+                value["status"] = "STALE"
+                value["invalidationReason"] = "Overlap search settings changed during analysis"
                 value["updatedAt"] = now_iso()
             rows = list(
                 db.execute(
@@ -2951,6 +3227,116 @@ class Store:
             if not row:
                 raise DomainError("NOT_FOUND", "Alignment proposal set not found")
             return json.loads(row["set_json"])
+
+    def create_alignment_acceptance_preview(
+        self, project_id: str, request: dict[str, Any]
+    ) -> dict[str, Any]:
+        project = self.project(project_id)
+        expected_revision = int(request.get("expectedRevision", 0))
+        if expected_revision != int(project["revision"]):
+            raise DomainError(
+                "REVISION_CONFLICT",
+                "Project revision changed",
+                {"currentRevision": int(project["revision"])},
+            )
+        proposal_set = self.alignment_proposal_set(str(request.get("proposalSetId", "")))
+        if proposal_set.get("projectId") != project_id or proposal_set.get("status") not in {
+            "PENDING", "PARTIALLY_RESOLVED"
+        }:
+            raise DomainError("PROPOSAL_SET_STALE", "Alignment proposal set is stale")
+        if str(request.get("proposalSetDigest", "")) != str(proposal_set.get("digest", "")):
+            raise DomainError("PROPOSAL_SET_STALE", "Alignment proposal set digest changed")
+        mode = str(request.get("mode", "TIMESTAMP_PRIOR"))
+        if mode not in {"HIGH_CONFIDENCE", "TIMESTAMP_PRIOR"}:
+            raise DomainError("VALIDATION_FAILED", "Unknown acceptance preview mode")
+        scope = request.get("scope") or {"kind": "PROJECT"}
+        if not isinstance(scope, dict):
+            raise DomainError("SCOPE_INVALID", "Acceptance scope must be an object")
+        resolved = set(proposal_set.get("acceptedProposalIds", [])) | set(
+            proposal_set.get("rejectedProposalIds", [])
+        )
+        with self.connect() as db:
+            selection_scope = self._normalized_acceptance_scope_db(db, project, scope)
+        selected = self._select_alignment_proposals(proposal_set, mode, selection_scope, resolved)
+        if mode == "TIMESTAMP_PRIOR":
+            accepted_clip_ids = {
+                str(clip["id"])
+                for clip in project.get("clips", [])
+                if clip.get("alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED")
+                == "ACCEPTED"
+            }
+            selected = [item for item in selected if str(item["clipId"]) not in accepted_clip_ids]
+        if not selected:
+            raise DomainError("VALIDATION_FAILED", "No applicable alignment proposals in scope")
+        assets = self.media_records(item["assetId"] for item in project.get("clips", []))
+        before = alignment_summary(project, assets)
+        expanded = {
+            "alignments": [
+                {
+                    "proposalId": item["id"],
+                    "clipId": item["clipId"],
+                    "alignment": item["proposedAlignment"],
+                    "confidence": item["confidence"],
+                    "evidenceKinds": ["timestamp-prior"]
+                    if item.get("classification") == "TIMESTAMP_ONLY"
+                    else ["audio-correlation", "timestamp-prior"],
+                }
+                for item in selected
+            ],
+            "confirmDrift": False,
+        }
+        simulated = apply_command(project, "AcceptAlignmentProposalSet", expanded, assets)
+        after = alignment_summary(simulated, assets)
+        selected_clip_ids = {str(item["clipId"]) for item in selected}
+        ranges = [
+            (int(item["startAlignedUs"]), int(item["endAlignedUs"]))
+            for item in after.get("coverageIntervals", [])
+            if selected_clip_ids.intersection(item.get("acceptedEligibleVideoClipIds", []))
+        ]
+        ranges = _merge_time_ranges(ranges)
+        created_at = now_iso()
+        value = {
+            "id": opaque_id("alignpreview"),
+            "projectId": project_id,
+            "projectRevision": int(project["revision"]),
+            "proposalSetId": proposal_set["id"],
+            "proposalSetDigest": proposal_set["digest"],
+            "mode": mode,
+            "scope": scope,
+            "scopeDigest": digest_json(scope),
+            "expiresAt": datetime.fromtimestamp(time.time() + 900, UTC).isoformat(),
+            "affectedProposalCount": len(selected),
+            "affectedClipCount": len({item["clipId"] for item in selected}),
+            "affectedEventCount": len({item.get("eventId") for item in selected if item.get("eventId")}),
+            "affectedSourceCount": len({item.get("logicalSourceId") for item in selected if item.get("logicalSourceId")}),
+            "affectedAlignedRanges": [
+                {"startAlignedUs": start, "endAlignedUs": end} for start, end in ranges
+            ],
+            "acceptedCoverageBeforeUs": before["coverage"]["acceptedCoverageUs"],
+            "acceptedCoverageAfterUs": after["coverage"]["acceptedCoverageUs"],
+            "soleCoverageBlockedBeforeUs": before["coverage"]["unresolvedSoleCoverageUs"],
+            "soleCoverageBlockedAfterUs": after["coverage"]["unresolvedSoleCoverageUs"],
+            "remainingCounts": after["confidenceCounts"],
+            "proposedDriftClipIds": [
+                item["clipId"] for item in selected if item.get("requiresDriftConfirmation")
+            ],
+            "resultingReadiness": after["readyForProgramDraft"],
+            "warnings": after.get("warnings", []),
+            "proposalIds": [item["id"] for item in selected],
+            "createdAt": created_at,
+        }
+        value["digest"] = digest_json(value)
+        with self.connect() as db:
+            db.execute(
+                "INSERT INTO alignment_acceptance_previews(id,project_id,project_revision,proposal_set_id,"
+                "proposal_digest,preview_digest,expires_at,preview_json,created_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (
+                    value["id"], project_id, project["revision"], proposal_set["id"],
+                    proposal_set["digest"], value["digest"], time.time() + 900,
+                    json.dumps(value), created_at,
+                ),
+            )
+        return value
 
     def _set_alignment_proposal_status_db(
         self,
@@ -4584,6 +4970,16 @@ def _raw_timestamp_from_evidence(record: MediaRecord) -> object | None:
 
 def _stable_migration_id(prefix: str, *parts: object) -> str:
     return f"{prefix}_{digest_json([str(part) for part in parts])[:24]}"
+
+
+def _merge_time_ranges(ranges: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[list[int]] = []
+    for start, end in sorted((int(start), int(end)) for start, end in ranges if end > start):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return [(start, end) for start, end in merged]
 
 
 def _storage_relative_path(root_id: str, relative_path: str) -> str:
