@@ -1626,9 +1626,7 @@ async function performReviewPreparation(request) {
     if (separator <= 0 || separator === request.rawPath.length - 1) throw new Error("Output must be an absolute file path");
     const directory = request.rawPath.slice(0, separator) || "/";
     const filename = request.rawPath.slice(separator + 1);
-    const suffix = request.profile === "ARCHIVAL_LOSSLESS"
-      ? ".mkv"
-      : request.videoCodec === "PRORES_VIDEOTOOLBOX" ? ".mov" : ".mp4";
+    const suffix = outputSuffixFor(request.profile, request.videoCodec);
     if (!filename.toLowerCase().endsWith(suffix)) throw new Error(`${request.profile} output filename must end with ${suffix}`);
     let grant = state.outputGrantByDirectory.get(directory);
     if (!grant || grant.revoked) {
@@ -1652,6 +1650,11 @@ async function performReviewPreparation(request) {
     $("#preflight-status").innerHTML = `<strong>△ Preflight unavailable</strong><p>${safe(error.message)}</p>`;
     $("#manifest-preview").textContent = "No immutable plan has been created.";
   }
+}
+
+function outputSuffixFor(profile, videoCodec) {
+  if (profile === "ARCHIVAL_LOSSLESS") return ".mkv";
+  return videoCodec === "PRORES_VIDEOTOOLBOX" ? ".mov" : ".mp4";
 }
 
 function renderReviewPlan() {
@@ -1695,7 +1698,7 @@ async function renderVideo() {
     if (separator <= 0 || separator === rawPath.length - 1) throw new Error("Output must be an absolute file path");
     const directory = rawPath.slice(0, separator) || "/";
     const filename = rawPath.slice(separator + 1);
-    const expectedSuffix = state.settings.renderVideoCodec === "PRORES_VIDEOTOOLBOX" ? ".mov" : ".mp4";
+    const expectedSuffix = outputSuffixFor(plan.profile, state.settings.renderVideoCodec);
     if (!filename.toLowerCase().endsWith(expectedSuffix)) {
       throw new Error(`${state.settings.renderVideoCodec} output filename must end with ${expectedSuffix}`);
     }
