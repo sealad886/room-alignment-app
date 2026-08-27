@@ -216,6 +216,36 @@ class AudioAlignmentAlgorithmTests(unittest.TestCase):
             )
         )
 
+    def test_disconnected_audio_component_requires_timestamp_confirmation(self) -> None:
+        assets = [
+            media("reference-left", "2025-10-15T12:00:00+00:00"),
+            media("reference-right", "2025-10-15T12:00:00+00:00"),
+            media("later-left", "2025-10-15T12:02:00+00:00"),
+            media("later-right", "2025-10-15T12:02:00+00:00"),
+        ]
+        project = new_project(
+            "Disconnected evidence", "library", assets, initialize_legacy_program=False
+        )
+        base = tuple(pulse_signal())
+        result = analyze_project_alignment(
+            project,
+            {item["id"]: item for item in assets},
+            FakeSignatureCache(
+                {item["id"]: AudioSignature(item["id"], 400, base, False) for item in assets}
+            ),
+            overlap_search_extension_us=45_000_000,
+        )
+
+        proposals = {item["assetId"]: item for item in result["proposals"]}
+        self.assertTrue(proposals["reference-left"]["automaticallyAcceptable"])
+        self.assertTrue(proposals["reference-right"]["automaticallyAcceptable"])
+        self.assertFalse(proposals["later-left"]["automaticallyAcceptable"])
+        self.assertFalse(proposals["later-right"]["automaticallyAcceptable"])
+        self.assertIn(
+            "unconfirmed timestamp anchor",
+            " ".join(proposals["later-left"]["limitations"]),
+        )
+
 
 class EvidenceTimelineTests(unittest.TestCase):
     def test_alignment_digest_changes_with_program_eligibility(self) -> None:

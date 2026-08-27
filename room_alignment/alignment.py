@@ -902,6 +902,7 @@ def analyze_project_alignment(
         for clip_id, clip_support in solved_support.items():
             support[clip_id].extend(clip_support)
         component_id = f"component-{component_index}"
+        reference_connected = reference_clip_id in nodes
         for clip_id in nodes:
             clip_support = solved_support.get(clip_id, [])
             relative_confidence = (
@@ -911,6 +912,7 @@ def analyze_project_alignment(
             component_by_clip[clip_id] = {
                 "id": component_id,
                 "anchorClipId": anchor,
+                "referenceConnected": reference_connected,
                 "relativeConfidence": round(min(0.99, relative_confidence), 6),
                 "supportingEdgeCount": len(clip_support),
                 "rejectedOutlierCount": len(component_edges) - len(consistent_edges),
@@ -959,7 +961,10 @@ def analyze_project_alignment(
         elif accepted_edges:
             classification = "AUDIO_CONFIRMED"
             confidence = min(0.99, sum(float(edge["confidence"]) for edge in accepted_edges) / len(accepted_edges))
-            automatic = confidence >= 0.75
+            component = component_by_clip.get(clip_id)
+            automatic = confidence >= 0.75 and bool(
+                component and component["referenceConnected"]
+            )
             summary["audioConfirmed"] += 1
         elif current_state != "UNRESOLVED":
             classification = "TIMESTAMP_ONLY"
@@ -1009,6 +1014,10 @@ def analyze_project_alignment(
         if str(asset.get("id")) in truncated_assets:
             limitations.append("Audio signature was capped at fifteen minutes")
         component = component_by_clip.get(clip_id)
+        if component and not component["referenceConnected"]:
+            limitations.append(
+                "Component placement relies on an unconfirmed timestamp anchor"
+            )
         absolute_confidence = 1.0 if manual else min(0.65, float(clip.get("alignmentConfidence", 0.55)))
         proposals.append(
             {
