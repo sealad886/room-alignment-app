@@ -388,6 +388,16 @@ function renderTimelineControls() {
     : `${formatUs(state.timelineStartUs)} – ${formatUs(state.timelineEndUs)} · ${formatUs(visibleSpanUs)} visible`;
   $("#timeline-zoom-out").disabled = state.timelineZoom <= 0;
   $("#timeline-zoom-in").disabled = state.timelineZoom >= 100;
+  const pan = $("#timeline-pan");
+  if (pan) {
+    const availableTravelUs = Math.max(0, fullSpanUs - visibleSpanUs);
+    const traveledUs = Math.max(0, state.timelineStartUs - state.evidenceStartUs);
+    pan.value = availableTravelUs ? Math.round((traveledUs / availableTravelUs) * 1000) : 0;
+    pan.disabled = availableTravelUs <= 0;
+    $("#timeline-pan-position").textContent = availableTravelUs <= 0
+      ? "Full span visible"
+      : `${Math.round((Number(pan.value) / 1000) * 100)}% across`;
+  }
 }
 
 async function changeTimelineZoom(zoom, centerUs = currentAlignedUs()) {
@@ -395,6 +405,29 @@ async function changeTimelineZoom(zoom, centerUs = currentAlignedUs()) {
   await loadTimelineWindow();
   renderSources();
   updatePlayheadPositions();
+}
+
+async function panTimeline(fraction) {
+  const fullSpanUs = Math.max(1, state.evidenceEndUs - state.evidenceStartUs);
+  const visibleSpanUs = Math.max(1, state.timelineEndUs - state.timelineStartUs);
+  const availableTravelUs = Math.max(0, fullSpanUs - visibleSpanUs);
+  if (!availableTravelUs) return;
+  const centerUs = state.evidenceStartUs + visibleSpanUs / 2 + Math.max(0, Math.min(1, fraction)) * availableTravelUs;
+  setTimelineViewport(state.timelineZoom, centerUs);
+  await loadTimelineWindow();
+  renderSources();
+  updatePlayheadPositions();
+}
+
+function queueTimelinePan(fraction) {
+  const boundedFraction = Math.max(0, Math.min(1, fraction));
+  const pan = $("#timeline-pan");
+  if (pan) {
+    pan.value = Math.round(boundedFraction * 1000);
+    $("#timeline-pan-position").textContent = `${Math.round(boundedFraction * 100)}% across`;
+  }
+  clearTimeout(queueTimelinePan.timer);
+  queueTimelinePan.timer = setTimeout(() => panTimeline(boundedFraction).catch(handleError), 60);
 }
 
 async function loadLibraries() {
@@ -2141,6 +2174,24 @@ function setupEvents() {
   $("#timeline-zoom-out").onclick = () => changeTimelineZoom(state.timelineZoom - 10).catch(handleError);
   $("#timeline-zoom-in").onclick = () => changeTimelineZoom(state.timelineZoom + 10).catch(handleError);
   $("#timeline-fit").onclick = () => changeTimelineZoom(0, (state.evidenceStartUs + state.evidenceEndUs) / 2).catch(handleError);
+  $("#timeline-pan").oninput = event => queueTimelinePan(Number(event.target.value) / 1000);
+  const alignmentTimeline = $("#alignment-timeline");
+  alignmentTimeline.onwheel = event => {
+    const horizontalDelta = Math.abs(event.deltaX) >= Math.abs(event.deltaY) ? event.deltaX : event.shiftKey ? event.deltaY : 0;
+    if (!horizontalDelta || state.timelineZoom <= 0) return;
+    event.preventDefault();
+    const current = Number($("#timeline-pan").value) / 1000;
+    queueTimelinePan(current + horizontalDelta / 1800);
+  };
+  alignmentTimeline.onkeydown = event => {
+    if (event.target !== alignmentTimeline || state.timelineZoom <= 0) return;
+    const current = Number($("#timeline-pan").value) / 1000;
+    const movement = {ArrowLeft: -0.08, ArrowRight: 0.08, PageUp: -0.4, PageDown: 0.4};
+    if (event.key === "Home" || event.key === "End" || movement[event.key]) {
+      event.preventDefault();
+      queueTimelinePan(event.key === "Home" ? 0 : event.key === "End" ? 1 : current + movement[event.key]);
+    }
+  };
   $("#reviewed-check").onchange = updateRenderButton;
   $("#render-video").onclick = renderVideo;
   $("#output-path").oninput = () => {
