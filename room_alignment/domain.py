@@ -1717,17 +1717,29 @@ def _optimize_keep_section(
                 str(item["clipId"])
             ] = item
         candidates: dict[str, dict[str, Any]] = {}
-        ambiguous_sources: list[str] = []
         for source_id, active in active_by_source.items():
             covering = list(active.values())
-            if len(covering) != 1:
-                ambiguous_sources.append(source_id)
-                continue
-            clip = clip_by_id[str(covering[0]["clipId"])]
+            ranked = []
+            for clip_range in covering:
+                clip = clip_by_id[str(clip_range["clipId"])]
+                ranked.append(
+                    (
+                        -float(
+                            clip.get(
+                                "alignmentConfidence", 1.0 if "sync" in clip else 0.0
+                            )
+                        ),
+                        bool(_clip_alignment(clip).rate_ppm),
+                        str(clip["id"]),
+                        clip,
+                    )
+                )
+            _confidence_rank, _transform_rank, _clip_id, clip = min(ranked)
             candidates[source_id] = {
                 "clipId": clip["id"],
                 "confidence": float(clip.get("alignmentConfidence", 1.0 if "sync" in clip else 0.0)),
                 "transformed": bool(_clip_alignment(clip).rate_ppm),
+                "resolvedOverlap": len(covering) > 1,
             }
         if not candidates:
             raise DomainError(
@@ -1736,7 +1748,6 @@ def _optimize_keep_section(
                 {
                     "startAlignedUs": interval_start,
                     "endAlignedUs": interval_end,
-                    "ambiguousSourceIds": sorted(ambiguous_sources),
                 },
             )
         intervals.append(
@@ -1783,13 +1794,20 @@ def _optimize_keep_section(
         end_us = start_program_us + int(interval["endAlignedUs"]) - start_aligned_us
         candidate = interval["candidates"][source_id]
         reason = (
-            "coverage-continuity"
+            "deterministic-clip-selection"
+            if candidate["resolvedOverlap"]
+            else "coverage-continuity"
             if blocks and blocks[-1]["logicalSourceId"] == source_id
             else "higher-alignment-confidence"
             if candidate["confidence"] >= 0.9
             else "usable-unambiguous-coverage"
         )
-        if blocks and blocks[-1]["endUs"] == start_us and blocks[-1]["logicalSourceId"] == source_id:
+        if (
+            blocks
+            and blocks[-1]["endUs"] == start_us
+            and blocks[-1]["logicalSourceId"] == source_id
+            and blocks[-1]["pinnedClipId"] == candidate["clipId"]
+        ):
             blocks[-1]["endUs"] = end_us
             blocks[-1]["endAlignedUs"] = int(interval["endAlignedUs"])
             continue
@@ -1799,7 +1817,7 @@ def _optimize_keep_section(
                 "startUs": start_us,
                 "endUs": end_us,
                 "logicalSourceId": source_id,
-                "pinnedClipId": None,
+                "pinnedClipId": candidate["clipId"],
                 "syntheticSlateId": None,
                 "sectionId": section["id"],
                 "startAlignedUs": int(interval["startAlignedUs"]),
