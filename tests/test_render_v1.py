@@ -483,6 +483,30 @@ class CanonicalRenderTests(unittest.TestCase):
         command = build_v1_ffmpeg_command(self.store, plan, self.output / ".archive.partial.mkv")
         self.assertIn("ffv1", command)
         self.assertIn("pcm_s24le", command)
+        execution = configure_render_execution(
+            self.store,
+            plan,
+            {
+                "outputGrantId": self.output_grant_id,
+                "filename": "archive-720.mkv",
+                "videoCodec": "HEVC_VIDEOTOOLBOX",
+                "resolution": "HD_720P",
+            },
+        )
+        self.assertEqual(execution["renderVideoCodec"], "FFV1")
+        self.assertEqual(execution["container"], "matroska")
+        self.assertEqual(execution["videoEncoder"], "ffv1")
+        self.assertEqual(execution["audioCodec"], "pcm_s24le")
+        self.assertFalse(execution["hardwareAccelerated"])
+        self.assertEqual(execution["normalization"]["pixelFormat"], "source-compatible")
+        self.assertEqual(
+            (execution["normalization"]["width"], execution["normalization"]["height"]),
+            (1280, 720),
+        )
+        self.assertIn(
+            "ffv1",
+            build_v1_ffmpeg_command(self.store, execution, self.output / "archive-720.mkv"),
+        )
         with self.assertRaisesRegex(ValueError, "must end with .mkv"):
             build_render_plan(
                 self.store,
