@@ -41,6 +41,7 @@ const state = {
   alignmentSummary: null,
   timelineWindow: null,
   proposalSets: [],
+  alignmentQueueLimit: 50,
   sources: [],
   selectedSource: 0,
   selectedClipId: null,
@@ -1121,7 +1122,14 @@ function renderSuggestions() {
   const accepted = new Set(proposalSet.acceptedProposalIds || []);
   const rejected = new Set(proposalSet.rejectedProposalIds || []);
   const highConfidence = proposalSet.proposals.filter(item => item.automaticallyAcceptable && !accepted.has(item.id) && !rejected.has(item.id));
-  const review = proposalSet.proposals.filter(item => !item.automaticallyAcceptable && !accepted.has(item.id) && !rejected.has(item.id));
+  const pending = proposalSet.proposals.filter(item => !accepted.has(item.id) && !rejected.has(item.id));
+  const review = pending.filter(item => !item.automaticallyAcceptable);
+  const timestampOnly = review.filter(item => item.classification === "TIMESTAMP_ONLY");
+  const conflicting = review.filter(item => item.classification === "CONFLICTING");
+  const unresolved = review.filter(item => item.classification === "UNRESOLVED");
+  const blockers = state.alignmentSummary?.blockers || [];
+  const warnings = state.alignmentSummary?.warnings || [];
+  const visibleReview = review.slice(0, state.alignmentQueueLimit);
   container.innerHTML = `
     <div class="confidence"><strong>${safe(proposalSet.status)} · audio evidence graph</strong><div class="proposal-grid">
       <div><strong>${summary.audioConfirmed}</strong><small>audio-confirmed</small></div>
@@ -1129,11 +1137,46 @@ function renderSuggestions() {
       <div><strong>${summary.conflicting}</strong><small>conflicting</small></div>
       <div><strong>${summary.unresolved}</strong><small>unresolved</small></div>
     </div><small>${summary.candidatePairs} bounded comparisons · ${summary.confirmedEdges} supported edges · ±${Math.round(Number(proposalSet.config?.overlapSearchExtensionUs || state.settings.overlapSearchExtensionUs) / 1_000_000)}s timestamp search · visual matching not used</small></div>
+    <div class="alignment-queue-tabs" role="list" aria-label="Alignment review queues">
+      <span role="listitem"><strong>${highConfidence.length}</strong> audio-confirmed</span>
+      <span role="listitem"><strong>${timestampOnly.length}</strong> timestamp-only</span>
+      <span role="listitem" class="${conflicting.length ? "blocked" : ""}"><strong>${conflicting.length}</strong> conflicting</span>
+      <span role="listitem" class="${blockers.length ? "blocked" : ""}"><strong>${blockers.length}</strong> required</span>
+      <span role="listitem"><strong>${warnings.length}</strong> redundant warnings</span>
+    </div>
     ${highConfidence.length ? `<button class="btn primary wide" id="accept-high-confidence">Accept ${highConfidence.length} high-confidence result${highConfidence.length === 1 ? "" : "s"}</button>` : ""}
-    <div class="review-queue">${review.slice(0, 20).map(item => `<div class="confidence"><strong>${safe(item.classification.replaceAll("_", " "))} · ${Math.round(Number(item.confidence) * 100)}%</strong><p><a class="timeline-clip-link" href="#alignment-timeline" data-focus-clip="${safe(item.clipId)}">${safe(state.mediaById.get(item.assetId)?.relative_path || item.assetId)}</a></p><small>${safe(item.limitations.join("; ") || "Review evidence before accepting")}</small><div class="link-row"><button class="btn" data-accept-proposal="${safe(item.id)}">Accept manually</button><button class="btn" data-reject-proposal="${safe(item.id)}">Reject</button></div></div>`).join("")}</div>`;
+    ${timestampOnly.length ? `<button class="btn primary wide" id="review-timestamp-priors">Review and accept ${timestampOnly.length} timestamp placement${timestampOnly.length === 1 ? "" : "s"}</button>` : ""}
+    ${blockers.length ? `<div class="confidence blocked"><strong>Required before first cut</strong><p>${blockers.map(item => `${safe(item.code.replaceAll("_", " "))} · ${formatUs(Number(item.endAlignedUs || 0) - Number(item.startAlignedUs || 0))}`).join("<br>")}</p></div>` : ""}
+    <div class="review-queue">${visibleReview.map(item => `<div class="confidence"><strong>${safe(item.classification.replaceAll("_", " "))} · ${Math.round(Number(item.confidence) * 100)}%</strong><p><a class="timeline-clip-link" href="#alignment-timeline" data-focus-clip="${safe(item.clipId)}">${safe(state.mediaById.get(item.assetId)?.relative_path || item.assetId)}</a></p><small>${safe((item.limitations || []).join("; ") || "Review evidence before accepting")}</small><div class="link-row"><button class="btn" data-accept-proposal="${safe(item.id)}">Accept manually</button><button class="btn" data-hold-clip="${safe(item.clipId)}">Hold</button><button class="btn" data-exclude-clip="${safe(item.clipId)}">Exclude from first cut</button><button class="btn" data-reject-proposal="${safe(item.id)}">Reject suggestion</button></div></div>`).join("")}</div>
+    ${review.length > visibleReview.length ? `<button class="btn wide" id="load-more-alignment">Show ${Math.min(50, review.length - visibleReview.length)} more</button>` : ""}`;
   if ($("#accept-high-confidence")) $("#accept-high-confidence").onclick = () => acceptHighConfidence(proposalSet);
+  if ($("#review-timestamp-priors")) $("#review-timestamp-priors").onclick = () => acceptTimestampPriors(proposalSet);
+  if ($("#load-more-alignment")) $("#load-more-alignment").onclick = () => { state.alignmentQueueLimit += 50; renderSuggestions(); };
   $$('[data-accept-proposal]').forEach(button => { button.onclick = () => resolveAlignmentProposal(proposalSet, button.dataset.acceptProposal, true); });
   $$('[data-reject-proposal]').forEach(button => { button.onclick = () => resolveAlignmentProposal(proposalSet, button.dataset.rejectProposal, false); });
+  $$('[data-hold-clip]').forEach(button => { button.onclick = () => setClipEligibility(button.dataset.holdClip, "HELD_FOR_REVIEW"); });
+  $$('[data-exclude-clip]').forEach(button => { button.onclick = () => setClipEligibility(button.dataset.excludeClip, "EXCLUDED"); });
+}
+
+async function acceptTimestampPriors(proposalSet) {
+  try {
+    const scope = {kind: "PROJECT"};
+    const preview = await client.createAlignmentAcceptancePreview({projectId: state.project.id}, {
+      commandId: crypto.randomUUID(), expectedRevision: state.project.revision,
+      proposalSetId: proposalSet.id, proposalSetDigest: proposalSet.digest,
+      mode: "TIMESTAMP_PRIOR", scope,
+    });
+    const message = `${preview.affectedClipCount} non-conflicting clips will use timestamp-prior placement.\n\nAccepted coverage: ${formatUs(preview.acceptedCoverageBeforeUs)} → ${formatUs(preview.acceptedCoverageAfterUs)}\nRemaining blockers: ${preview.resultingReadiness ? "none" : preview.remainingCounts.reviewRequired + preview.remainingCounts.unresolved}\n\nWireless-camera timestamps may reflect hub receipt time rather than exact capture time. Conflicting clips are excluded from this action.`;
+    if (!await confirmAction(message, {title: "Accept timestamp placements", confirmLabel: "Accept placements"})) return;
+    if (await command("AcceptAlignmentProposalSet", {
+      proposalSetId: proposalSet.id, digest: proposalSet.digest, mode: "TIMESTAMP_PRIOR", scope,
+      previewId: preview.id, previewDigest: preview.digest, confirmTimestampUncertainty: true,
+    })) toast(`${preview.affectedClipCount} timestamp placements accepted as one revision`);
+  } catch (error) { handleError(error); }
+}
+
+async function setClipEligibility(clipId, programEligibility) {
+  await command("SetClipProgramEligibility", {clipIds: [clipId], programEligibility});
 }
 
 async function focusClipInTimeline(clipId, proposalSet = null) {
