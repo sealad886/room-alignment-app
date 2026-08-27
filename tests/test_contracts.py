@@ -78,6 +78,17 @@ class ContractTests(unittest.TestCase):
         self.assertIn("SetAudioMode", command_types)
         self.assertIn("ReconcileBoundary", command_types)
         self.assertNotIn("InitializeProgram", command_types)
+        timestamp_acceptance = commands["$defs"]["AcceptAlignmentProposalSet"]["properties"][
+            "payload"
+        ]["allOf"][0]
+        self.assertEqual(
+            timestamp_acceptance["then"]["required"],
+            ["scope", "previewId", "previewDigest", "confirmTimestampUncertainty"],
+        )
+        self.assertEqual(
+            timestamp_acceptance["then"]["properties"]["confirmTimestampUncertainty"],
+            {"const": True},
+        )
 
     def test_all_normative_json_contracts_parse_and_are_served(self):
         contract = json.loads((ROOT / "contracts" / "openapi.json").read_text(encoding="utf-8"))
