@@ -902,7 +902,11 @@ def analyze_project_alignment(
         for clip_id, clip_support in solved_support.items():
             support[clip_id].extend(clip_support)
         component_id = f"component-{component_index}"
-        reference_connected = reference_clip_id in nodes
+        reference_reachable = (
+            _reference_reachable_clip_ids(consistent_edges, reference_clip_id)
+            if reference_clip_id in nodes
+            else set()
+        )
         for clip_id in nodes:
             clip_support = solved_support.get(clip_id, [])
             relative_confidence = (
@@ -912,7 +916,7 @@ def analyze_project_alignment(
             component_by_clip[clip_id] = {
                 "id": component_id,
                 "anchorClipId": anchor,
-                "referenceConnected": reference_connected,
+                "referenceConnected": clip_id in reference_reachable,
                 "relativeConfidence": round(min(0.99, relative_confidence), 6),
                 "supportingEdgeCount": len(clip_support),
                 "rejectedOutlierCount": len(component_edges) - len(consistent_edges),

@@ -8,6 +8,7 @@ from pathlib import Path
 from room_alignment.alignment import (
     AudioSignature,
     _huber_graph_adjustments,
+    _reference_reachable_clip_ids,
     analyze_project_alignment,
     candidate_pairs,
     correlate_audio,
@@ -63,6 +64,17 @@ class FakeSignatureCache:
 
 
 class AudioAlignmentAlgorithmTests(unittest.TestCase):
+    def test_reference_reachability_uses_only_retained_edges(self) -> None:
+        retained_edges = [
+            {"leftClipId": "reference", "rightClipId": "near"},
+            {"leftClipId": "detached-left", "rightClipId": "detached-right"},
+        ]
+
+        self.assertEqual(
+            _reference_reachable_clip_ids(retained_edges, "reference"),
+            {"reference", "near"},
+        )
+
     def test_outlier_pass_preserves_single_large_supported_correction(self) -> None:
         edge = {
             "leftClipId": "left",
