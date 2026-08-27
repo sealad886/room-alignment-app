@@ -172,8 +172,19 @@
         <div class="settings-actions"><span class="settings-save-state" id="settings-save-state" role="status" aria-live="polite"></span><button class="btn" id="cancel-settings" type="button">Cancel</button><button class="btn primary" type="submit">Save settings</button></div>
       </form>
     </dialog>
+    <dialog id="session-recovery-dialog" class="confirmation-dialog session-recovery-dialog" aria-labelledby="session-recovery-title" aria-describedby="session-recovery-description">
+      <div class="session-recovery-content">
+        <p class="eyebrow">Secure session required</p>
+        <h2 id="session-recovery-title">Reopen Room Alignment securely</h2>
+        <p id="session-recovery-description" class="confirmation-message">This tab no longer has a valid local session. Restarting the local service creates a new one-time launch link and opens it in your browser. Your libraries, projects, and media are not changed.</p>
+        <ol class="session-recovery-steps"><li>Open Terminal.</li><li>Run this command:</li></ol>
+        <code id="session-recovery-command">room-alignment stop &amp;&amp; room-alignment serve</code>
+        <p class="help">Keep this dialog open until the new secure tab appears. You can then close this expired tab.</p>
+        <div class="confirmation-actions"><button class="btn" id="copy-session-recovery" type="button">Copy command</button><button class="btn primary" id="retry-session" type="button">I reopened it · try again</button></div>
+      </div>
+    </dialog>
   </div>
   <script src="/api-client.js"></script>
-  <script type="module" src="/app.js?v=timeline-pan-1"></script>
+  <script type="module" src="/app.js?v=session-recovery-1"></script>
 </body>
 </html>
