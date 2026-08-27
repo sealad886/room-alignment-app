@@ -536,7 +536,16 @@ def build_v1_ffmpeg_command(store: Store, plan: dict[str, Any], output: Path) ->
     planned_sources = {item["assetId"]: item for item in plan["sources"]}
     video = plan["compiledProgram"]["videoSlices"]
     audio = plan["compiledProgram"]["audioSlices"]
-    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-filter_complex_threads",
+        "1",
+        "-nostdin",
+        "-y",
+    ]
     filters: list[str] = []
     norm = plan["normalization"]
     for item in video:
