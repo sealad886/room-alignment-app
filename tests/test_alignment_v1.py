@@ -374,6 +374,25 @@ class ProgramCompositionTests(unittest.TestCase):
         self.assertEqual(late["startAlignedUs"], 20_000_000)
         self.assertEqual(late["sourceStartUs"], 0)
 
+    def test_excluded_sole_coverage_becomes_an_explicit_excluded_section(self) -> None:
+        project, assets = self.project_with_recorded_gap()
+        for clip in project["clips"]:
+            if clip["assetId"].endswith("late"):
+                clip["programEligibility"] = "EXCLUDED"
+
+        proposal = timeline_section_proposal(project, assets, "EXCLUDE")
+
+        self.assertEqual(
+            [
+                (section["startAlignedUs"], section["endAlignedUs"], section["mode"])
+                for section in proposal["sections"]
+            ],
+            [(0, 10_000_000, "KEEP"), (10_000_000, 30_000_000, "EXCLUDE")],
+        )
+        project["timelineSections"] = proposal["sections"]
+        summary = alignment_summary(project, assets)
+        self.assertTrue(summary["readyForProgramDraft"], summary["blockers"])
+
     def test_slate_gap_generates_provenance_video_and_deliberate_silence(self) -> None:
         project, assets = self.project_with_recorded_gap()
         proposal = timeline_section_proposal(project, assets, "SLATE")

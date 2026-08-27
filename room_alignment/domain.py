@@ -1546,6 +1546,12 @@ def timeline_section_proposal(
     )
     if not accepted:
         raise DomainError("COVERAGE_INVALID", "No accepted aligned media is available for composition")
+    evidence = _union_intervals(
+        (int(item["startUs"]), int(item["endUs"]))
+        for item in _clip_ranges(project, assets, include_provisional=True)
+    )
+    evidence_start_us = min(start_us for start_us, _end_us in evidence)
+    evidence_end_us = max(end_us for _start_us, end_us in evidence)
     sections: list[dict[str, Any]] = []
 
     def append_section(start_us: int, end_us: int, mode: str) -> None:
@@ -1570,11 +1576,12 @@ def timeline_section_proposal(
             }
         )
 
-    cursor = accepted[0][0]
+    cursor = evidence_start_us
     for start_us, end_us in accepted:
         append_section(cursor, start_us, gap_mode)
         append_section(start_us, end_us, "KEEP")
         cursor = end_us
+    append_section(cursor, evidence_end_us, gap_mode)
     keep_us = sum(
         int(item["endAlignedUs"]) - int(item["startAlignedUs"])
         for item in sections
