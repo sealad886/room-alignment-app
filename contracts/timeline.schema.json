@@ -237,14 +237,22 @@
     "AlignmentProposal": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "clipId", "assetId", "classification", "proposedAlignment", "confidence", "automaticallyAcceptable", "requiresDriftConfirmation", "evidence", "limitations", "inputFingerprintDigest"],
+      "required": ["id", "clipId", "assetId", "logicalSourceId", "classification", "proposedAlignment", "confidence", "relativeConfidence", "absoluteConfidence", "supportingEdgeCount", "rejectedOutlierCount", "timestampUncertaintyUs", "automaticallyAcceptable", "requiresDriftConfirmation", "evidence", "limitations", "inputFingerprintDigest"],
       "properties": {
         "id": {"$ref": "#/$defs/Id"},
         "clipId": {"$ref": "#/$defs/Id"},
         "assetId": {"$ref": "#/$defs/Id"},
+        "logicalSourceId": {"$ref": "#/$defs/Id"},
+        "componentId": {"type": ["string", "null"]},
         "classification": {"enum": ["AUDIO_CONFIRMED", "TIMESTAMP_ONLY", "CONFLICTING", "UNRESOLVED", "MANUAL_ACCEPTED"]},
         "proposedAlignment": {"$ref": "#/$defs/ClipAlignmentTransform"},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "relativeConfidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "absoluteConfidence": {"type": "number", "minimum": 0, "maximum": 1},
+        "residualUs": {"type": ["integer", "null"]},
+        "supportingEdgeCount": {"type": "integer", "minimum": 0},
+        "rejectedOutlierCount": {"type": "integer", "minimum": 0},
+        "timestampUncertaintyUs": {"type": ["integer", "null"], "minimum": 0},
         "automaticallyAcceptable": {"type": "boolean"},
         "requiresDriftConfirmation": {"type": "boolean"},
         "evidence": {"type": "array", "items": {"$ref": "#/$defs/AlignmentEvidence"}},
@@ -255,7 +263,7 @@
     "AlignmentProposalSummary": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["audioConfirmed", "timestampOnly", "conflicting", "unresolved", "manualAccepted", "proposedDriftCorrections", "candidatePairs", "confirmedEdges", "signatureFailures", "analysisCapped"],
+      "required": ["audioConfirmed", "timestampOnly", "conflicting", "unresolved", "manualAccepted", "proposedDriftCorrections", "candidatePairs", "confirmedEdges", "signatureFailures", "analysisCapped", "componentCount", "supportedComponentCount", "timestampAnchoredComponentCount", "floatingComponentCount", "rejectedOutlierCount"],
       "properties": {
         "audioConfirmed": {"type": "integer", "minimum": 0},
         "timestampOnly": {"type": "integer", "minimum": 0},
@@ -267,6 +275,11 @@
         "confirmedEdges": {"type": "integer", "minimum": 0},
         "signatureFailures": {"type": "integer", "minimum": 0},
         "analysisCapped": {"type": "boolean"}
+        ,"componentCount": {"type": "integer", "minimum": 0}
+        ,"supportedComponentCount": {"type": "integer", "minimum": 0}
+        ,"timestampAnchoredComponentCount": {"type": "integer", "minimum": 0}
+        ,"floatingComponentCount": {"type": "integer", "minimum": 0}
+        ,"rejectedOutlierCount": {"type": "integer", "minimum": 0}
       }
     },
     "AlignmentProposalSet": {

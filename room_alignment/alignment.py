@@ -658,6 +658,37 @@ def _reference_reachable_clip_ids(
     return reachable
 
 
+def _audio_components(edges: list[dict[str, Any]]) -> list[tuple[set[str], list[dict[str, Any]]]]:
+    """Return deterministic connected evidence components without project-wide anchoring."""
+    adjacency: defaultdict[str, set[str]] = defaultdict(set)
+    for edge in edges:
+        left = str(edge["leftClipId"])
+        right = str(edge["rightClipId"])
+        adjacency[left].add(right)
+        adjacency[right].add(left)
+    unseen = set(adjacency)
+    result: list[tuple[set[str], list[dict[str, Any]]]] = []
+    while unseen:
+        first = min(unseen)
+        nodes = {first}
+        pending = [first]
+        unseen.remove(first)
+        while pending:
+            current = pending.pop()
+            for neighbor in sorted(adjacency[current]):
+                if neighbor in unseen:
+                    unseen.remove(neighbor)
+                    nodes.add(neighbor)
+                    pending.append(neighbor)
+        component_edges = [
+            edge
+            for edge in edges
+            if str(edge["leftClipId"]) in nodes and str(edge["rightClipId"]) in nodes
+        ]
+        result.append((nodes, component_edges))
+    return result
+
+
 def estimate_drift_ppm(anchors: list[tuple[int, int]]) -> int | None:
     """Estimate bounded rate only from separated, mutually consistent anchors."""
 
@@ -799,18 +830,45 @@ def analyze_project_alignment(
         project.get("clips", [{}])[0],
     )
     reference_clip_id = str(reference_clip.get("id", ""))
-    reachable_clip_ids = _reference_reachable_clip_ids(edges, reference_clip_id)
-    anchored_edges = [
-        edge
-        for edge in edges
-        if str(edge["leftClipId"]) in reachable_clip_ids
-        and str(edge["rightClipId"]) in reachable_clip_ids
-    ]
-    adjustments, support = _huber_graph_adjustments(
-        (str(clip["id"]) for clip in project.get("clips", [])),
-        anchored_edges,
-        reference_clip_id,
-    )
+    components = _audio_components(edges)
+    adjustments: dict[str, int] = {}
+    support: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
+    component_by_clip: dict[str, dict[str, Any]] = {}
+    rejected_outliers = 0
+    for component_index, (nodes, component_edges) in enumerate(components, start=1):
+        anchor = reference_clip_id if reference_clip_id in nodes else max(
+            sorted(nodes),
+            key=lambda clip_id: (
+                sum(float(edge["confidence"]) for edge in component_edges if clip_id in {str(edge["leftClipId"]), str(edge["rightClipId"])}),
+                -len(clip_id),
+            ),
+        )
+        first_adjustments, _first_support = _huber_graph_adjustments(nodes, component_edges, anchor)
+        consistent_edges = []
+        for edge in component_edges:
+            predicted = first_adjustments[str(edge["rightClipId"])] - first_adjustments[str(edge["leftClipId"])]
+            if abs(predicted - int(edge["correctionUs"])) <= 250_000:
+                consistent_edges.append(edge)
+            else:
+                rejected_outliers += 1
+        solved, solved_support = _huber_graph_adjustments(nodes, consistent_edges, anchor)
+        adjustments.update(solved)
+        for clip_id, clip_support in solved_support.items():
+            support[clip_id].extend(clip_support)
+        component_id = f"component-{component_index}"
+        for clip_id in nodes:
+            clip_support = solved_support.get(clip_id, [])
+            relative_confidence = (
+                sum(float(edge["confidence"]) for edge in clip_support) / len(clip_support)
+                if clip_support else 0.0
+            )
+            component_by_clip[clip_id] = {
+                "id": component_id,
+                "anchorClipId": anchor,
+                "relativeConfidence": round(min(0.99, relative_confidence), 6),
+                "supportingEdgeCount": len(clip_support),
+                "rejectedOutlierCount": len(component_edges) - len(consistent_edges),
+            }
     proposals: list[dict[str, Any]] = []
     summary = {
         "audioConfirmed": 0,
@@ -823,6 +881,11 @@ def analyze_project_alignment(
         "confirmedEdges": len(edges),
         "signatureFailures": len(unavailable),
         "analysisCapped": len(pairs) >= DEFAULT_MAX_PAIR_COMPARISONS,
+        "componentCount": len(components),
+        "supportedComponentCount": sum(bool(component_edges) for _nodes, component_edges in components),
+        "timestampAnchoredComponentCount": len(components),
+        "floatingComponentCount": 0,
+        "rejectedOutlierCount": rejected_outliers,
     }
     for clip in project.get("clips", []):
         asset = assets.get(clip["assetId"], {})
@@ -899,19 +962,24 @@ def analyze_project_alignment(
             limitations.append("No usable audio stream")
         if str(asset.get("id")) in truncated_assets:
             limitations.append("Audio signature was capped at fifteen minutes")
-        if any(
-            edge["leftClipId"] == clip["id"] or edge["rightClipId"] == clip["id"]
-            for edge in edges
-        ) and clip_id not in reachable_clip_ids:
-            limitations.append("Audio evidence is not connected to the reference source")
+        component = component_by_clip.get(clip_id)
+        absolute_confidence = 1.0 if manual else min(0.65, float(clip.get("alignmentConfidence", 0.55)))
         proposals.append(
             {
                 "id": opaque_id("alignment_proposal"),
                 "clipId": clip["id"],
                 "assetId": clip["assetId"],
+                "logicalSourceId": clip["logicalSourceId"],
+                "componentId": component["id"] if component else None,
                 "classification": classification,
                 "proposedAlignment": adjusted.to_dict(),
                 "confidence": round(confidence, 6),
+                "relativeConfidence": component["relativeConfidence"] if component else 0.0,
+                "absoluteConfidence": round(absolute_confidence, 6),
+                "residualUs": 0 if component else None,
+                "supportingEdgeCount": component["supportingEdgeCount"] if component else 0,
+                "rejectedOutlierCount": component["rejectedOutlierCount"] if component else 0,
+                "timestampUncertaintyUs": overlap_search_extension_us,
                 "automaticallyAcceptable": automatic,
                 "requiresDriftConfirmation": bool(adjusted.rate_ppm),
                 "evidence": evidence_items,
@@ -943,7 +1011,7 @@ def analyze_project_alignment(
         "selectionDigest": selection_digest,
         "inputDigest": input_digest,
         "algorithm": "bounded-audio-evidence-graph",
-        "algorithmVersion": "2",
+        "algorithmVersion": "3",
         "config": config,
         "configDigest": digest_json(config),
         "status": "PENDING",
@@ -951,8 +1019,9 @@ def analyze_project_alignment(
         "proposals": proposals,
         "limitations": [
             "Automatic visual matching is not used",
-            "Timestamp-only and unresolved clips require review",
+            "Timestamp-only and unresolved clips require explicit acceptance or review",
             "Manual alignment decisions remain authoritative",
+            "Disconnected audio evidence is solved with component-local anchors",
         ],
         "createdAt": created_at,
         "updatedAt": created_at,

@@ -157,7 +157,14 @@ class AudioAlignmentAlgorithmTests(unittest.TestCase):
             overlap_search_extension_us=45_000_000,
         )
         self.assertEqual(result["config"]["overlapSearchExtensionUs"], 45_000_000)
-        self.assertEqual(result["algorithmVersion"], "2")
+        self.assertEqual(result["algorithmVersion"], "3")
+        self.assertGreaterEqual(result["summary"]["componentCount"], 1)
+        audio_proposal = next(
+            item for item in result["proposals"] if item["classification"] == "AUDIO_CONFIRMED"
+        )
+        self.assertIsNotNone(audio_proposal["componentId"])
+        self.assertGreater(audio_proposal["relativeConfidence"], 0)
+        self.assertGreater(audio_proposal["absoluteConfidence"], 0)
         self.assertEqual(result["summary"]["audioConfirmed"], 2)
         self.assertEqual(result["summary"]["timestampOnly"], 1)
         self.assertEqual(len(result["proposals"]), 3)
