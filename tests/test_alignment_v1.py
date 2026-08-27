@@ -7,13 +7,16 @@ from pathlib import Path
 
 from room_alignment.alignment import (
     AudioSignature,
+    _huber_graph_adjustments,
     analyze_project_alignment,
     candidate_pairs,
     correlate_audio,
     estimate_drift_ppm,
 )
 from room_alignment.domain import (
+    DomainError,
     apply_command,
+    alignment_digest,
     alignment_summary,
     compile_program,
     generate_program_draft,
@@ -60,6 +63,19 @@ class FakeSignatureCache:
 
 
 class AudioAlignmentAlgorithmTests(unittest.TestCase):
+    def test_outlier_pass_preserves_single_large_supported_correction(self) -> None:
+        edge = {
+            "leftClipId": "left",
+            "rightClipId": "right",
+            "correctionUs": 2_000_000,
+            "confidence": 0.9,
+        }
+        adjustments, _support = _huber_graph_adjustments(
+            {"left", "right"}, [edge], "left", regularize=False
+        )
+        self.assertEqual(adjustments["left"], 0)
+        self.assertEqual(adjustments["right"], 2_000_000)
+
     def test_envelope_and_gcc_phat_recover_right_clip_correction(self) -> None:
         base = pulse_signal()
         shifted = [0] * 80 + base[:-80]
@@ -182,6 +198,17 @@ class AudioAlignmentAlgorithmTests(unittest.TestCase):
 
 
 class EvidenceTimelineTests(unittest.TestCase):
+    def test_alignment_digest_changes_with_program_eligibility(self) -> None:
+        assets = [media("asset", "2025-10-15T12:00:00+00:00")]
+        project = new_project("Digest", "library", assets, initialize_legacy_program=False)
+        clip = project["clips"][0]
+        clip["alignmentState"] = "ACCEPTED"
+        clip["programEligibility"] = "ELIGIBLE"
+        eligible_digest = alignment_digest(project)
+        clip["programEligibility"] = "EXCLUDED"
+        excluded_digest = alignment_digest(project)
+        self.assertNotEqual(eligible_digest, excluded_digest)
+
     def test_evidence_extent_does_not_collapse_to_empty_program_duration(self) -> None:
         assets = [
             media("first", "2025-10-15T12:00:00+00:00", 60_000_000),
@@ -578,6 +605,7 @@ class ProposalSetStoreTests(unittest.TestCase):
             "proposalSetDigest": proposal_set["digest"], "mode": "TIMESTAMP_PRIOR",
             "scope": {"kind": "PROJECT"},
         })
+        self.assertEqual(preview["mode"], "TIMESTAMP_PRIOR")
         result = self.store.apply_project_command(project["id"], {
             "commandId": "accept-timestamp", "expectedRevision": project["revision"],
             "commandType": "AcceptAlignmentProposalSet", "payload": {
@@ -591,6 +619,20 @@ class ProposalSetStoreTests(unittest.TestCase):
         self.assertEqual(accepted["alignmentState"], "ACCEPTED")
         self.assertEqual(accepted["programEligibility"], "ELIGIBLE")
         self.assertEqual(accepted["alignmentEvidence"], ["timestamp-prior"])
+
+    def test_alignment_scope_rejects_malformed_collection_and_range_fields(self) -> None:
+        proposal_set = {"proposals": []}
+        with self.assertRaisesRegex(DomainError, "clipIds must be an array"):
+            self.store._select_alignment_proposals(
+                proposal_set, "TIMESTAMP_PRIOR", {"kind": "CLIPS", "clipIds": "clip"}, set()
+            )
+        with self.assertRaisesRegex(DomainError, "bounds must be integers"):
+            self.store._select_alignment_proposals(
+                proposal_set,
+                "TIMESTAMP_PRIOR",
+                {"kind": "ALIGNED_RANGE", "startAlignedUs": "soon", "endAlignedUs": 5},
+                set(),
+            )
 
 
 if __name__ == "__main__":

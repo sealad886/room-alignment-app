@@ -2610,6 +2610,11 @@ class Store:
                         "ACCEPTANCE_PREVIEW_STALE", "Alignment acceptance preview is stale"
                     )
                 canonical_preview = json.loads(preview["preview_json"])
+                if canonical_preview.get("mode") != mode:
+                    raise DomainError(
+                        "ACCEPTANCE_PREVIEW_STALE",
+                        "Acceptance mode changed after preview",
+                    )
                 if canonical_preview.get("scopeDigest") != digest_json(payload.get("scope") or {"kind": "PROJECT"}):
                     raise DomainError("ACCEPTANCE_PREVIEW_STALE", "Acceptance scope changed after preview")
                 if sorted(item["id"] for item in selected) != sorted(canonical_preview["proposalIds"]):
@@ -2663,11 +2668,19 @@ class Store:
         kind = str(scope.get("kind", "PROJECT"))
         if kind not in {"PROJECT", "EVENTS", "SOURCES", "ALIGNED_RANGE", "CLIPS"}:
             raise DomainError("SCOPE_INVALID", "Unknown alignment acceptance scope")
+        for field in ("clipIds", "sourceIds", "eventIds"):
+            if field in scope and not isinstance(scope[field], list):
+                raise DomainError("SCOPE_INVALID", f"{field} must be an array")
         clip_ids = {str(value) for value in scope.get("clipIds", [])}
         source_ids = {str(value) for value in scope.get("sourceIds", [])}
         event_ids = {str(value) for value in scope.get("eventIds", [])}
-        start_us = int(scope.get("startAlignedUs", -2**63))
-        end_us = int(scope.get("endAlignedUs", 2**63 - 1))
+        try:
+            start_us = int(scope.get("startAlignedUs", -2**63))
+            end_us = int(scope.get("endAlignedUs", 2**63 - 1))
+        except (TypeError, ValueError) as error:
+            raise DomainError(
+                "SCOPE_INVALID", "Aligned range bounds must be integers"
+            ) from error
         if kind == "ALIGNED_RANGE" and end_us <= start_us:
             raise DomainError("SCOPE_INVALID", "Aligned acceptance range must have positive duration")
 
@@ -3286,6 +3299,7 @@ class Store:
             "projectRevision": int(project["revision"]),
             "proposalSetId": proposal_set["id"],
             "proposalSetDigest": proposal_set["digest"],
+            "mode": mode,
             "scope": scope,
             "scopeDigest": digest_json(scope),
             "expiresAt": datetime.fromtimestamp(time.time() + 900, UTC).isoformat(),

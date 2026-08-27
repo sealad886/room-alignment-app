@@ -5,6 +5,7 @@ import hashlib
 import json
 import uuid
 from bisect import bisect_left, bisect_right
+from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -406,6 +407,7 @@ def alignment_digest(project: dict[str, Any]) -> str:
                 "alignment": _clip_alignment(clip).to_dict(),
                 "state": clip.get("alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED"),
                 "confidence": float(clip.get("alignmentConfidence", 1.0 if "sync" in clip else 0.0)),
+                "programEligibility": _program_eligibility(clip),
             }
             for clip in sorted(project.get("clips", []), key=lambda item: item["id"])
         ]
@@ -529,45 +531,68 @@ def alignment_summary(
     coverage_intervals: list[dict[str, Any]] = []
     blockers: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
+    ordered_sections = sorted(required_sections)
+    section_index = 0
+    starts: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    ends: dict[int, list[dict[str, Any]]] = defaultdict(list)
+    for item in all_ranges:
+        starts[int(item["startUs"])].append(item)
+        ends[int(item["endUs"])].append(item)
+    active: dict[str, Counter[str]] = {
+        name: Counter()
+        for name in (
+            "accepted_eligible",
+            "accepted_held",
+            "provisional",
+            "conflicting",
+            "unavailable",
+        )
+    }
+
+    def range_category(item: dict[str, Any]) -> str:
+        clip = clips_by_id[str(item["clipId"])]
+        asset = assets.get(str(item["assetId"]))
+        state = _alignment_state(clip)
+        eligibility = _program_eligibility(clip)
+        if not asset or asset.get("missing"):
+            return "unavailable"
+        if state == "ACCEPTED" and eligibility == "ELIGIBLE":
+            return "accepted_eligible"
+        if state == "ACCEPTED":
+            return "accepted_held"
+        if state == "REVIEW_REQUIRED":
+            return "conflicting"
+        return "provisional"
+
     for start, end in zip(ordered_boundaries, ordered_boundaries[1:]):
-        section = next(
-            (
-                (section_start, section_end, mode)
-                for section_start, section_end, mode in required_sections
-                if section_start <= start and end <= section_end
-            ),
-            None,
+        for item in ends.get(start, []):
+            category = range_category(item)
+            clip_id = str(item["clipId"])
+            active[category][clip_id] -= 1
+            if active[category][clip_id] <= 0:
+                del active[category][clip_id]
+        for item in starts.get(start, []):
+            active[range_category(item)][str(item["clipId"])] += 1
+        while (
+            section_index < len(ordered_sections)
+            and ordered_sections[section_index][1] <= start
+        ):
+            section_index += 1
+        section = (
+            ordered_sections[section_index]
+            if section_index < len(ordered_sections)
+            and ordered_sections[section_index][0] <= start
+            and end <= ordered_sections[section_index][1]
+            else None
         )
         if section is None:
             continue
         mode = section[2]
-        overlapping = [
-            item
-            for item in all_ranges
-            if int(item["startUs"]) < end and int(item["endUs"]) > start
-        ]
-        accepted_eligible: list[str] = []
-        accepted_held: list[str] = []
-        provisional: list[str] = []
-        conflicting: list[str] = []
-        unavailable: list[str] = []
-        for item in overlapping:
-            clip = clips_by_id[str(item["clipId"])]
-            asset = assets.get(str(item["assetId"]))
-            state = _alignment_state(clip)
-            eligibility = _program_eligibility(clip)
-            target = (
-                unavailable
-                if not asset or asset.get("missing")
-                else accepted_eligible
-                if state == "ACCEPTED" and eligibility == "ELIGIBLE"
-                else accepted_held
-                if state == "ACCEPTED"
-                else conflicting
-                if state == "REVIEW_REQUIRED"
-                else provisional
-            )
-            target.append(str(item["clipId"]))
+        accepted_eligible = sorted(active["accepted_eligible"])
+        accepted_held = sorted(active["accepted_held"])
+        provisional = sorted(active["provisional"])
+        conflicting = sorted(active["conflicting"])
+        unavailable = sorted(active["unavailable"])
         blocker_codes: list[str] = []
         warning_codes: list[str] = []
         if mode == "EXCLUDE":

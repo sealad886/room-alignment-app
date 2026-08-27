@@ -2129,7 +2129,11 @@ function handleError(error) {
 async function start() {
   try {
     await client.getSession();
-    state.settings = await client.getApplicationSettings();
+    try {
+      state.settings = await client.getApplicationSettings();
+    } catch (error) {
+      console.warn("Using default application settings", error);
+    }
     applyAppearanceSettings();
     $("#library-time-zone").value = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
     setupEvents();

@@ -608,6 +608,8 @@ def _huber_graph_adjustments(
     clip_ids: Iterable[str],
     edges: list[dict[str, Any]],
     reference_clip_id: str,
+    *,
+    regularize: bool = True,
 ) -> tuple[dict[str, int], dict[str, list[dict[str, Any]]]]:
     values = {clip_id: 0.0 for clip_id in clip_ids}
     support: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -620,7 +622,7 @@ def _huber_graph_adjustments(
             if clip_id == reference_clip_id:
                 next_values[clip_id] = 0.0
                 continue
-            observations: list[tuple[float, float]] = [(0.0, 0.18)]
+            observations: list[tuple[float, float]] = [(0.0, 0.18)] if regularize else []
             for edge in support.get(clip_id, []):
                 confidence = max(0.05, float(edge["confidence"]))
                 if edge["rightClipId"] == clip_id:
@@ -631,7 +633,10 @@ def _huber_graph_adjustments(
                 huber = 1.0 if abs(residual) <= 100_000 else 100_000 / abs(residual)
                 observations.append((target, confidence * huber))
             total_weight = sum(weight for _value, weight in observations)
-            next_values[clip_id] = sum(value * weight for value, weight in observations) / total_weight
+            if total_weight:
+                next_values[clip_id] = (
+                    sum(value * weight for value, weight in observations) / total_weight
+                )
         values = next_values
     return ({key: round(value) for key, value in values.items()}, dict(support))
 
@@ -843,7 +848,9 @@ def analyze_project_alignment(
                 -len(clip_id),
             ),
         )
-        first_adjustments, _first_support = _huber_graph_adjustments(nodes, component_edges, anchor)
+        first_adjustments, _first_support = _huber_graph_adjustments(
+            nodes, component_edges, anchor, regularize=False
+        )
         consistent_edges = []
         for edge in component_edges:
             predicted = first_adjustments[str(edge["rightClipId"])] - first_adjustments[str(edge["leftClipId"])]

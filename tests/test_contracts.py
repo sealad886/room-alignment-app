@@ -105,6 +105,20 @@ class ContractTests(unittest.TestCase):
         timeline_schema = json.loads(
             (ROOT / "contracts" / "timeline.schema.json").read_text(encoding="utf-8")
         )
+        proposal_config = timeline_schema["$defs"]["AlignmentProposalSet"]["properties"]["config"]
+        self.assertIn("overlapSearchExtensionUs", proposal_config["required"])
+        self.assertNotIn("uncertaintyUs", proposal_config["properties"])
+        preview_path = contract["paths"][
+            "/projects/{projectId}/alignment-proposal-acceptance-previews"
+        ]["post"]
+        self.assertEqual(
+            preview_path["requestBody"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AlignmentAcceptancePreviewCreate",
+        )
+        self.assertEqual(
+            preview_path["responses"]["201"]["content"]["application/json"]["schema"]["$ref"],
+            "#/components/schemas/AlignmentAcceptancePreview",
+        )
         self.assertIn("ClusterFacets", timeline_schema["$defs"])
         facets_response = contract["paths"][
             "/cluster-generations/{clusterGenerationId}/facets"

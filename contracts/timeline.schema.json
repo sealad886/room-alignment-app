@@ -299,9 +299,9 @@
         "config": {
           "type": "object",
           "additionalProperties": false,
-          "required": ["uncertaintyUs", "maxCandidatesPerClip", "maxPairComparisons", "signatureSampleRate", "signatureMaxSeconds", "visualMatching"],
+          "required": ["overlapSearchExtensionUs", "maxCandidatesPerClip", "maxPairComparisons", "signatureSampleRate", "signatureMaxSeconds", "visualMatching"],
           "properties": {
-            "uncertaintyUs": {"type": "integer", "minimum": 0},
+            "overlapSearchExtensionUs": {"type": "integer", "minimum": 0},
             "maxCandidatesPerClip": {"type": "integer", "minimum": 1},
             "maxPairComparisons": {"type": "integer", "minimum": 1},
             "signatureSampleRate": {"type": "integer", "minimum": 1},
