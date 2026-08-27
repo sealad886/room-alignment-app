@@ -264,6 +264,20 @@ def build_render_plan(
     project_id: str,
     settings: dict[str, Any],
 ) -> dict[str, Any]:
+    """
+    Build and persist a versioned render plan for a project.
+    
+    Parameters:
+    	store (Store): Storage interface for project, media, provenance, and output data.
+    	project_id (str): Identifier of the project to plan.
+    	settings (dict[str, Any]): Render profile, destination, and normalization settings.
+    
+    Returns:
+    	dict[str, Any]: The saved render plan, including compiled media slices, source provenance, output settings, issues, and plan digest.
+    
+    Raises:
+    	DomainError: If the render profile, output filename, or video settings are invalid.
+    """
     project = store.project(project_id)
     assets = store.media_records(item["assetId"] for item in project["clips"])
     compiled = compile_program(project, assets)

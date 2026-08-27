@@ -121,6 +121,14 @@ class SessionManager:
 
 class App:
     def __init__(self, data_dir: Path):
+        """Initialize application state in the specified data directory.
+        
+        Parameters:
+        	data_dir (Path): Directory for persistent application data and the process ownership lock.
+        
+        Raises:
+        	RuntimeError: If another Room Alignment process already owns the data directory.
+        """
         self.data_dir = data_dir.resolve()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._lock_file = (self.data_dir / "application.lock").open("a+")
@@ -144,6 +152,12 @@ class App:
         self.closing = False
 
     def close(self) -> None:
+        """Shut down the application and release its resources.
+        
+        Requests active work to stop, shuts down rendering, waits up to five seconds
+        for worker threads to settle, marks remaining jobs as interrupted, and releases
+        the application lock.
+        """
         self.closing = True
         with self.lock:
             scans = dict(self.scan_threads)
@@ -194,6 +208,18 @@ class App:
         limit: int | None = None,
         root_ids: list[str] | None = None,
     ) -> dict[str, object]:
+        """
+        Start a library scan across the selected roots and track its progress and outcome.
+        
+        Parameters:
+            library_id (str): Identifier of the library to scan.
+            mode (str): Scan mode, such as incremental or full traversal.
+            limit (int | None): Maximum number of media records to process.
+            root_ids (list[str] | None): Root identifiers to scan, or all active roots when omitted.
+        
+        Returns:
+            dict[str, object]: The newly created scan record.
+        """
         scan = self.store.begin_scan(library_id, mode, limit, root_ids)
         roots = self.store.active_library_root_paths(library_id, scan["rootIds"])
 
@@ -359,6 +385,19 @@ class App:
         return scan
 
     def start_alignment_analysis(self, project_id: str) -> dict[str, object]:
+        """
+        Start a cancellable background alignment analysis for a project.
+        
+        Parameters:
+            project_id (str): Identifier of the project to analyze.
+        
+        Returns:
+            dict[str, object]: The queued analysis job.
+        
+        Raises:
+            DomainError: If two analysis jobs are already running or the project
+                already has an active alignment analysis.
+        """
         project = self.store.project(project_id)
         settings = self.store.application_settings()
         self.store.active_library_root_paths(project["libraryId"])
@@ -372,6 +411,12 @@ class App:
             self.alignment_projects_reserved.add(project_id)
 
         def run() -> None:
+            """
+            Run the alignment analysis job and record its proposal set or failure state.
+            
+            The analysis responds to cancellation requests, reports progress, saves the resulting
+            non-mutating proposal set, and releases the job's analysis reservations when complete.
+            """
             try:
                 self._raise_if_job_stopping(job["id"])
                 self.store.transition_job(job["id"], "RUNNING", 0.05, "Preparing bounded overlap candidates")
@@ -709,6 +754,13 @@ class Handler(BaseHTTPRequestHandler):
             self.error(error)
 
     def get_api(self, path: str, query: dict[str, list[str]]) -> None:
+        """
+        Handle versioned API GET requests and return the requested resource or artifact.
+        
+        Parameters:
+            path (str): API request path.
+            query (dict[str, list[str]]): Parsed query parameters used for filtering, pagination, and resource options.
+        """
         if path == "/api/v1/system":
             return self.respond(
                 {
@@ -995,6 +1047,7 @@ class Handler(BaseHTTPRequestHandler):
                 remaining -= len(chunk)
 
     def do_POST(self) -> None:
+        """Handle authenticated POST requests and convert failures into HTTP error responses."""
         self._set_request_id()
         try:
             self.enforce_request_boundary(mutation=True)
@@ -1020,6 +1073,17 @@ class Handler(BaseHTTPRequestHandler):
             self.error(error)
 
     def post_api(self, path: str, query: dict[str, list[str]], body: dict[str, object]) -> None:
+        """
+        Handle authenticated POST requests for API resources and actions.
+        
+        Parameters:
+            path (str): API route to dispatch.
+            query (dict[str, list[str]]): Query parameters controlling request behavior.
+            body (dict[str, object]): Parsed JSON request body.
+        
+        Raises:
+            DomainError: If request data is invalid or the API resource is not found.
+        """
         if path == "/api/v1/grants":
             return self.respond(
                 APP.store.create_grant(

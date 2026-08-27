@@ -276,6 +276,12 @@ class EvidenceTimelineTests(unittest.TestCase):
 
 class ProgramCompositionTests(unittest.TestCase):
     def project_with_recorded_gap(self) -> tuple[dict, dict[str, dict]]:
+        """
+        Build a project fixture containing two source groups with an interval gap and eligible, accepted clips.
+        
+        Returns:
+            tuple[dict, dict[str, dict]]: The project and a mapping of asset IDs to asset metadata.
+        """
         assets = [
             {**media("a-early", "2025-10-15T12:00:00+00:00", 10_000_000), "sourceCandidateId": "a"},
             {**media("b-early", "2025-10-15T12:00:00+00:00", 10_000_000), "sourceCandidateId": "b"},

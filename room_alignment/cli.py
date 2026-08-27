@@ -80,6 +80,11 @@ def doctor() -> int:
 
 
 def parser() -> argparse.ArgumentParser:
+    """Build the command-line argument parser for the application.
+    
+    Returns:
+    	argparse.ArgumentParser: The parser configured with application commands and options.
+    """
     root = argparse.ArgumentParser(
         prog="room-alignment",
         description="Installable local-first multi-camera video alignment application",
@@ -109,6 +114,15 @@ def parser() -> argparse.ArgumentParser:
 
 
 def _normalized_argv(argv: list[str]) -> list[str]:
+    """
+    Normalize command-line arguments by selecting the default command when needed.
+    
+    Parameters:
+        argv (list[str]): Command-line arguments to normalize.
+    
+    Returns:
+        list[str]: Arguments with ``serve`` inserted when no command is specified.
+    """
     if not argv:
         return ["serve"]
     if argv[0] in {"serve", "stop", "doctor", "admin", "--help", "-h", "--version"}:
@@ -118,6 +132,15 @@ def _normalized_argv(argv: list[str]) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """
+    Run the command-line interface and dispatch the selected command.
+    
+    Parameters:
+        argv (list[str] | None): Command-line arguments to process, or None to use the process arguments.
+    
+    Returns:
+        int: Exit status, with 1 when the stop command times out and 0 otherwise.
+    """
     arguments = _normalized_argv(list(sys.argv[1:] if argv is None else argv))
     args = parser().parse_args(arguments)
     if args.command == "serve":

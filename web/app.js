@@ -78,6 +78,10 @@ function safe(value) {
   }[character]));
 }
 
+/**
+ * Displays a temporary notification message.
+ * @param {string} message - The message to display.
+ */
 function toast(message) {
   const node = $("#toast");
   node.textContent = message;
@@ -86,6 +90,10 @@ function toast(message) {
   toast.timer = setTimeout(() => node.classList.remove("show"), 3600);
 }
 
+/**
+ * Applies text scaling and color scheme settings to the document.
+ * @param {Object} settings - Appearance settings containing text scale and color scheme values.
+ */
 function applyAppearanceSettings(settings = state.settings) {
   const scale = Math.max(85, Math.min(140, Number(settings.textScalePercent || 100))) / 100;
   document.documentElement.dataset.theme = settings.colorScheme || "DARKROOM";
@@ -97,12 +105,19 @@ function applyAppearanceSettings(settings = state.settings) {
   );
 }
 
+/**
+ * Populate the settings form with the current application settings.
+ * @param {Object} [settings=state.settings] - The settings to display in the form.
+ */
 function populateSettingsForm(settings = state.settings) {
   $("#overlap-search-seconds").value = Math.round(Number(settings.overlapSearchExtensionUs) / 1_000_000);
   $("#text-scale").value = String(settings.textScalePercent);
   $("#color-scheme").value = settings.colorScheme;
 }
 
+/**
+ * Previews the current text scale and color scheme settings.
+ */
 function previewSettingsForm() {
   applyAppearanceSettings({
     ...state.settings,
@@ -111,11 +126,19 @@ function previewSettingsForm() {
   });
 }
 
+/**
+ * Closes the settings dialog and optionally reapplies the saved appearance settings.
+ * @param {boolean} [restore=true] - Whether to restore the saved appearance settings before closing.
+ */
 function closeSettings({restore = true} = {}) {
   if (restore) applyAppearanceSettings(state.settings);
   $("#settings-dialog").close();
 }
 
+/**
+ * Saves application settings and applies the updated appearance preferences.
+ * @param {Event} event - The settings form submission event.
+ */
 async function saveSettings(event) {
   event.preventDefault();
   const saveState = $("#settings-save-state");
@@ -141,6 +164,14 @@ async function saveSettings(event) {
   }
 }
 
+/**
+ * Prompts the user to confirm an action through the confirmation dialog.
+ * @param {string} message - The message to display.
+ * @param {Object} [options] - Dialog customization options.
+ * @param {string} [options.title="Confirm change"] - The dialog title.
+ * @param {string} [options.confirmLabel="Confirm"] - The label for the confirmation button.
+ * @return {Promise<boolean>} `true` if the action is confirmed, `false` otherwise.
+ */
 function confirmAction(message, {title = "Confirm change", confirmLabel = "Confirm"} = {}) {
   const dialog = $("#confirmation-dialog");
   if (!dialog?.showModal) return Promise.resolve(false);
@@ -1105,6 +1136,9 @@ function renderPreparation() {
   syncWorkflowAvailability();
 }
 
+/**
+ * Renders the alignment suggestion queues, evidence summary, blockers, and review actions.
+ */
 function renderSuggestions() {
   const container = $("#suggestion-list");
   const proposalSet = state.proposalSets.find(item =>
@@ -1158,6 +1192,10 @@ function renderSuggestions() {
   $$('[data-exclude-clip]').forEach(button => { button.onclick = () => setClipEligibility(button.dataset.excludeClip, "EXCLUDED"); });
 }
 
+/**
+ * Accepts non-conflicting alignment proposals using timestamp-prior placement within a selected scope.
+ * @param {Object} proposalSet - The proposal set containing the timestamp-prior alignments to accept.
+ */
 async function acceptTimestampPriors(proposalSet) {
   try {
     const scope = await chooseTimestampScope();
@@ -1176,6 +1214,10 @@ async function acceptTimestampPriors(proposalSet) {
   } catch (error) { handleError(error); }
 }
 
+/**
+ * Prompts the user to choose the scope for reviewing timestamp-prior alignment proposals.
+ * @return {Promise<Object|null>} The selected scope, or `null` if the dialog is cancelled.
+ */
 function chooseTimestampScope() {
   const dialog = $("#timestamp-scope-dialog");
   const select = $("#timestamp-scope-select");
@@ -1196,10 +1238,20 @@ function chooseTimestampScope() {
   });
 }
 
+/**
+ * Sets whether a clip is eligible for inclusion in the program.
+ * @param {string} clipId - The identifier of the clip.
+ * @param {boolean} programEligibility - Whether the clip is eligible for the program.
+ */
 async function setClipEligibility(clipId, programEligibility) {
   await command("SetClipProgramEligibility", {clipIds: [clipId], programEligibility});
 }
 
+/**
+ * Focuses a project clip in the alignment timeline and adjusts the view to its aligned interval.
+ * @param {string} clipId - The identifier of the clip to focus.
+ * @param {Object|null} [proposalSet=null] - Optional proposal set containing alignment data for the clip.
+ */
 async function focusClipInTimeline(clipId, proposalSet = null) {
   const clip = clipById(clipId);
   if (!clip) return toast("This clip is no longer part of the project");
@@ -1840,6 +1892,9 @@ async function addFolderAndScan(path) {
   await scanRoots([root.id]);
 }
 
+/**
+ * Registers event handlers for navigation, settings, media scanning, alignment, editing, playback, timeline controls, review, rendering, downloads, and keyboard shortcuts.
+ */
 function setupEvents() {
   $$('[data-view]').forEach(button => { button.onclick = () => showView(button.dataset.view); });
   $("#open-settings").onclick = () => {
@@ -2126,6 +2181,10 @@ function handleError(error) {
   toast(label);
 }
 
+/**
+ * Initializes the secure application session and loads the initial library data.
+ * Falls back to default settings if application settings cannot be loaded and reports launch errors in the footer.
+ */
 async function start() {
   try {
     await client.getSession();
