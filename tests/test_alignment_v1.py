@@ -437,6 +437,42 @@ class ProgramCompositionTests(unittest.TestCase):
         )
         self.assertTrue(compile_program(draft, assets)["valid"])
 
+    def test_optimizer_pins_the_best_overlapping_clip_from_one_source(self) -> None:
+        media_items = [
+            {**media("lower", "2025-10-15T12:00:00+00:00", 10_000_000), "sourceCandidateId": "camera"},
+            {**media("higher", "2025-10-15T12:00:00+00:00", 10_000_000), "sourceCandidateId": "camera"},
+        ]
+        project = new_project(
+            "Overlapping source clips",
+            "library",
+            media_items,
+            initialize_legacy_program=False,
+            source_groups=[{"label": "Camera", "assetIds": ["lower", "higher"]}],
+        )
+        for clip in project["clips"]:
+            clip["alignmentState"] = "ACCEPTED"
+            clip["programEligibility"] = "ELIGIBLE"
+            clip["alignmentConfidence"] = 0.7 if clip["assetId"] == "lower" else 0.9
+            clip["alignmentEvidence"] = ["timestamp-prior"]
+        assets = {item["id"]: item for item in media_items}
+        proposal = timeline_section_proposal(project, assets, "EXCLUDE")
+        draft = generate_program_draft(
+            project,
+            assets,
+            {
+                "alignmentDigest": proposal["alignmentDigest"],
+                "selectionDigest": project["selectionSnapshot"]["digest"],
+                "gapMode": "EXCLUDE",
+                "sectionProposalDigest": proposal["digest"],
+                "replaceExisting": False,
+            },
+        )
+        selected = draft["videoBlocks"][0]
+        higher_clip = next(item for item in project["clips"] if item["assetId"] == "higher")
+        self.assertEqual(selected["pinnedClipId"], higher_clip["id"])
+        self.assertEqual(selected["decisionReason"], "deterministic-clip-selection")
+        self.assertTrue(compile_program(draft, assets)["valid"])
+
     def test_slate_gap_generates_provenance_video_and_deliberate_silence(self) -> None:
         project, assets = self.project_with_recorded_gap()
         proposal = timeline_section_proposal(project, assets, "SLATE")
