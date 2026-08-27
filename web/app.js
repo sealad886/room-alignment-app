@@ -2249,9 +2249,32 @@ function setupEvents() {
 }
 
 function handleError(error) {
+  if (error instanceof APIError && error.code === "UNAUTHENTICATED") {
+    showSessionRecovery();
+    return;
+  }
   const label = error instanceof APIError ? `${error.code}: ${error.message}` : error.message || String(error);
   toast(label);
 }
+
+function showSessionRecovery() {
+  $("#footer-status").textContent = "Secure session expired · reopen required";
+  const dialog = $("#session-recovery-dialog");
+  if (dialog && !dialog.open) dialog.showModal();
+}
+
+$("#copy-session-recovery").onclick = async () => {
+  const command = $("#session-recovery-command").textContent;
+  try {
+    await navigator.clipboard.writeText(command);
+    $("#copy-session-recovery").textContent = "Copied";
+  } catch (_error) {
+    window.getSelection()?.selectAllChildren($("#session-recovery-command"));
+    toast("Command selected; press Command-C to copy it");
+  }
+};
+
+$("#retry-session").onclick = () => window.location.reload();
 
 async function start() {
   try {
@@ -2268,7 +2291,6 @@ async function start() {
     await loadLibraries();
     $("#footer-status").textContent = "Secure local session ready";
   } catch (error) {
-    $("#footer-status").textContent = "Secure launch required";
     handleError(error);
   }
 }
