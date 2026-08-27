@@ -407,6 +407,36 @@ class ProgramCompositionTests(unittest.TestCase):
         summary = alignment_summary(project, assets)
         self.assertTrue(summary["readyForProgramDraft"], summary["blockers"])
 
+    def test_explicit_exclude_policy_breaks_the_preparation_deadlock(self) -> None:
+        project, assets = self.project_with_recorded_gap()
+        for clip in project["clips"]:
+            if clip["assetId"].endswith("late"):
+                clip["alignmentState"] = "PROVISIONAL"
+                clip["programEligibility"] = "HELD_FOR_REVIEW"
+
+        preparation = project_preparation(project, assets)
+        self.assertFalse(preparation["alignment"]["readyForProgramDraft"])
+        self.assertTrue(preparation["compositionResolvesAlignment"])
+        self.assertTrue(preparation["canGenerateProgramDraft"])
+
+        proposal = timeline_section_proposal(project, assets, "EXCLUDE")
+        draft = generate_program_draft(
+            project,
+            assets,
+            {
+                "alignmentDigest": proposal["alignmentDigest"],
+                "selectionDigest": project["selectionSnapshot"]["digest"],
+                "gapMode": "EXCLUDE",
+                "sectionProposalDigest": proposal["digest"],
+                "replaceExisting": False,
+            },
+        )
+        self.assertEqual(
+            [(item["startAlignedUs"], item["endAlignedUs"], item["mode"]) for item in draft["timelineSections"]],
+            [(0, 10_000_000, "KEEP"), (10_000_000, 30_000_000, "EXCLUDE")],
+        )
+        self.assertTrue(compile_program(draft, assets)["valid"])
+
     def test_slate_gap_generates_provenance_video_and_deliberate_silence(self) -> None:
         project, assets = self.project_with_recorded_gap()
         proposal = timeline_section_proposal(project, assets, "SLATE")

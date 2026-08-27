@@ -776,6 +776,17 @@ def project_preparation(
     )
     source_ready = not provisional_source_ids
     alignment_ready = bool(alignment["readyForProgramDraft"])
+    composition_resolves_alignment = False
+    if source_ready and not alignment_ready:
+        try:
+            section_proposal = timeline_section_proposal(project, assets, "EXCLUDE")
+            composed = copy.deepcopy(project)
+            _set_timeline_sections(composed, {"sections": section_proposal["sections"]})
+            composition_resolves_alignment = bool(
+                alignment_summary(composed, assets)["readyForProgramDraft"]
+            )
+        except DomainError:
+            composition_resolves_alignment = False
     if project.get("review") is not None and not legacy_truncation:
         phase = "REVIEWED"
     elif has_program:
@@ -820,7 +831,9 @@ def project_preparation(
         "programDurationUs": program_duration_us,
         "legacyProgramTruncation": legacy_truncation,
         "canAnalyzeAlignment": bool(project.get("clips")),
-        "canGenerateProgramDraft": source_ready and alignment_ready,
+        "canGenerateProgramDraft": source_ready
+        and (alignment_ready or composition_resolves_alignment),
+        "compositionResolvesAlignment": composition_resolves_alignment,
         "canEnterCut": has_program and not legacy_truncation,
         "canEnterReview": bool(compiled and compiled.get("valid") and not legacy_truncation),
         "blockers": blockers,
@@ -1820,16 +1833,6 @@ def generate_program_draft(
             "Source identities must be confirmed before a first cut is generated",
             {"provisionalSourceIds": provisional_sources},
         )
-    readiness = alignment_summary(project, assets)
-    if not readiness["readyForProgramDraft"]:
-        raise DomainError(
-            "COVERAGE_INVALID",
-            "Accepted alignment does not yet cover every required interval",
-            {
-                "unresolvedSoleCoverageUs": readiness["coverage"]["unresolvedSoleCoverageUs"],
-                "conflicts": readiness["conflicts"],
-            },
-        )
     result = copy.deepcopy(project)
     gap_mode = payload.get("gapMode")
     if gap_mode is not None:
@@ -1840,6 +1843,16 @@ def generate_program_draft(
                 "Composition proposal changed before the program draft was generated",
             )
         _set_timeline_sections(result, {"sections": proposal["sections"]})
+    readiness = alignment_summary(result, assets)
+    if not readiness["readyForProgramDraft"]:
+        raise DomainError(
+            "COVERAGE_INVALID",
+            "Accepted alignment does not yet cover every required interval",
+            {
+                "unresolvedSoleCoverageUs": readiness["coverage"]["unresolvedSoleCoverageUs"],
+                "conflicts": readiness["conflicts"],
+            },
+        )
     sections = result.get("timelineSections", [])
     if not sections:
         raise DomainError(
