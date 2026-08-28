@@ -4,6 +4,7 @@ import contextlib
 import http.client
 import io
 import json
+import shlex
 import tempfile
 import threading
 import time
@@ -96,6 +97,7 @@ class ServerBoundaryTests(unittest.TestCase):
         cookie = headers["set-cookie"].split(";", 1)[0]
         status, _headers, session = self.request("GET", "/api/v1/session", cookie=cookie)
         self.assertEqual(200, status)
+        self.assertIn(str(self.app.data_dir), session["recoveryCommand"])
         return cookie, session["csrfToken"]
 
     def test_sensitive_api_requires_bootstrapped_session(self) -> None:
@@ -103,6 +105,20 @@ class ServerBoundaryTests(unittest.TestCase):
         self.assertEqual(401, status)
         self.assertEqual("UNAUTHENTICATED", payload["error"]["code"])
         self.assertNotIn(str(self.source), json.dumps(payload))
+
+    def test_session_recovery_command_preserves_active_service_options(self) -> None:
+        data_dir = self.root / "state with spaces"
+        command = server_module._recovery_command(data_dir, "localhost", 9123)
+        parts = shlex.split(command)
+
+        separator = parts.index("&&")
+        self.assertEqual(parts[:separator], [
+            "room-alignment", "stop", "--data-dir", str(data_dir.resolve())
+        ])
+        self.assertEqual(parts[separator + 1:], [
+            "room-alignment", "serve", "--host", "localhost", "--port", "9123",
+            "--data-dir", str(data_dir.resolve()),
+        ])
 
     def test_render_execution_rejects_missing_mutable_output_fields(self) -> None:
         cookie, csrf = self.bootstrap()
@@ -336,6 +352,38 @@ class ServerBoundaryTests(unittest.TestCase):
         self.assertEqual(status, 206)
         self.assertEqual(headers["content-range"], "bytes 0-3/10")
         self.assertEqual(payload, "")
+
+    def test_aligned_source_point_is_session_bound_and_exact(self) -> None:
+        source_file = self.source / "point.mp4"
+        source_file.write_bytes(b"media")
+        grant = self.app.store.create_grant(self.source, "READ_ONLY_SOURCE")
+        library = self.app.store.create_library(grant["id"])
+        scan = self.app.store.begin_scan(library["id"], "FULL")
+        self.app.store.save_media_batch(
+            scan["id"],
+            [MediaRecord("point-media", library["id"], "point.mp4", 5, source_file.stat().st_mtime_ns, duration_us=10_000_000)],
+        )
+        self.app.store.finish_scan(scan["id"], "SUCCEEDED", {"videos": 1})
+        project = self.app.store.create_project("Point", library["id"], ["point-media"])
+        project["clips"][0]["alignmentState"] = "ACCEPTED"
+        project["clips"][0]["programEligibility"] = "ELIGIBLE"
+        self.app.store.save_project(project)
+
+        status, _headers, payload = self.request(
+            "GET", f"/api/v1/projects/{project['id']}/aligned-source-point?alignedUs=5000000"
+        )
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["error"]["code"], "UNAUTHENTICATED")
+
+        cookie, _csrf = self.bootstrap()
+        status, _headers, payload = self.request(
+            "GET",
+            f"/api/v1/projects/{project['id']}/aligned-source-point?alignedUs=5000000",
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["alignedUs"], 5_000_000)
+        self.assertEqual(payload["sources"][0]["candidates"][0]["assetId"], "point-media")
 
     def test_malformed_client_values_return_stable_validation_errors(self) -> None:
         cookie, csrf = self.bootstrap()

@@ -988,6 +988,64 @@ def timeline_window(
     }
 
 
+def aligned_source_point(
+    project: dict[str, Any], assets: dict[str, dict[str, Any]], aligned_us: int
+) -> dict[str, Any]:
+    """Return exact source clips covering one aligned-timeline instant."""
+
+    aligned_us = int(aligned_us)
+    ranges = _clip_ranges(project, assets, include_provisional=True)
+    boundaries = sorted({point for item in ranges for point in (int(item["startUs"]), int(item["endUs"]))})
+    valid_from_us = max((point for point in boundaries if point <= aligned_us), default=aligned_us)
+    valid_until_us = min((point for point in boundaries if point > aligned_us), default=aligned_us + 1)
+    clips = {str(item["id"]): item for item in project.get("clips", [])}
+    candidates_by_source: dict[str, list[dict[str, Any]]] = {}
+    for item in ranges:
+        if not (int(item["startUs"]) <= aligned_us < int(item["endUs"])):
+            continue
+        clip = clips[str(item["clipId"])]
+        asset = assets.get(str(item["assetId"]), {})
+        candidates_by_source.setdefault(str(item["logicalSourceId"]), []).append(
+            {
+                "clipId": str(item["clipId"]),
+                "assetId": str(item["assetId"]),
+                "relativePath": str(asset.get("relative_path", "")),
+                "startAlignedUs": int(item["startUs"]),
+                "endAlignedUs": int(item["endUs"]),
+                "sourceUs": int(item["transform"].output_to_source(aligned_us)),
+                "alignmentState": _alignment_state(clip),
+                "alignmentConfidence": float(
+                    clip.get("alignmentConfidence", 1.0 if "sync" in clip else 0.0)
+                ),
+                "alignmentEvidence": list(clip.get("alignmentEvidence", [])),
+            }
+        )
+    sources = []
+    for source in project.get("logicalSources", []):
+        if source.get("archived"):
+            continue
+        candidates = sorted(
+            candidates_by_source.get(str(source["id"]), []),
+            key=lambda item: (item["startAlignedUs"], item["clipId"]),
+        )
+        sources.append(
+            {
+                "logicalSourceId": str(source["id"]),
+                "status": "NO_COVERAGE" if not candidates else "AVAILABLE" if len(candidates) == 1 else "AMBIGUOUS",
+                "candidates": candidates,
+            }
+        )
+    return {
+        "projectId": str(project["id"]),
+        "revision": int(project["revision"]),
+        "alignedUs": aligned_us,
+        "validFromAlignedUs": valid_from_us,
+        "validUntilAlignedUs": valid_until_us,
+        "alignmentDigest": alignment_digest(project),
+        "sources": sources,
+    }
+
+
 def initialize_program(project: dict[str, Any], assets: dict[str, dict[str, Any]]) -> dict[str, Any]:
     result = copy.deepcopy(project)
     clip_ranges = _clip_ranges(result, assets)

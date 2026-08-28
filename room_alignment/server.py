@@ -8,6 +8,7 @@ import mimetypes
 import os
 import re
 import secrets
+import shlex
 import signal
 import sys
 import threading
@@ -53,6 +54,24 @@ CONTRACT = CONTRACTS / "openapi.json"
 MAX_BODY = 2_000_000
 SESSION_COOKIE = "ra_session"
 SESSION_TTL_SECONDS = 43_200
+
+
+def _recovery_command(data_dir: Path, host: str, port: int) -> str:
+    data_dir_value = str(data_dir.expanduser().resolve())
+    stop = shlex.join(["room-alignment", "stop", "--data-dir", data_dir_value])
+    serve = shlex.join(
+        [
+            "room-alignment",
+            "serve",
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--data-dir",
+            data_dir_value,
+        ]
+    )
+    return f"{stop} && {serve}"
 
 
 class ThreadingHTTPServer(_ThreadingHTTPServer):
@@ -122,6 +141,7 @@ class SessionManager:
 class App:
     def __init__(self, data_dir: Path):
         self.data_dir = data_dir.resolve()
+        self.recovery_command = _recovery_command(self.data_dir, "127.0.0.1", 8765)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self._lock_file = (self.data_dir / "application.lock").open("a+")
         try:
@@ -728,7 +748,13 @@ class Handler(BaseHTTPRequestHandler):
             )
         if path == "/api/v1/session":
             _session_id, session = self.session()
-            return self.respond({"authenticated": True, "csrfToken": session["csrf"]})
+            return self.respond(
+                {
+                    "authenticated": True,
+                    "csrfToken": session["csrf"],
+                    "recoveryCommand": APP.recovery_command,
+                }
+            )
         if path == "/api/v1/settings":
             return self.respond(APP.store.application_settings())
         if path == "/api/v1/openapi.json":
@@ -884,6 +910,12 @@ class Handler(BaseHTTPRequestHandler):
                     _int_input(_required_query(query, "endAlignedUs"), "endAlignedUs"),
                     _int_input(_required_query(query, "resolutionUs"), "resolutionUs"),
                     lanes or None,
+                )
+            )
+        if len(parts) == 5 and parts[2] == "projects" and parts[4] == "aligned-source-point":
+            return self.respond(
+                APP.store.project_aligned_source_point(
+                    parts[3], _int_input(_required_query(query, "alignedUs"), "alignedUs")
                 )
             )
         if (
@@ -1411,6 +1443,7 @@ def serve(args: argparse.Namespace) -> int:
         raise
     server.daemon_threads = True
     actual_port = int(server.server_port)
+    APP.recovery_command = _recovery_command(APP.data_dir, args.host, actual_port)
     bootstrap_url = f"http://{args.host}:{actual_port}/bootstrap/{quote(APP.sessions.bootstrap_token, safe='')}"
     print(f"Room Alignment secure launch: {bootstrap_url}", flush=True)
     browser_timer: threading.Timer | None = None
