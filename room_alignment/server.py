@@ -1248,7 +1248,11 @@ class Handler(BaseHTTPRequestHandler):
                 HTTPStatus.CREATED,
             )
         if len(parts) == 5 and parts[2] == "render-plans" and parts[4] == "render":
-            return self.respond(APP.render.start(parts[3]), HTTPStatus.ACCEPTED)
+            execution = {
+                field: _required(body, field)
+                for field in ("outputGrantId", "filename", "videoCodec", "resolution")
+            }
+            return self.respond(APP.render.start(parts[3], execution), HTTPStatus.ACCEPTED)
         if len(parts) == 5 and parts[2] == "jobs" and parts[4] == "cancel":
             job = APP.store.job(parts[3])
             if job["kind"] == "RENDER":

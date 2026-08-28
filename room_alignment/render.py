@@ -28,6 +28,17 @@ from .domain import (
 from .scanner import full_digest
 from .store import Store
 
+VIDEO_OUTPUTS = {
+    "H264_VIDEOTOOLBOX": {"codec": "h264", "encoder": "h264_videotoolbox", "container": "mp4", "suffix": ".mp4", "audio": "aac"},
+    "HEVC_VIDEOTOOLBOX": {"codec": "hevc", "encoder": "hevc_videotoolbox", "container": "mp4", "suffix": ".mp4", "audio": "aac"},
+    "PRORES_VIDEOTOOLBOX": {"codec": "prores", "encoder": "prores_videotoolbox", "container": "mov", "suffix": ".mov", "audio": "pcm_s24le"},
+}
+OUTPUT_RESOLUTIONS = {
+    "HD_720P": (1280, 720),
+    "FULL_HD_1080P": (1920, 1080),
+    "UHD_2160P": (3840, 2160),
+}
+
 
 class PreflightError(ValueError):
     pass
@@ -273,7 +284,14 @@ def build_render_plan(
     if profile not in {"COMPATIBLE", "ARCHIVAL_LOSSLESS"}:
         raise DomainError("VALIDATION_FAILED", "Unknown output profile")
     output = store.output_path(output_grant_id, filename)
-    expected_suffix = ".mp4" if profile == "COMPATIBLE" else ".mkv"
+    requested_codec = str(settings.get("videoCodec", "H264_VIDEOTOOLBOX"))
+    if requested_codec not in VIDEO_OUTPUTS:
+        raise DomainError("VALIDATION_FAILED", "Unknown hardware video codec")
+    requested_resolution = str(settings.get("resolution", "FULL_HD_1080P"))
+    if requested_resolution not in OUTPUT_RESOLUTIONS:
+        raise DomainError("VALIDATION_FAILED", "Unknown output resolution")
+    output_spec = VIDEO_OUTPUTS[requested_codec]
+    expected_suffix = ".mkv" if profile == "ARCHIVAL_LOSSLESS" else output_spec["suffix"]
     if output.suffix.lower() != expected_suffix:
         raise DomainError("VALIDATION_FAILED", f"{profile} output filename must end with {expected_suffix}")
     issues = list(compiled["issues"])
@@ -343,8 +361,9 @@ def build_render_plan(
         None,
     )
     first_video = assets.get(first_recorded_video["assetId"], {}) if first_recorded_video else {}
-    width = settings.get("width", first_video.get("width") or 1920)
-    height = settings.get("height", first_video.get("height") or 1080)
+    preset_width, preset_height = OUTPUT_RESOLUTIONS[requested_resolution]
+    width = settings.get("width", preset_width)
+    height = settings.get("height", preset_height)
     frame_rate = settings.get("frameRate", first_video.get("frame_rate") or 30)
     if isinstance(width, bool) or not isinstance(width, int) or width < 16:
         raise DomainError("VALIDATION_FAILED", "Render width must be an integer of at least 16 pixels")
@@ -391,7 +410,14 @@ def build_render_plan(
                 )
             if stream.get("rotation") not in {None, 0, "0"}:
                 warning_codes.append("ROTATION_APPLIED")
-    estimate = _estimate_output_bytes(compiled["durationUs"], profile)
+    estimate = _estimate_output_bytes(
+        compiled["durationUs"],
+        profile,
+        requested_codec,
+        requested_resolution,
+        width=width,
+        height=height,
+    )
     free = shutil.disk_usage(output.parent).free
     if free < int(estimate * 1.25) + 64 * 1024 * 1024:
         issues.append(
@@ -440,9 +466,13 @@ def build_render_plan(
         "sourceSetDigest": digest_json(sources),
         "provenanceResolutions": store.provenance_snapshot(selected_ids),
         "profile": profile,
-        "container": "mp4" if profile == "COMPATIBLE" else "matroska",
-        "videoCodec": "h264" if profile == "COMPATIBLE" else "ffv1",
-        "audioCodec": "aac" if profile == "COMPATIBLE" else "pcm_s24le",
+        "renderVideoCodec": requested_codec if profile == "COMPATIBLE" else "FFV1",
+        "renderResolution": requested_resolution,
+        "container": output_spec["container"] if profile == "COMPATIBLE" else "matroska",
+        "videoCodec": output_spec["codec"] if profile == "COMPATIBLE" else "ffv1",
+        "videoEncoder": output_spec["encoder"] if profile == "COMPATIBLE" else "ffv1",
+        "hardwareAccelerated": profile == "COMPATIBLE",
+        "audioCodec": output_spec["audio"] if profile == "COMPATIBLE" else "pcm_s24le",
         "normalization": normalization,
         "output": {"grantId": output_grant_id, "filename": filename},
         "estimatedBytes": estimate,
@@ -457,6 +487,16 @@ def build_render_plan(
         "createdAt": now_iso(),
     }
     plan = {"id": opaque_id("plan"), **plan_body}
+    plan["programDigest"] = digest_json({
+        "projectId": plan["projectId"],
+        "projectRevision": plan["projectRevision"],
+        "sourceSetDigest": plan["sourceSetDigest"],
+        "provenanceRevision": plan["provenanceRevision"],
+        "selectionDigest": plan["selectionDigest"],
+        "alignmentDigest": plan["alignmentDigest"],
+        "timelineSectionsDigest": plan["timelineSectionsDigest"],
+        "compiledProgram": plan["compiledProgram"],
+    })
     plan["planDigest"] = digest_json({key: value for key, value in plan_body.items() if key != "createdAt"})
     return store.save_render_plan(plan)
 
@@ -481,6 +521,8 @@ def build_v1_manifest(plan: dict[str, Any], artifact: dict[str, Any] | None = No
             "timelineSectionsDigest": plan.get("timelineSectionsDigest", ""),
         },
         "renderPlan": {"id": plan["id"], "digest": plan["planDigest"]},
+        "programDigest": plan.get("programDigest", plan["planDigest"]),
+        "renderExecutionDigest": plan.get("executionDigest", plan["planDigest"]),
         "sourceSetDigest": plan["sourceSetDigest"],
         "provenanceResolutions": plan.get("provenanceResolutions", []),
         "selectionSnapshot": plan.get("selectionSnapshot", {}),
@@ -511,6 +553,8 @@ def build_v1_manifest(plan: dict[str, Any], artifact: dict[str, Any] | None = No
             "profile": plan["profile"],
             "container": plan["container"],
             "videoCodec": plan["videoCodec"],
+            "videoEncoder": plan.get("videoEncoder"),
+            "hardwareAccelerated": bool(plan.get("hardwareAccelerated")),
             "audioCodec": plan["audioCodec"],
             "normalization": plan["normalization"],
             "sourceMediaUnchanged": True,
@@ -536,7 +580,16 @@ def build_v1_ffmpeg_command(store: Store, plan: dict[str, Any], output: Path) ->
     planned_sources = {item["assetId"]: item for item in plan["sources"]}
     video = plan["compiledProgram"]["videoSlices"]
     audio = plan["compiledProgram"]["audioSlices"]
-    command = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y"]
+    command = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-filter_complex_threads",
+        "1",
+        "-nostdin",
+        "-y",
+    ]
     filters: list[str] = []
     norm = plan["normalization"]
     for item in video:
@@ -612,10 +665,21 @@ def build_v1_ffmpeg_command(store: Store, plan: dict[str, Any], output: Path) ->
         if audio:
             command += ["-c:a", "pcm_s24le"]
     else:
-        command += ["-c:v", "libx264", "-preset", "medium", "-crf", "18", "-pix_fmt", "yuv420p"]
+        encoder = plan.get("videoEncoder", "h264_videotoolbox")
+        command += ["-c:v", encoder, "-allow_sw", "0", "-pix_fmt", "yuv420p"]
+        if encoder == "hevc_videotoolbox":
+            command += ["-q:v", "65", "-tag:v", "hvc1"]
+        elif encoder == "prores_videotoolbox":
+            command += ["-profile:v", "2"]
+        else:
+            command += ["-q:v", "65"]
         if audio:
-            command += ["-c:a", "aac", "-b:a", "192k"]
-        command += ["-movflags", "+faststart"]
+            if plan.get("audioCodec") == "pcm_s24le":
+                command += ["-c:a", "pcm_s24le"]
+            else:
+                command += ["-c:a", "aac", "-b:a", "192k"]
+        if plan.get("container") == "mp4":
+            command += ["-movflags", "+faststart"]
     command.append(str(output))
     return command
 
@@ -702,6 +766,90 @@ def _planned_source(
     return store.media_source_path(asset_id)
 
 
+def configure_render_execution(
+    store: Store, program_plan: dict[str, Any], settings: dict[str, Any]
+) -> dict[str, Any]:
+    """Bind mutable delivery settings without rebuilding the reviewed program snapshot."""
+    for field in ("outputGrantId", "filename", "videoCodec", "resolution"):
+        value = settings.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise DomainError("VALIDATION_FAILED", f"Missing required field: {field}")
+    plan = json.loads(json.dumps(program_plan))
+    archival = plan.get("profile") == "ARCHIVAL_LOSSLESS"
+    codec_key = str(settings.get("videoCodec", plan.get("renderVideoCodec", "H264_VIDEOTOOLBOX")))
+    resolution_key = str(settings.get("resolution", plan.get("renderResolution", "FULL_HD_1080P")))
+    if not archival and codec_key not in VIDEO_OUTPUTS:
+        raise DomainError("VALIDATION_FAILED", "Unknown hardware video codec")
+    if resolution_key not in OUTPUT_RESOLUTIONS:
+        raise DomainError("VALIDATION_FAILED", "Unknown output resolution")
+    spec = VIDEO_OUTPUTS.get(codec_key)
+    width, height = OUTPUT_RESOLUTIONS[resolution_key]
+    output_grant_id = str(settings.get("outputGrantId", plan.get("output", {}).get("grantId", "")))
+    filename = str(settings.get("filename", plan.get("output", {}).get("filename", "")))
+    output = store.output_path(output_grant_id, filename)
+    expected_suffix = ".mkv" if archival else spec["suffix"]
+    if output.suffix.lower() != expected_suffix:
+        raise DomainError(
+            "VALIDATION_FAILED",
+            f"{plan['profile']} output filename must end with {expected_suffix}",
+        )
+    manifest = output.with_name(output.name + ".manifest.json")
+    issues = [
+        issue for issue in plan.get("issues", [])
+        if issue.get("code") not in {"DESTINATION_EXISTS", "INSUFFICIENT_SPACE"}
+    ]
+    if output.exists() or manifest.exists():
+        issues.append({
+            "id": "issue_destination_exists",
+            "code": "DESTINATION_EXISTS",
+            "severity": "BLOCKING",
+            "message": "Output video or manifest already exists",
+        })
+    plan["renderResolution"] = resolution_key
+    if archival:
+        codec_key = "FFV1"
+        plan["renderVideoCodec"] = codec_key
+        plan["container"] = "matroska"
+        plan["videoCodec"] = "ffv1"
+        plan["videoEncoder"] = "ffv1"
+        plan["hardwareAccelerated"] = False
+        plan["audioCodec"] = "pcm_s24le"
+    else:
+        plan["renderVideoCodec"] = codec_key
+        plan["container"] = spec["container"]
+        plan["videoCodec"] = spec["codec"]
+        plan["videoEncoder"] = spec["encoder"]
+        plan["hardwareAccelerated"] = True
+        plan["audioCodec"] = spec["audio"]
+    plan["normalization"] = {
+        **plan["normalization"],
+        "width": width,
+        "height": height,
+        "pixelFormat": "source-compatible" if archival else "yuv420p",
+    }
+    plan["output"] = {"grantId": output_grant_id, "filename": filename}
+    plan["estimatedBytes"] = _estimate_output_bytes(
+        plan["compiledProgram"]["durationUs"], plan["profile"], codec_key, resolution_key
+    )
+    if shutil.disk_usage(output.parent).free < int(plan["estimatedBytes"] * 1.25) + 64 * 1024 * 1024:
+        issues.append({
+            "id": "issue_insufficient_space",
+            "code": "INSUFFICIENT_SPACE",
+            "severity": "BLOCKING",
+            "message": "Output directory lacks estimated temporary and final space",
+        })
+    plan["issues"] = issues
+    plan["status"] = "BLOCKED" if any(item.get("severity") == "BLOCKING" for item in issues) else "READY"
+    plan["executionDigest"] = digest_json({
+        "programDigest": plan.get("programDigest", plan["planDigest"]),
+        "output": plan["output"],
+        "renderVideoCodec": codec_key,
+        "renderResolution": resolution_key,
+        "normalization": plan["normalization"],
+    })
+    return plan
+
+
 class CanonicalRenderManager:
     def __init__(self, store: Store):
         self.store = store
@@ -710,13 +858,16 @@ class CanonicalRenderManager:
         self.lock = threading.RLock()
         self.reconcile_artifacts()
 
-    def start(self, plan_id: str) -> dict[str, Any]:
+    def start(self, plan_id: str, output_settings: dict[str, Any] | None = None) -> dict[str, Any]:
         plan = self.store.render_plan(plan_id)
+        if output_settings:
+            plan = configure_render_execution(self.store, plan, output_settings)
         if plan["status"] != "READY":
             raise DomainError("COVERAGE_INVALID", "Render plan has blocking issues")
         review = self.store.review_for_plan(plan_id)
-        if not review or review["planDigest"] != plan["planDigest"]:
-            raise DomainError("REVIEW_STALE", "Render plan requires a current review attestation")
+        reviewed_digest = plan.get("programDigest", plan["planDigest"])
+        if not review or review["planDigest"] != reviewed_digest:
+            raise DomainError("REVIEW_STALE", "Program snapshot requires a current review attestation")
         project = self.store.project(plan["projectId"])
         self.store.library_root(project["libraryId"])
         if project["revision"] != plan["projectRevision"]:
@@ -732,6 +883,16 @@ class CanonicalRenderManager:
             if self.reserved or self.jobs:
                 raise DomainError("JOB_STATE_CONFLICT", "Only one render may run at a time")
             artifact = self.store.create_artifact(plan_id, output["grantId"], output["filename"])
+            artifact = self.store.update_artifact(
+                artifact["id"],
+                details_json={
+                    "programDigest": plan.get("programDigest", plan["planDigest"]),
+                    "executionDigest": plan.get("executionDigest", plan["planDigest"]),
+                    "renderVideoCodec": plan.get("renderVideoCodec"),
+                    "renderResolution": plan.get("renderResolution"),
+                    "hardwareAccelerated": bool(plan.get("hardwareAccelerated")),
+                },
+            )
             job = self.store.create_job("RENDER", project_id=plan["projectId"], message="Render queued")
             artifact = self.store.update_artifact(artifact["id"], job_id=job["id"], status="QUEUED")
             self.reserved.add(job["id"])
@@ -1079,9 +1240,26 @@ class CanonicalRenderManager:
             shutil.move(str(partial), str(destination))
 
 
-def _estimate_output_bytes(duration_us: int, profile: str) -> int:
+def _estimate_output_bytes(
+    duration_us: int,
+    profile: str,
+    codec: str = "H264_VIDEOTOOLBOX",
+    resolution: str = "FULL_HD_1080P",
+    *,
+    width: int | None = None,
+    height: int | None = None,
+) -> int:
     seconds = max(1, duration_us / 1_000_000)
-    bits_per_second = 40_000_000 if profile == "ARCHIVAL_LOSSLESS" else 10_000_000
+    if profile == "ARCHIVAL_LOSSLESS":
+        bits_per_second = 40_000_000
+    elif codec == "PRORES_VIDEOTOOLBOX":
+        effective_height = height or OUTPUT_RESOLUTIONS[resolution][1]
+        bits_per_second = 147_000_000 * (effective_height / 1080) ** 2
+    else:
+        base = 8_000_000 if codec == "H264_VIDEOTOOLBOX" else 5_000_000
+        preset_width, preset_height = OUTPUT_RESOLUTIONS[resolution]
+        effective_pixels = (width or preset_width) * (height or preset_height)
+        bits_per_second = base * (effective_pixels / (1920 * 1080))
     return int(seconds * bits_per_second / 8)
 
 

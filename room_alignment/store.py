@@ -37,7 +37,7 @@ from .provenance import normalize_timestamp
 from .scanner import media_record_from_dict, quick_fingerprint
 
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 PROJECT_SNAPSHOT_INTERVAL = 25
 MAX_JOB_EVENTS = 100_000
 MAX_CACHE_ENTRIES = 10_000
@@ -46,9 +46,13 @@ DEFAULT_APPLICATION_SETTINGS = {
     "overlapSearchExtensionUs": 30_000_000,
     "textScalePercent": 100,
     "colorScheme": "DARKROOM",
+    "renderVideoCodec": "H264_VIDEOTOOLBOX",
+    "renderResolution": "FULL_HD_1080P",
 }
 COLOR_SCHEMES = {"DARKROOM", "SLATE", "DAYLIGHT", "HIGH_CONTRAST"}
 TEXT_SCALES = {90, 100, 115, 130}
+RENDER_VIDEO_CODECS = {"H264_VIDEOTOOLBOX", "HEVC_VIDEOTOOLBOX", "PRORES_VIDEOTOOLBOX"}
+RENDER_RESOLUTIONS = {"HD_720P", "FULL_HD_1080P", "UHD_2160P"}
 TERMINAL_JOB_STATES = {"CANCELED", "SUCCEEDED", "FAILED", "INTERRUPTED", "FAILED_RECOVERABLE"}
 JOB_STATES = {
     "QUEUED",
@@ -82,6 +86,8 @@ CREATE TABLE IF NOT EXISTS application_settings (
   overlap_search_extension_us INTEGER NOT NULL DEFAULT 30000000,
   text_scale_percent INTEGER NOT NULL DEFAULT 100,
   color_scheme TEXT NOT NULL DEFAULT 'DARKROOM',
+  render_video_codec TEXT NOT NULL DEFAULT 'H264_VIDEOTOOLBOX',
+  render_resolution TEXT NOT NULL DEFAULT 'FULL_HD_1080P',
   updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS directory_grants (
@@ -482,11 +488,13 @@ class Store:
             db.executescript(SCHEMA)
             db.execute(
                 "INSERT OR IGNORE INTO application_settings(singleton,overlap_search_extension_us,"
-                "text_scale_percent,color_scheme,updated_at) VALUES(1,?,?,?,?)",
+                "text_scale_percent,color_scheme,render_video_codec,render_resolution,updated_at) VALUES(1,?,?,?,?,?,?)",
                 (
                     DEFAULT_APPLICATION_SETTINGS["overlapSearchExtensionUs"],
                     DEFAULT_APPLICATION_SETTINGS["textScalePercent"],
                     DEFAULT_APPLICATION_SETTINGS["colorScheme"],
+                    DEFAULT_APPLICATION_SETTINGS["renderVideoCodec"],
+                    DEFAULT_APPLICATION_SETTINGS["renderResolution"],
                     now_iso(),
                 ),
             )
@@ -531,7 +539,7 @@ class Store:
     def application_settings(self) -> dict[str, Any]:
         with self.connect() as db:
             row = db.execute(
-                "SELECT overlap_search_extension_us,text_scale_percent,color_scheme,updated_at "
+                "SELECT overlap_search_extension_us,text_scale_percent,color_scheme,render_video_codec,render_resolution,updated_at "
                 "FROM application_settings WHERE singleton=1"
             ).fetchone()
             if not row:
@@ -540,11 +548,13 @@ class Store:
                 "overlapSearchExtensionUs": int(row["overlap_search_extension_us"]),
                 "textScalePercent": int(row["text_scale_percent"]),
                 "colorScheme": str(row["color_scheme"]),
+                "renderVideoCodec": str(row["render_video_codec"]),
+                "renderResolution": str(row["render_resolution"]),
                 "updatedAt": row["updated_at"],
             }
 
     def update_application_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        allowed = {"overlapSearchExtensionUs", "textScalePercent", "colorScheme"}
+        allowed = {"overlapSearchExtensionUs", "textScalePercent", "colorScheme", "renderVideoCodec", "renderResolution"}
         unknown = set(settings) - allowed
         if unknown:
             raise DomainError(
@@ -563,6 +573,8 @@ class Store:
         )
         text_scale = integer_setting("textScalePercent", current["textScalePercent"])
         color_scheme = str(settings.get("colorScheme", current["colorScheme"]))
+        render_video_codec = str(settings.get("renderVideoCodec", current["renderVideoCodec"]))
+        render_resolution = str(settings.get("renderResolution", current["renderResolution"]))
         if not 0 <= overlap_us <= 300_000_000:
             raise DomainError(
                 "VALIDATION_FAILED",
@@ -572,16 +584,21 @@ class Store:
             raise DomainError("VALIDATION_FAILED", "Text scale must be 90, 100, 115, or 130 percent")
         if color_scheme not in COLOR_SCHEMES:
             raise DomainError("VALIDATION_FAILED", "Unknown color scheme")
+        if render_video_codec not in RENDER_VIDEO_CODECS:
+            raise DomainError("VALIDATION_FAILED", "Unknown hardware video codec")
+        if render_resolution not in RENDER_RESOLUTIONS:
+            raise DomainError("VALIDATION_FAILED", "Unknown render resolution")
         updated_at = now_iso()
         with self._lock, self.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute(
                 "INSERT INTO application_settings(singleton,overlap_search_extension_us,"
-                "text_scale_percent,color_scheme,updated_at) VALUES(1,?,?,?,?) "
+                "text_scale_percent,color_scheme,render_video_codec,render_resolution,updated_at) VALUES(1,?,?,?,?,?,?) "
                 "ON CONFLICT(singleton) DO UPDATE SET overlap_search_extension_us=excluded.overlap_search_extension_us,"
                 "text_scale_percent=excluded.text_scale_percent,color_scheme=excluded.color_scheme,"
+                "render_video_codec=excluded.render_video_codec,render_resolution=excluded.render_resolution,"
                 "updated_at=excluded.updated_at",
-                (overlap_us, text_scale, color_scheme, updated_at),
+                (overlap_us, text_scale, color_scheme, render_video_codec, render_resolution, updated_at),
             )
             if overlap_us != int(current["overlapSearchExtensionUs"]):
                 rows = list(
@@ -603,6 +620,8 @@ class Store:
             "overlapSearchExtensionUs": overlap_us,
             "textScalePercent": text_scale,
             "colorScheme": color_scheme,
+            "renderVideoCodec": render_video_codec,
+            "renderResolution": render_resolution,
             "updatedAt": updated_at,
         }
 
@@ -695,6 +714,10 @@ class Store:
                 "revision": "INTEGER NOT NULL DEFAULT 1",
                 "archived": "INTEGER NOT NULL DEFAULT 0",
                 "created_at": "TEXT NOT NULL DEFAULT ''",
+            },
+            "application_settings": {
+                "render_video_codec": "TEXT NOT NULL DEFAULT 'H264_VIDEOTOOLBOX'",
+                "render_resolution": "TEXT NOT NULL DEFAULT 'FULL_HD_1080P'",
             },
         }
         for table, columns in additions.items():
@@ -4660,7 +4683,8 @@ class Store:
                 "renderPlanId": plan_id,
                 "projectId": plan["projectId"],
                 "projectRevision": plan["projectRevision"],
-                "planDigest": plan["planDigest"],
+                "planDigest": plan.get("programDigest", plan["planDigest"]),
+                "programDigest": plan.get("programDigest", plan["planDigest"]),
                 "sourceSetDigest": plan["sourceSetDigest"],
                 "provenanceRevision": plan["provenanceRevision"],
                 "acknowledgedWarnings": acknowledged,
@@ -4674,7 +4698,7 @@ class Store:
                     plan_id,
                     plan["projectId"],
                     plan["projectRevision"],
-                    plan["planDigest"],
+                    attestation["planDigest"],
                     plan["sourceSetDigest"],
                     plan["provenanceRevision"],
                     json.dumps(attestation["acknowledgedWarnings"]),
@@ -4704,6 +4728,7 @@ class Store:
                 "projectId": row["project_id"],
                 "projectRevision": row["project_revision"],
                 "planDigest": row["plan_digest"],
+                "programDigest": row["plan_digest"],
                 "sourceSetDigest": row["source_set_digest"],
                 "provenanceRevision": row["provenance_revision"],
                 "acknowledgedWarnings": json.loads(row["warnings_json"]),
@@ -4761,10 +4786,20 @@ class Store:
                 return False
             if job["status"] != "RUNNING":
                 raise DomainError("JOB_STATE_CONFLICT", "Only a running render may complete an artifact")
+            completed_details = {
+                **json.loads(artifact["details_json"] or "{}"),
+                **details,
+            }
             db.execute(
                 "UPDATE artifacts SET status='COMPLETE',video_digest=?,manifest_digest=?,details_json=?,updated_at=? "
                 "WHERE id=?",
-                (video_digest, manifest_digest, json.dumps(details), now_iso(), artifact_id),
+                (
+                    video_digest,
+                    manifest_digest,
+                    json.dumps(completed_details),
+                    now_iso(),
+                    artifact_id,
+                ),
             )
             self._transition_job_db(
                 db,

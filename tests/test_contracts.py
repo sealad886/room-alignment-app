@@ -112,6 +112,13 @@ class ContractTests(unittest.TestCase):
             "room-alignment-canonical-json/v1",
         )
         self.assertIsNone(manifest["properties"]["artifact"]["properties"]["manifestSha256"]["const"])
+        self.assertNotIn("programDigest", manifest["required"])
+        self.assertNotIn("renderExecutionDigest", manifest["required"])
+        self.assertIn("programDigest", manifest["properties"])
+        self.assertIn("renderExecutionDigest", manifest["properties"])
+        transform_required = manifest["properties"]["transforms"]["required"]
+        self.assertNotIn("videoEncoder", transform_required)
+        self.assertNotIn("hardwareAccelerated", transform_required)
         api_schema = json.loads((ROOT / "contracts" / "api.schema.json").read_text(encoding="utf-8"))
         frame_rate = api_schema["$defs"]["RenderPlanCreate"]["properties"]["frameRate"]
         self.assertEqual(frame_rate, {"type": "number", "minimum": 1, "maximum": 240})

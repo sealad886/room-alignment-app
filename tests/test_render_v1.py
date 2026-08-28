@@ -22,6 +22,7 @@ from room_alignment.render import (
     build_render_plan,
     build_v1_ffmpeg_command,
     build_v1_manifest,
+    configure_render_execution,
 )
 from room_alignment.scanner import probe, quick_fingerprint
 from room_alignment.store import Store
@@ -182,8 +183,113 @@ class CanonicalRenderTests(unittest.TestCase):
         manifest = build_v1_manifest(plan)
         self.assertEqual(manifest["sources"][0]["rootId"], second["id"])
         command = build_v1_ffmpeg_command(self.store, plan, self.output / "partial.mp4")
+        self.assertEqual(command[4:6], ["-filter_complex_threads", "1"])
         self.assertIn(str(second_path), command)
         self.assertNotIn(str(self.media_path), command)
+
+    def test_reviewed_program_can_bind_multiple_hardware_output_executions(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "default.mp4"},
+        )
+        program_digest = plan["programDigest"]
+        hevc = configure_render_execution(
+            self.store,
+            plan,
+            {
+                "outputGrantId": self.output_grant_id,
+                "filename": "delivery-720.mp4",
+                "videoCodec": "HEVC_VIDEOTOOLBOX",
+                "resolution": "HD_720P",
+            },
+        )
+        prores = configure_render_execution(
+            self.store,
+            plan,
+            {
+                "outputGrantId": self.output_grant_id,
+                "filename": "master.mov",
+                "videoCodec": "PRORES_VIDEOTOOLBOX",
+                "resolution": "FULL_HD_1080P",
+            },
+        )
+        self.assertEqual(hevc["programDigest"], program_digest)
+        self.assertEqual(prores["programDigest"], program_digest)
+        self.assertNotEqual(hevc["executionDigest"], prores["executionDigest"])
+        self.assertEqual((hevc["normalization"]["width"], hevc["normalization"]["height"]), (1280, 720))
+        self.assertIn("hevc_videotoolbox", build_v1_ffmpeg_command(self.store, hevc, self.output / "hevc.mp4"))
+        self.assertIn("prores_videotoolbox", build_v1_ffmpeg_command(self.store, prores, self.output / "prores.mov"))
+
+    def test_render_execution_requires_all_mutable_output_fields(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "required.mp4"},
+        )
+
+        for missing in ("outputGrantId", "filename", "videoCodec", "resolution"):
+            settings = {
+                "outputGrantId": self.output_grant_id,
+                "filename": "required-copy.mp4",
+                "videoCodec": "H264_VIDEOTOOLBOX",
+                "resolution": "FULL_HD_1080P",
+            }
+            del settings[missing]
+            with self.subTest(missing=missing), self.assertRaisesRegex(
+                DomainError, f"Missing required field: {missing}"
+            ):
+                configure_render_execution(self.store, plan, settings)
+
+    def test_archival_execution_preserves_lossless_container_and_codecs(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {
+                "outputGrantId": self.output_grant_id,
+                "filename": "archive.mkv",
+                "profile": "ARCHIVAL_LOSSLESS",
+            },
+        )
+
+        configured = configure_render_execution(
+            self.store,
+            plan,
+            {
+                "outputGrantId": self.output_grant_id,
+                "filename": "archive-copy.mkv",
+                "videoCodec": "H264_VIDEOTOOLBOX",
+                "resolution": "HD_720P",
+            },
+        )
+
+        self.assertEqual(configured["profile"], "ARCHIVAL_LOSSLESS")
+        self.assertEqual(configured["container"], "matroska")
+        self.assertEqual(configured["videoEncoder"], "ffv1")
+        self.assertEqual(configured["audioCodec"], "pcm_s24le")
+        self.assertFalse(configured["hardwareAccelerated"])
+        command = build_v1_ffmpeg_command(self.store, configured, self.output / "archive-copy.mkv")
+        self.assertIn("ffv1", command)
+        self.assertNotIn("h264_videotoolbox", command)
+
+    def test_custom_dimensions_increase_delivery_space_estimate(self):
+        default = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "default-size.mp4"},
+        )
+        larger = build_render_plan(
+            self.store,
+            self.project["id"],
+            {
+                "outputGrantId": self.output_grant_id,
+                "filename": "larger-size.mp4",
+                "width": 3840,
+                "height": 2160,
+            },
+        )
+
+        self.assertGreater(larger["estimatedBytes"], default["estimatedBytes"])
 
     def test_generated_slate_renders_and_is_disclosed_in_manifest(self):
         project = copy.deepcopy(self.project)
