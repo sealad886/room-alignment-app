@@ -59,6 +59,8 @@ const state = {
   timelineZoom: 0,
   monitorPoint: null,
   monitorPointRequestVersion: 0,
+  monitorPointRequestPending: false,
+  monitorPointQueuedUs: null,
   programDurationUs: 1,
   renderPlan: null,
   artifact: null,
@@ -331,16 +333,29 @@ function applySourceMonitorPoint(point, shouldPlay = state.playing) {
 }
 
 function scheduleSourceMonitorPoint(alignedUs = currentAlignedUs()) {
-  const version = ++state.monitorPointRequestVersion;
+  state.monitorPointQueuedUs = alignedUs;
+  if (state.monitorPointRequestPending) return;
+  state.monitorPointRequestPending = true;
+  const version = state.monitorPointRequestVersion;
   clearTimeout(scheduleSourceMonitorPoint.timer);
   scheduleSourceMonitorPoint.timer = setTimeout(async () => {
+    const requestedAlignedUs = state.monitorPointQueuedUs;
+    state.monitorPointQueuedUs = null;
     try {
-      const point = await client.getAlignedSourcePoint({projectId: state.project.id, query: {alignedUs: Math.round(alignedUs)}});
+      const point = await client.getAlignedSourcePoint({projectId: state.project.id, query: {alignedUs: Math.round(requestedAlignedUs)}});
       if (version !== state.monitorPointRequestVersion || point.revision !== state.project.revision) return;
       state.monitorPoint = point;
       applySourceMonitorPoint(point, state.playing);
     } catch (error) {
       if (version === state.monitorPointRequestVersion) handleError(error);
+    } finally {
+      state.monitorPointRequestPending = false;
+      const currentUs = currentAlignedUs();
+      const point = state.monitorPoint;
+      if (
+        state.project
+        && (!point || point.revision !== state.project.revision || currentUs < point.validFromAlignedUs || currentUs >= point.validUntilAlignedUs)
+      ) scheduleSourceMonitorPoint(currentUs);
     }
   }, 24);
 }
@@ -1208,7 +1223,7 @@ function renderSuggestions() {
   const compositionBlockers = blockers.filter(item => item.code === "TIMELINE_SECTION_REQUIRED");
   const blockerReview = review.filter(item => blockerClipIds.has(item.clipId));
   const orderedReview = [...blockerReview, ...review.filter(item => !blockerClipIds.has(item.clipId))];
-  const visibleReview = orderedReview.slice(0, blockers.length ? 3 : state.alignmentQueueLimit);
+  const visibleReview = orderedReview.slice(0, state.alignmentQueueLimit);
   const nextRequired = blockerReview[0] || (blockers.length ? review[0] : null);
   const canBuild = blockers.length === 0 && state.preparation?.canGenerateProgramDraft;
   const canContinue = blockers.length === 0 && state.preparation?.canEnterCut;
@@ -2351,7 +2366,8 @@ $("#retry-session").onclick = () => window.location.reload();
 
 async function start() {
   try {
-    await client.getSession();
+    const session = await client.getSession();
+    $("#session-recovery-command").textContent = session.recoveryCommand;
     try {
       state.settings = await client.getApplicationSettings();
     } catch (error) {

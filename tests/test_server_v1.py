@@ -4,6 +4,7 @@ import contextlib
 import http.client
 import io
 import json
+import shlex
 import tempfile
 import threading
 import time
@@ -96,6 +97,7 @@ class ServerBoundaryTests(unittest.TestCase):
         cookie = headers["set-cookie"].split(";", 1)[0]
         status, _headers, session = self.request("GET", "/api/v1/session", cookie=cookie)
         self.assertEqual(200, status)
+        self.assertIn(str(self.app.data_dir), session["recoveryCommand"])
         return cookie, session["csrfToken"]
 
     def test_sensitive_api_requires_bootstrapped_session(self) -> None:
@@ -103,6 +105,20 @@ class ServerBoundaryTests(unittest.TestCase):
         self.assertEqual(401, status)
         self.assertEqual("UNAUTHENTICATED", payload["error"]["code"])
         self.assertNotIn(str(self.source), json.dumps(payload))
+
+    def test_session_recovery_command_preserves_active_service_options(self) -> None:
+        data_dir = self.root / "state with spaces"
+        command = server_module._recovery_command(data_dir, "localhost", 9123)
+        parts = shlex.split(command)
+
+        separator = parts.index("&&")
+        self.assertEqual(parts[:separator], [
+            "room-alignment", "stop", "--data-dir", str(data_dir.resolve())
+        ])
+        self.assertEqual(parts[separator + 1:], [
+            "room-alignment", "serve", "--host", "localhost", "--port", "9123",
+            "--data-dir", str(data_dir.resolve()),
+        ])
 
     def test_render_execution_rejects_missing_mutable_output_fields(self) -> None:
         cookie, csrf = self.bootstrap()
