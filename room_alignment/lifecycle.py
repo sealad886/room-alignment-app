@@ -39,6 +39,17 @@ def clear_owner(lock_file: TextIO) -> None:
 
 
 def _owner_pid(lock_file: TextIO) -> int:
+    """Read and validate the process identity stored in a state lock file.
+
+    Parameters:
+        lock_file (TextIO): The lock file containing process ownership metadata.
+
+    Returns:
+        int: The owning process ID.
+
+    Raises:
+        ValueError: If the lock file contains invalid, malformed, or unrelated ownership data.
+    """
     lock_file.seek(0)
     try:
         payload = json.load(lock_file)
@@ -53,6 +64,11 @@ def _owner_pid(lock_file: TextIO) -> int:
 
 
 def _try_lock(lock_file: TextIO) -> bool:
+    """Attempt to acquire an exclusive nonblocking lock on the file.
+
+    Returns:
+        bool: `true` if the lock was acquired, `false` if another process holds it.
+    """
     try:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
@@ -61,7 +77,20 @@ def _try_lock(lock_file: TextIO) -> bool:
 
 
 def stop(data_dir: Path, timeout_seconds: float = 10.0, force: bool = False) -> dict[str, object]:
-    """Stop the process owning one Room Alignment state directory."""
+    """Stop the process owning a Room Alignment state directory.
+
+    Parameters:
+        data_dir (Path): State directory containing the application lock file.
+        timeout_seconds (float): Maximum time to wait for graceful termination.
+        force (bool): Whether to force termination after the graceful timeout.
+
+    Returns:
+        dict[str, object]: Status information with `status` set to `NOT_RUNNING`, `STOPPED`, or `TIMEOUT`, and `forced` indicating whether forced termination was used.
+
+    Raises:
+        ValueError: If `timeout_seconds` is negative.
+        RuntimeError: If stopping fails due to permissions or the lock owner changes.
+    """
 
     if timeout_seconds < 0:
         raise ValueError("Stop timeout must be zero or greater")

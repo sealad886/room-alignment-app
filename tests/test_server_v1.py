@@ -161,6 +161,9 @@ class ServerBoundaryTests(unittest.TestCase):
         self.assertEqual(self.app.store.application_settings()["colorScheme"], "HIGH_CONTRAST")
 
     def test_host_origin_and_csrf_boundaries(self) -> None:
+        """
+        Verify host validation, origin checks, and CSRF protection at the HTTP boundary.
+        """
         status, _headers, payload = self.request("GET", "/api/health", host="attacker.invalid")
         self.assertEqual(403, status)
         self.assertEqual("FORBIDDEN", payload["error"]["code"])

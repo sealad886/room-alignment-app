@@ -252,6 +252,24 @@ def new_project(
     selection_snapshot: dict[str, Any] | None = None,
     initialize_legacy_program: bool = True,
 ) -> dict[str, Any]:
+    """
+    Create a project from selected media assets and optional confirmed source groups.
+
+    Parameters:
+        name (str): Project name.
+        library_id (str): Identifier of the library containing the assets.
+        assets (Iterable[dict[str, Any]]): Selected media assets.
+        project_id (str | None): Optional project identifier.
+        source_groups (Iterable[dict[str, Any]] | None): Optional confirmed groups assigning every selected asset to a logical source.
+        selection_snapshot (dict[str, Any] | None): Optional selection metadata to associate with the project.
+        initialize_legacy_program (bool): Whether to initialize a legacy program with eligible clips.
+
+    Returns:
+        dict[str, Any]: The newly created project state.
+
+    Raises:
+        DomainError: If no assets are selected, confirmed source groups are empty, or groups do not contain every selected asset exactly once.
+    """
     chosen = list(assets)
     if not chosen:
         raise DomainError("VALIDATION_FAILED", "Project requires at least one media asset")
@@ -398,6 +416,14 @@ def _clip_alignment(clip: dict[str, Any]) -> ClipAlignmentTransform:
 
 
 def alignment_digest(project: dict[str, Any]) -> str:
+    """Return a deterministic digest of the project's clip alignment and program eligibility state.
+
+    Parameters:
+        project (dict[str, Any]): Project whose clip alignment data is summarized.
+
+    Returns:
+        str: SHA-256 digest of the canonical clip alignment representation.
+    """
     return digest_json(
         [
             {
@@ -435,10 +461,26 @@ def aligned_extent(
 
 
 def _alignment_state(clip: dict[str, Any]) -> str:
+    """Determine the alignment state recorded for a clip.
+
+    Parameters:
+        clip (dict[str, Any]): Clip metadata containing an optional alignment state.
+
+    Returns:
+        str: The clip's alignment state, defaulting to ``"ACCEPTED"`` when synchronization data is present and ``"UNRESOLVED"`` otherwise.
+    """
     return str(clip.get("alignmentState", "ACCEPTED" if "sync" in clip else "UNRESOLVED"))
 
 
 def _program_eligibility(clip: dict[str, Any]) -> str:
+    """Return the program eligibility state for a clip.
+
+    Parameters:
+        clip (dict[str, Any]): Clip metadata containing an optional ``programEligibility`` value.
+
+    Returns:
+        str: The clip's program eligibility state, defaulting to ``ELIGIBLE`` for accepted alignment and ``HELD_FOR_REVIEW`` otherwise.
+    """
     return str(
         clip.get(
             "programEligibility",
@@ -448,6 +490,14 @@ def _program_eligibility(clip: dict[str, Any]) -> str:
 
 
 def _union_intervals(intervals: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Merge overlapping or adjacent intervals into sorted, non-overlapping ranges.
+
+    Parameters:
+        intervals (Iterable[tuple[int, int]]): Interval boundaries to combine. Intervals with an end boundary less than or equal to their start boundary are ignored.
+
+    Returns:
+        list[tuple[int, int]]: Sorted intervals with overlapping or adjacent ranges merged.
+    """
     ordered = sorted((int(start), int(end)) for start, end in intervals if int(end) > int(start))
     merged: list[tuple[int, int]] = []
     for start, end in ordered:
@@ -490,6 +540,8 @@ def _difference_duration(
 def alignment_summary(
     project: dict[str, Any], assets: dict[str, dict[str, Any]]
 ) -> dict[str, Any]:
+    """Summarize alignment evidence, eligibility, coverage, and blockers."""
+
     all_ranges = _clip_ranges(
         project, assets, include_provisional=True, include_unavailable=True
     )
@@ -567,6 +619,16 @@ def alignment_summary(
     }
 
     def range_category(item: dict[str, Any]) -> str:
+        """
+        Classify a clip range by asset availability, alignment state, and program eligibility.
+
+        Parameters:
+            item (dict[str, Any]): Range data containing the clip and asset identifiers.
+
+        Returns:
+            str: One of ``"unavailable"``, ``"accepted_eligible"``, ``"accepted_held"``,
+                ``"conflicting"``, or ``"provisional"``.
+        """
         clip = clips_by_id[str(item["clipId"])]
         asset = assets.get(str(item["assetId"]))
         state = _alignment_state(clip)
@@ -744,7 +806,16 @@ def alignment_summary(
 def project_preparation(
     project: dict[str, Any], assets: dict[str, dict[str, Any]]
 ) -> dict[str, Any]:
-    """Return backend-owned workflow readiness without mutating project state."""
+    """
+    Report non-mutating workflow readiness for a project.
+
+    Parameters:
+        project (dict[str, Any]): Project state to assess.
+        assets (dict[str, dict[str, Any]]): Asset metadata used for alignment and program compilation.
+
+    Returns:
+        dict[str, Any]: Readiness details including workflow phase, source identity status, alignment results, program duration, capabilities, and blockers.
+    """
 
     alignment = alignment_summary(project, assets)
     active_sources = [
@@ -850,6 +921,24 @@ def timeline_window(
     *,
     max_items: int = 2_000,
 ) -> dict[str, Any]:
+    """
+    Return timeline clips or aggregated buckets for a requested aligned-time window.
+
+    Parameters:
+        project (dict[str, Any]): Project containing clips and alignment metadata.
+        assets (dict[str, dict[str, Any]]): Asset metadata keyed by asset ID.
+        start_aligned_us (int): Inclusive start of the window in aligned microseconds.
+        end_aligned_us (int): Exclusive end of the window in aligned microseconds.
+        resolution_us (int): Requested bucket resolution in microseconds.
+        lane_ids (set[str] | None): Logical source IDs to include.
+        max_items (int): Maximum number of returned timeline and unplaced items.
+
+    Returns:
+        dict[str, Any]: Timeline response containing exact clips or aggregated buckets, unresolved clips, counts, effective resolution, and the alignment digest.
+
+    Raises:
+        DomainError: If the window has no positive duration or the resolution is not positive.
+    """
     start_aligned_us = int(start_aligned_us)
     end_aligned_us = int(end_aligned_us)
     resolution_us = int(resolution_us)
@@ -1094,6 +1183,15 @@ def initialize_program(project: dict[str, Any], assets: dict[str, dict[str, Any]
 
 
 def validate_project(project: dict[str, Any]) -> None:
+    """
+    Validate the structural integrity and domain constraints of a project.
+
+    Parameters:
+        project (dict[str, Any]): Project state to validate.
+
+    Raises:
+        DomainError: If required fields, references, states, intervals, modes, or rate limits are invalid.
+    """
     required = {
         "id",
         "name",
@@ -1246,6 +1344,21 @@ def program_at(compiled: dict[str, Any], output_us: int) -> dict[str, Any]:
 def apply_command(
     project: dict[str, Any], command_type: str, payload: dict[str, Any], assets: dict[str, dict[str, Any]]
 ) -> dict[str, Any]:
+    """
+    Apply a supported project command and return the validated updated project state.
+
+    Parameters:
+        project (dict[str, Any]): Project state to update.
+        command_type (str): Supported command identifier.
+        payload (dict[str, Any]): Command-specific fields.
+        assets (dict[str, dict[str, Any]]): Available asset metadata.
+
+    Returns:
+        dict[str, Any]: Updated project state with refreshed review, timestamp, and alignment digest.
+
+    Raises:
+        DomainError: If the command is unsupported, the payload is invalid, or the resulting project fails validation.
+    """
     result = copy.deepcopy(project)
     handlers = {
         "UpdateProjectMetadata": _update_metadata,
@@ -1525,6 +1638,19 @@ def _set_alignment(
     evidence: list[str] | None = None,
     confidence: float = 1.0,
 ) -> None:
+    """
+    Apply an alignment transform to a project clip and update related timeline boundaries.
+
+    Parameters:
+        project (dict[str, Any]): Project state containing the clip and timeline blocks.
+        clip_id (str): Identifier of the clip to align.
+        new (ClipAlignmentTransform): Alignment transform to apply.
+        confirm_drift (bool): Whether nonzero rate correction has been explicitly confirmed.
+        assets (dict[str, dict[str, Any]]): Asset metadata used to resolve clip ranges.
+        legacy_payload (bool): Whether to preserve the legacy synchronization representation when applicable.
+        evidence (list[str] | None): Evidence supporting the alignment.
+        confidence (float): Alignment confidence, clamped to the range from 0.0 to 1.0.
+    """
     clip = _find(project["clips"], clip_id, "project clip")
     old = _clip_alignment(clip)
     if new.rate_ppm and not confirm_drift:
@@ -1561,6 +1687,13 @@ def _set_alignment(
 
 
 def _set_clip_program_eligibility(project: dict[str, Any], payload: dict[str, Any]) -> None:
+    """
+    Set the program eligibility state for specified project clips.
+
+    Parameters:
+        project (dict[str, Any]): Project state containing the clips to update.
+        payload (dict[str, Any]): Eligibility state, clip IDs, and optional rationale.
+    """
     eligibility = str(payload.get("programEligibility", ""))
     if eligibility not in PROGRAM_ELIGIBILITY_STATES:
         raise DomainError("VALIDATION_FAILED", "Unknown program eligibility")
@@ -1578,6 +1711,17 @@ def _set_clip_program_eligibility(project: dict[str, Any], payload: dict[str, An
 def _set_range_program_eligibility(
     project: dict[str, Any], payload: dict[str, Any], assets: dict[str, dict[str, Any]]
 ) -> None:
+    """
+    Set program eligibility for clips overlapping an aligned time range.
+
+    Parameters:
+        project (dict[str, Any]): Project state to update.
+        payload (dict[str, Any]): Eligibility range, source filter, current eligibility filter, and target state.
+        assets (dict[str, dict[str, Any]]): Asset metadata used to resolve clip ranges.
+
+    Raises:
+        DomainError: If the range has no positive duration or contains no matching clips.
+    """
     start_us = int(payload.get("startAlignedUs", 0))
     end_us = int(payload.get("endAlignedUs", 0))
     if end_us <= start_us:
@@ -1606,7 +1750,22 @@ def timeline_section_proposal(
     assets: dict[str, dict[str, Any]],
     gap_mode: str = "EXCLUDE",
 ) -> dict[str, Any]:
-    """Propose an explicit aligned-to-program composition without mutating state."""
+    """
+    Propose timeline sections from eligible aligned media and intervening gaps without mutating the project.
+
+    Parameters:
+        project (dict[str, Any]): Project state used to derive the proposal.
+        assets (dict[str, dict[str, Any]]): Available media assets.
+        gap_mode (str): Treatment for gaps between eligible media: ``"EXCLUDE"`` or
+            ``"SLATE"``.
+
+    Returns:
+        dict[str, Any]: Proposed timeline sections, duration metrics, alignment digest,
+            and proposal digest.
+
+    Raises:
+        DomainError: If ``gap_mode`` is invalid or no eligible aligned media is available.
+    """
 
     gap_mode = str(gap_mode).upper()
     if gap_mode not in {"EXCLUDE", "SLATE"}:
@@ -1898,6 +2057,17 @@ def _optimize_keep_section(
 def generate_program_draft(
     project: dict[str, Any], assets: dict[str, dict[str, Any]], payload: dict[str, Any]
 ) -> dict[str, Any]:
+    """
+    Generate a program draft from the project's confirmed alignment and explicit timeline decisions.
+
+    Parameters:
+        project (dict[str, Any]): Project state containing source, alignment, selection, and timeline data.
+        assets (dict[str, dict[str, Any]]): Media assets available for program generation.
+        payload (dict[str, Any]): Draft options and digests used to verify that the plan is current.
+
+    Returns:
+        dict[str, Any]: A copied project state containing generated video and audio blocks, synthetic slates, and draft metadata.
+    """
     current_alignment_digest = alignment_digest(project)
     if str(payload.get("alignmentDigest", "")) != current_alignment_digest:
         raise DomainError("PLAN_STALE", "Alignment changed after the program draft was prepared")
@@ -2286,6 +2456,17 @@ def _clip_ranges(
     eligible_only: bool = False,
     include_unavailable: bool = False,
 ) -> list[dict[str, Any]]:
+    """
+    Build aligned time ranges for usable project clips.
+
+    Parameters:
+        include_provisional (bool): Include clips with provisional alignment.
+        eligible_only (bool): Include only clips marked eligible for program use.
+
+    Returns:
+        list[dict[str, Any]]: Clip ranges containing clip and source identifiers, aligned
+            bounds, and the alignment transform.
+    """
     ranges: list[dict[str, Any]] = []
     for clip in project.get("clips", []):
         asset = assets.get(clip["assetId"])

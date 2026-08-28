@@ -18,7 +18,7 @@ FFmpeg and FFprobe 6.0 or newer must be available on `PATH`. They remain separat
 ## Install
 
 ```bash
-uv tool install /path/to/room_alignment-0.3.0-py3-none-any.whl
+uv tool install /path/to/room_alignment-0.1.0-py3-none-any.whl
 room-alignment doctor
 ```
 
@@ -58,7 +58,7 @@ Build tooling is isolated and build-only:
 
 ```bash
 uv build
-python3 scripts/verify_package.py dist/room_alignment-0.3.0-py3-none-any.whl
+python3 scripts/verify_package.py dist/room_alignment-0.1.0-py3-none-any.whl
 ```
 
 Verification installs the wheel into a fresh temporary virtual environment with `--no-index --no-deps`, launches it from outside the repository, bootstraps a session, loads frontend and OpenAPI resources, checks health/version, sends SIGTERM, and relaunches against the same state directory to prove lock recovery. It does not scan source media or publish artifacts.
@@ -96,8 +96,9 @@ GitHub Actions runs these source checks on branch pushes and pull requests,
 using both Python 3.11 and 3.13. It then builds and clean-installs the wheel on
 macOS, retains the wheel and source archive for 14 days, and applies the same
 package runtime verification described above. A `v*` tag must exactly match
-the package/runtime version and an existing changelog release section; CI does
-not publish or create a GitHub release.
+the package/runtime version and an existing changelog release section. Release
+CI rebuilds and verifies the package on macOS, generates SHA-256 checksums, and
+publishes the wheel and source archive to the matching GitHub release.
 
 Read-only corpus validation accepts paths only as runtime arguments so private paths and names are never committed:
 
