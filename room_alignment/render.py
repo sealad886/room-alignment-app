@@ -410,7 +410,14 @@ def build_render_plan(
                 )
             if stream.get("rotation") not in {None, 0, "0"}:
                 warning_codes.append("ROTATION_APPLIED")
-    estimate = _estimate_output_bytes(compiled["durationUs"], profile, requested_codec, requested_resolution)
+    estimate = _estimate_output_bytes(
+        compiled["durationUs"],
+        profile,
+        requested_codec,
+        requested_resolution,
+        width=width,
+        height=height,
+    )
     free = shutil.disk_usage(output.parent).free
     if free < int(estimate * 1.25) + 64 * 1024 * 1024:
         issues.append(
@@ -764,21 +771,23 @@ def configure_render_execution(
 ) -> dict[str, Any]:
     """Bind mutable delivery settings without rebuilding the reviewed program snapshot."""
     plan = json.loads(json.dumps(program_plan))
+    archival = plan.get("profile") == "ARCHIVAL_LOSSLESS"
     codec_key = str(settings.get("videoCodec", plan.get("renderVideoCodec", "H264_VIDEOTOOLBOX")))
     resolution_key = str(settings.get("resolution", plan.get("renderResolution", "FULL_HD_1080P")))
-    if codec_key not in VIDEO_OUTPUTS:
+    if not archival and codec_key not in VIDEO_OUTPUTS:
         raise DomainError("VALIDATION_FAILED", "Unknown hardware video codec")
     if resolution_key not in OUTPUT_RESOLUTIONS:
         raise DomainError("VALIDATION_FAILED", "Unknown output resolution")
-    spec = VIDEO_OUTPUTS[codec_key]
+    spec = VIDEO_OUTPUTS.get(codec_key)
     width, height = OUTPUT_RESOLUTIONS[resolution_key]
     output_grant_id = str(settings.get("outputGrantId", plan.get("output", {}).get("grantId", "")))
     filename = str(settings.get("filename", plan.get("output", {}).get("filename", "")))
     output = store.output_path(output_grant_id, filename)
-    if output.suffix.lower() != spec["suffix"]:
+    expected_suffix = ".mkv" if archival else spec["suffix"]
+    if output.suffix.lower() != expected_suffix:
         raise DomainError(
             "VALIDATION_FAILED",
-            f"{codec_key} output filename must end with {spec['suffix']}",
+            f"{plan['profile']} output filename must end with {expected_suffix}",
         )
     manifest = output.with_name(output.name + ".manifest.json")
     issues = [
@@ -792,18 +801,27 @@ def configure_render_execution(
             "severity": "BLOCKING",
             "message": "Output video or manifest already exists",
         })
-    plan["renderVideoCodec"] = codec_key
     plan["renderResolution"] = resolution_key
-    plan["container"] = spec["container"]
-    plan["videoCodec"] = spec["codec"]
-    plan["videoEncoder"] = spec["encoder"]
-    plan["hardwareAccelerated"] = True
-    plan["audioCodec"] = spec["audio"]
+    if archival:
+        codec_key = "FFV1"
+        plan["renderVideoCodec"] = codec_key
+        plan["container"] = "matroska"
+        plan["videoCodec"] = "ffv1"
+        plan["videoEncoder"] = "ffv1"
+        plan["hardwareAccelerated"] = False
+        plan["audioCodec"] = "pcm_s24le"
+    else:
+        plan["renderVideoCodec"] = codec_key
+        plan["container"] = spec["container"]
+        plan["videoCodec"] = spec["codec"]
+        plan["videoEncoder"] = spec["encoder"]
+        plan["hardwareAccelerated"] = True
+        plan["audioCodec"] = spec["audio"]
     plan["normalization"] = {
         **plan["normalization"],
         "width": width,
         "height": height,
-        "pixelFormat": "yuv420p",
+        "pixelFormat": "source-compatible" if archival else "yuv420p",
     }
     plan["output"] = {"grantId": output_grant_id, "filename": filename}
     plan["estimatedBytes"] = _estimate_output_bytes(
@@ -1223,15 +1241,21 @@ def _estimate_output_bytes(
     profile: str,
     codec: str = "H264_VIDEOTOOLBOX",
     resolution: str = "FULL_HD_1080P",
+    *,
+    width: int | None = None,
+    height: int | None = None,
 ) -> int:
     seconds = max(1, duration_us / 1_000_000)
     if profile == "ARCHIVAL_LOSSLESS":
         bits_per_second = 40_000_000
     elif codec == "PRORES_VIDEOTOOLBOX":
-        bits_per_second = 147_000_000 * (OUTPUT_RESOLUTIONS[resolution][1] / 1080) ** 2
+        effective_height = height or OUTPUT_RESOLUTIONS[resolution][1]
+        bits_per_second = 147_000_000 * (effective_height / 1080) ** 2
     else:
         base = 8_000_000 if codec == "H264_VIDEOTOOLBOX" else 5_000_000
-        bits_per_second = base * (OUTPUT_RESOLUTIONS[resolution][1] / 1080) ** 2
+        preset_width, preset_height = OUTPUT_RESOLUTIONS[resolution]
+        effective_pixels = (width or preset_width) * (height or preset_height)
+        bits_per_second = base * (effective_pixels / (1920 * 1080))
     return int(seconds * bits_per_second / 8)
 
 

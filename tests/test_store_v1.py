@@ -364,6 +364,51 @@ class StoreV1Tests(unittest.TestCase):
         events = reopened.events(job_id=job["id"])
         self.assertEqual(events[-1]["eventType"], "RECOVERY")
 
+    def test_render_completion_preserves_execution_details(self):
+        self.scan("FULL", [self.record("completed-media", "completed.mp4")])
+        project = self.store.create_project("Completed", self.library["id"], ["completed-media"])
+        output_grant = self.store.create_grant(self.output, "WRITE_OUTPUT")
+        plan = self.store.save_render_plan(
+            {
+                "id": "completed-plan",
+                "projectId": project["id"],
+                "projectRevision": project["revision"],
+                "planDigest": "program-digest",
+                "sourceSetDigest": "completed-sources",
+                "provenanceRevision": 0,
+                "status": "READY",
+            }
+        )
+        job = self.store.create_job("RENDER")
+        self.store.transition_job(job["id"], "RUNNING", 0.2, "Rendering")
+        artifact = self.store.create_artifact(plan["id"], output_grant["id"], "completed.mp4")
+        self.store.update_artifact(
+            artifact["id"],
+            job_id=job["id"],
+            status="RUNNING",
+            details_json={
+                "programDigest": "program-digest",
+                "executionDigest": "execution-digest",
+                "renderVideoCodec": "HEVC_VIDEOTOOLBOX",
+                "hardwareAccelerated": True,
+            },
+        )
+
+        completed = self.store.complete_render_artifact(
+            job["id"],
+            artifact["id"],
+            "video-digest",
+            "manifest-digest",
+            {"videoBytes": 123, "manifestBytes": 456},
+        )
+
+        self.assertTrue(completed)
+        details = self.store.artifact(artifact["id"])["details"]
+        self.assertEqual(details["executionDigest"], "execution-digest")
+        self.assertEqual(details["renderVideoCodec"], "HEVC_VIDEOTOOLBOX")
+        self.assertTrue(details["hardwareAccelerated"])
+        self.assertEqual(details["videoBytes"], 123)
+
     def test_restart_reconciles_jobs_orphaned_while_queued(self):
         self.scan("FULL", [self.record("queued-media", "queued.mp4")])
         project = self.store.create_project("Queued", self.library["id"], ["queued-media"])

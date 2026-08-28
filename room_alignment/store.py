@@ -4786,10 +4786,20 @@ class Store:
                 return False
             if job["status"] != "RUNNING":
                 raise DomainError("JOB_STATE_CONFLICT", "Only a running render may complete an artifact")
+            completed_details = {
+                **json.loads(artifact["details_json"] or "{}"),
+                **details,
+            }
             db.execute(
                 "UPDATE artifacts SET status='COMPLETE',video_digest=?,manifest_digest=?,details_json=?,updated_at=? "
                 "WHERE id=?",
-                (video_digest, manifest_digest, json.dumps(details), now_iso(), artifact_id),
+                (
+                    video_digest,
+                    manifest_digest,
+                    json.dumps(completed_details),
+                    now_iso(),
+                    artifact_id,
+                ),
             )
             self._transition_job_db(
                 db,

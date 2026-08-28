@@ -221,6 +221,55 @@ class CanonicalRenderTests(unittest.TestCase):
         self.assertIn("hevc_videotoolbox", build_v1_ffmpeg_command(self.store, hevc, self.output / "hevc.mp4"))
         self.assertIn("prores_videotoolbox", build_v1_ffmpeg_command(self.store, prores, self.output / "prores.mov"))
 
+    def test_archival_execution_preserves_lossless_container_and_codecs(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {
+                "outputGrantId": self.output_grant_id,
+                "filename": "archive.mkv",
+                "profile": "ARCHIVAL_LOSSLESS",
+            },
+        )
+
+        configured = configure_render_execution(
+            self.store,
+            plan,
+            {
+                "outputGrantId": self.output_grant_id,
+                "filename": "archive-copy.mkv",
+                "resolution": "HD_720P",
+            },
+        )
+
+        self.assertEqual(configured["profile"], "ARCHIVAL_LOSSLESS")
+        self.assertEqual(configured["container"], "matroska")
+        self.assertEqual(configured["videoEncoder"], "ffv1")
+        self.assertEqual(configured["audioCodec"], "pcm_s24le")
+        self.assertFalse(configured["hardwareAccelerated"])
+        command = build_v1_ffmpeg_command(self.store, configured, self.output / "archive-copy.mkv")
+        self.assertIn("ffv1", command)
+        self.assertNotIn("h264_videotoolbox", command)
+
+    def test_custom_dimensions_increase_delivery_space_estimate(self):
+        default = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "default-size.mp4"},
+        )
+        larger = build_render_plan(
+            self.store,
+            self.project["id"],
+            {
+                "outputGrantId": self.output_grant_id,
+                "filename": "larger-size.mp4",
+                "width": 3840,
+                "height": 2160,
+            },
+        )
+
+        self.assertGreater(larger["estimatedBytes"], default["estimatedBytes"])
+
     def test_generated_slate_renders_and_is_disclosed_in_manifest(self):
         project = copy.deepcopy(self.project)
         source_id = project["logicalSources"][0]["id"]
