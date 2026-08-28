@@ -54,6 +54,15 @@ def _read_launch_url(process: subprocess.Popen[str], timeout: float = 10) -> str
 
 
 def _stop(process: subprocess.Popen[str]) -> None:
+    """
+    Stop the server process gracefully and verify successful termination.
+
+    Parameters:
+        process (subprocess.Popen[str]): The server process to stop.
+
+    Raises:
+        RuntimeError: If the process does not stop after termination or exits with a nonzero status.
+    """
     if process.poll() is not None:
         return
     process.send_signal(signal.SIGTERM)
@@ -75,6 +84,16 @@ def _stop_via_cli(
     environment: dict[str, str],
     process: subprocess.Popen[str],
 ) -> None:
+    """
+    Stop the installed server through its command-line interface and verify a graceful shutdown.
+
+    Parameters:
+        command (Path): Path to the installed command.
+        state_dir (Path): Server data directory passed to the stop command.
+        cwd (Path): Working directory for the command.
+        environment (dict[str, str]): Environment variables for the command.
+        process (subprocess.Popen[str]): Running server process to verify after stopping.
+    """
     result = subprocess.run(
         [str(command), "stop", "--data-dir", str(state_dir)],
         cwd=cwd,
@@ -94,6 +113,18 @@ def _stop_via_cli(
 
 
 def _launch(command: Path, state_dir: Path, cwd: Path, environment: dict[str, str]) -> subprocess.Popen[str]:
+    """
+    Start the installed server on localhost using an ephemeral port.
+
+    Parameters:
+        command (Path): Path to the server command.
+        state_dir (Path): Directory used for server state and data.
+        cwd (Path): Working directory for the server process.
+        environment (dict[str, str]): Environment variables for the server process.
+
+    Returns:
+        subprocess.Popen[str]: The running server process.
+    """
     return subprocess.Popen(
         [str(command), "serve", "--no-open", "--host", "127.0.0.1", "--port", "0", "--data-dir", str(state_dir)],
         cwd=cwd,
@@ -105,6 +136,21 @@ def _launch(command: Path, state_dir: Path, cwd: Path, environment: dict[str, st
 
 
 def verify(wheel: Path) -> dict[str, object]:
+    """
+    Verify that an installable Room Alignment wheel functions independently of the source tree.
+
+    Parameters:
+        wheel (Path): Path to the wheel file to validate and test.
+
+    Returns:
+        dict[str, object]: JSON-compatible verification results, including the wheel
+        hash, version, readiness, endpoint status, shutdown status, state integrity,
+        and lock reuse.
+
+    Raises:
+        RuntimeError: If the wheel is missing required resources or any installation,
+        runtime, endpoint, shutdown, or state-integrity check fails.
+    """
     wheel = wheel.resolve(strict=True)
     with zipfile.ZipFile(wheel) as archive:
         members = set(archive.namelist())

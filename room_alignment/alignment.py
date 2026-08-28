@@ -521,6 +521,19 @@ def candidate_pairs(
     max_per_clip: int = DEFAULT_MAX_CANDIDATES_PER_CLIP,
     max_pairs: int = DEFAULT_MAX_PAIR_COMPARISONS,
 ) -> list[tuple[dict[str, Any], dict[str, Any]]]:
+    """
+    Select bounded cross-source clip pairs for audio alignment analysis.
+
+    Parameters:
+        project (dict[str, Any]): Project data containing clips and logical sources.
+        assets (dict[str, dict[str, Any]]): Asset metadata keyed by asset ID.
+        uncertainty_us (int): Maximum timestamp uncertainty used when identifying nearby clips.
+        max_per_clip (int): Maximum number of comparisons assigned to each clip.
+        max_pairs (int): Maximum number of comparison pairs to return.
+
+    Returns:
+        list[tuple[dict[str, Any], dict[str, Any]]]: Candidate clip pairs ranked by reference status, temporal overlap, and start-time proximity.
+    """
     reference_sources = {
         source["id"] for source in project.get("logicalSources", []) if source.get("reference")
     }
@@ -611,6 +624,18 @@ def _huber_graph_adjustments(
     *,
     regularize: bool = False,
 ) -> tuple[dict[str, int], dict[str, list[dict[str, Any]]]]:
+    """
+    Estimate clip alignment adjustments from confidence-weighted graph evidence.
+
+    Parameters:
+        clip_ids (Iterable[str]): Clip identifiers to adjust.
+        edges (list[dict[str, Any]]): Pairwise alignment evidence containing clip identifiers, corrections, and confidence values.
+        reference_clip_id (str): Clip identifier whose adjustment remains zero.
+        regularize (bool): Whether to include a zero-adjustment preference for each non-reference clip.
+
+    Returns:
+        tuple[dict[str, int], dict[str, list[dict[str, Any]]]]: Rounded clip adjustments and the evidence grouped by clip identifier.
+    """
     values = {clip_id: 0.0 for clip_id in clip_ids}
     support: defaultdict[str, list[dict[str, Any]]] = defaultdict(list)
     for edge in edges:
@@ -681,6 +706,15 @@ def _huber_graph_adjustments(
 def _reference_reachable_clip_ids(
     edges: list[dict[str, Any]], reference_clip_id: str
 ) -> set[str]:
+    """Return the clip IDs connected to the specified reference clip through evidence edges.
+
+    Parameters:
+        edges (list[dict[str, Any]]): Evidence edges containing `leftClipId` and `rightClipId`.
+        reference_clip_id (str): Clip ID from which to traverse the evidence graph.
+
+    Returns:
+        set[str]: Clip IDs reachable from the reference clip, including the reference itself; an empty set if no reference ID is provided.
+    """
     adjacency: defaultdict[str, set[str]] = defaultdict(set)
     for edge in edges:
         left_id = str(edge["leftClipId"])
@@ -732,7 +766,15 @@ def _audio_components(edges: list[dict[str, Any]]) -> list[tuple[set[str], list[
 
 
 def estimate_drift_ppm(anchors: list[tuple[int, int]]) -> int | None:
-    """Estimate bounded rate only from separated, mutually consistent anchors."""
+    """
+    Estimate bounded clock drift from consistent correction anchors separated over time.
+
+    Parameters:
+        anchors (list[tuple[int, int]]): Source timestamps and their corresponding correction values, in microseconds.
+
+    Returns:
+        int | None: The estimated drift in parts per million, or `None` when the anchors are insufficient, inconsistent, or imply a rate outside the supported range.
+    """
 
     if len(anchors) < 2:
         return None
@@ -766,6 +808,24 @@ def analyze_project_alignment(
     canceled: Callable[[], bool] | None = None,
     progress: Callable[[float, str], None] | None = None,
 ) -> dict[str, Any]:
+    """
+    Analyze project clips and produce pending audio-alignment proposals.
+
+    Parameters:
+        project (dict[str, Any]): Project data containing clips, logical sources, and revision metadata.
+        assets (dict[str, dict[str, Any]]): Asset metadata keyed by asset ID.
+        signatures (AudioSignatureCache): Cache used to prepare and load audio signatures.
+        overlap_search_extension_us (int): Timestamp uncertainty extension used when selecting and correlating overlap candidates. Must be between 0 and 300 seconds.
+        canceled (Callable[[], bool] | None): Optional callback indicating whether analysis should be canceled.
+        progress (Callable[[float, str], None] | None): Optional callback receiving progress values and status messages.
+
+    Returns:
+        dict[str, Any]: A pending alignment-set object containing alignment proposals, evidence, summary statistics, configuration, limitations, and integrity digests.
+
+    Raises:
+        DomainError: If the overlap search extension is outside the range of 0 to 300 seconds.
+        AlignmentCanceled: If cancellation is requested during analysis.
+    """
     if not 0 <= overlap_search_extension_us <= 300_000_000:
         raise DomainError(
             "VALIDATION_FAILED",

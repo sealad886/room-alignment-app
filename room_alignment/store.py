@@ -479,6 +479,12 @@ class ClosingConnection(sqlite3.Connection):
 
 class Store:
     def __init__(self, path: Path):
+        """
+        Initialize the store at the specified database path, applying the schema and required migrations.
+
+        Parameters:
+            path (Path): Location of the SQLite database.
+        """
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
@@ -520,6 +526,7 @@ class Store:
 
     @staticmethod
     def _stale_legacy_alignment_proposals(db: sqlite3.Connection) -> None:
+        """Marks pending legacy alignment proposal sets as stale after an algorithm version change."""
         rows = list(
             db.execute(
                 "SELECT id,set_json FROM alignment_proposal_sets "
@@ -538,6 +545,11 @@ class Store:
             )
 
     def application_settings(self) -> dict[str, Any]:
+        """Retrieve the persisted application settings, or default settings when none have been stored.
+
+        Returns:
+            dict[str, Any]: Application settings with their update timestamp.
+        """
         with self.connect() as db:
             row = db.execute(
                 "SELECT overlap_search_extension_us,text_scale_percent,color_scheme,render_video_codec,render_resolution,updated_at "
@@ -555,7 +567,15 @@ class Store:
             }
 
     def update_application_settings(self, settings: dict[str, Any]) -> dict[str, Any]:
-        allowed = {"overlapSearchExtensionUs", "textScalePercent", "colorScheme", "renderVideoCodec", "renderResolution"}
+        """Validate and persist application settings."""
+
+        allowed = {
+            "overlapSearchExtensionUs",
+            "textScalePercent",
+            "colorScheme",
+            "renderVideoCodec",
+            "renderResolution",
+        }
         unknown = set(settings) - allowed
         if unknown:
             raise DomainError(
@@ -564,6 +584,19 @@ class Store:
             )
         current = self.application_settings()
         def integer_setting(name: str, fallback: object) -> int:
+            """
+            Retrieve and validate an integer application setting.
+
+            Parameters:
+                name (str): Name of the setting to retrieve.
+                fallback (object): Value to use when the setting is absent.
+
+            Returns:
+                int: The setting value.
+
+            Raises:
+                DomainError: If the setting value is not an integer.
+            """
             value = settings.get(name, fallback)
             if not isinstance(value, int) or isinstance(value, bool):
                 raise DomainError("VALIDATION_FAILED", f"{name} must be an integer")
@@ -627,6 +660,16 @@ class Store:
         }
 
     def _backup_before_migration(self) -> None:
+        """
+        Back up and atomically migrate an existing database to the current schema.
+
+        Creates a verified pre-migration backup for older databases, stages schema
+        updates and legacy data backfills, verifies the migrated database, and replaces
+        the original database only after successful completion.
+
+        Raises:
+            RuntimeError: If the pre-migration backup or staged database fails integrity verification.
+        """
         if not self.path.exists() or self.path.stat().st_size == 0:
             return
         source = sqlite3.connect(self.path)
@@ -2554,6 +2597,22 @@ class Store:
         command_type: str,
         payload: dict[str, Any],
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """
+        Prepare an alignment proposal command by validating its proposal set, acceptance scope, confirmations, and preview, then expanding applicable proposals into alignment payloads.
+
+        Parameters:
+            db (sqlite3.Connection): Database connection used to validate the proposal set and acceptance preview.
+            project_id (str): Identifier of the project receiving the command.
+            project_revision (int): Current project revision.
+            command_type (str): Alignment proposal command to prepare.
+            payload (dict[str, Any]): Command payload containing the proposal set and command-specific options.
+
+        Returns:
+            tuple[dict[str, Any], dict[str, Any]]: Expanded command payload and the corresponding proposal-set status update.
+
+        Raises:
+            DomainError: If the proposal set is missing, stale, belongs to another project, has no applicable proposals, or requires missing confirmation.
+        """
         proposal_set_id = str(payload.get("proposalSetId", ""))
         row = db.execute(
             "SELECT * FROM alignment_proposal_sets WHERE id=?", (proposal_set_id,)
@@ -2690,6 +2749,21 @@ class Store:
         scope: dict[str, Any],
         already_resolved: set[str],
     ) -> list[dict[str, Any]]:
+        """
+        Selects unresolved alignment proposals that match the requested confidence mode and scope.
+
+        Parameters:
+            proposal_set (dict[str, Any]): Proposal set containing candidate proposals.
+            mode (str): Acceptance mode used to filter proposals.
+            scope (dict[str, Any]): Scope constraints for clips, sources, events, or aligned time ranges.
+            already_resolved (set[str]): Proposal IDs that have already been resolved.
+
+        Returns:
+            list[dict[str, Any]]: Proposals eligible for acceptance under the mode and scope.
+
+        Raises:
+            DomainError: If the scope kind, identifier arrays, or aligned range bounds are invalid.
+        """
         kind = str(scope.get("kind", "PROJECT"))
         if kind not in {"PROJECT", "EVENTS", "SOURCES", "ALIGNED_RANGE", "CLIPS"}:
             raise DomainError("SCOPE_INVALID", "Unknown alignment acceptance scope")
@@ -2710,6 +2784,15 @@ class Store:
             raise DomainError("SCOPE_INVALID", "Aligned acceptance range must have positive duration")
 
         def in_scope(item: dict[str, Any]) -> bool:
+            """
+            Determine whether an alignment item falls within the configured acceptance scope.
+
+            Parameters:
+                item (dict[str, Any]): Alignment item to evaluate.
+
+            Returns:
+                bool: True if the item matches the configured scope, or if no recognized scope is configured, false otherwise.
+            """
             if kind == "CLIPS":
                 return str(item.get("clipId")) in clip_ids
             if kind == "SOURCES":
@@ -2745,6 +2828,19 @@ class Store:
     def _normalized_acceptance_scope_db(
         db: sqlite3.Connection, project: dict[str, Any], scope: dict[str, Any]
     ) -> dict[str, Any]:
+        """
+        Normalize an event-based acceptance scope to the project's clip scope.
+
+        Parameters:
+            project (dict[str, Any]): Project data containing the cluster generation and clips.
+            scope (dict[str, Any]): Acceptance scope to normalize.
+
+        Returns:
+            dict[str, Any]: The original scope or an equivalent clip-based scope.
+
+        Raises:
+            DomainError: If an event scope lacks event IDs or the project's cluster generation.
+        """
         if str(scope.get("kind", "PROJECT")) != "EVENTS":
             return scope
         event_ids = [str(value) for value in scope.get("eventIds", [])]
@@ -2773,6 +2869,7 @@ class Store:
         command_type: str,
         payload: dict[str, Any],
     ) -> None:
+        """Validate that accepted alignment suggestions match their pending canonical evidence for the specified project revision."""
         requested = (
             [payload]
             if command_type == "AcceptAlignmentSuggestion"
@@ -2888,6 +2985,15 @@ class Store:
         return timeline_section_proposal(project, assets, gap_mode)
 
     def _migrate_legacy_project(self, project: dict[str, Any]) -> dict[str, Any]:
+        """
+        Migrate a legacy project representation to the canonical project format.
+
+        Parameters:
+            project (dict[str, Any]): Project data in either canonical or legacy format.
+
+        Returns:
+            dict[str, Any]: Canonical project data, preserving already canonical projects and converting legacy projects when their media records are available.
+        """
         if "logicalSources" in project:
             canonical = copy.deepcopy(project)
             for source in canonical.get("logicalSources", []):
@@ -3157,6 +3263,22 @@ class Store:
         return [latest[key] for key in sorted(latest)]
 
     def save_alignment_proposal_set(self, proposal_set: dict[str, Any]) -> dict[str, Any]:
+        """
+        Persist an alignment proposal set for a project.
+
+        Parameters:
+            proposal_set (dict[str, Any]): Proposal-set data containing its project,
+                revision, selection and input digests, algorithm metadata, status,
+                summary, proposals, and timestamps.
+
+        Returns:
+            dict[str, Any]: The stored proposal set, marked stale when the project,
+                selection, or overlap-search settings changed during analysis.
+
+        Raises:
+            DomainError: If required proposal-set fields are missing or the project
+                does not exist.
+        """
         value = copy.deepcopy(proposal_set)
         required = {
             "id",
@@ -3254,6 +3376,14 @@ class Store:
             ]
 
     def alignment_proposal_set(self, proposal_set_id: str) -> dict[str, Any]:
+        """Retrieve an alignment proposal set by its identifier.
+
+        Parameters:
+            proposal_set_id (str): Identifier of the alignment proposal set.
+
+        Returns:
+            dict[str, Any]: The stored alignment proposal set.
+        """
         with self.connect() as db:
             row = db.execute(
                 "SELECT set_json FROM alignment_proposal_sets WHERE id=?", (proposal_set_id,)
@@ -3265,6 +3395,17 @@ class Store:
     def create_alignment_acceptance_preview(
         self, project_id: str, request: dict[str, Any]
     ) -> dict[str, Any]:
+        """Create a time-limited preview of accepting applicable alignment proposals.
+
+        Parameters:
+            project_id (str): Identifier of the project whose proposals are previewed.
+            request (dict[str, Any]): Preview options, including the expected project revision,
+                proposal set, acceptance mode, and optional scope.
+
+        Returns:
+            dict[str, Any]: The persisted preview, including affected items, coverage changes,
+                warnings, readiness, and an expiration time.
+        """
         project = self.project(project_id)
         expected_revision = int(request.get("expectedRevision", 0))
         if expected_revision != int(project["revision"]):
@@ -3382,6 +3523,18 @@ class Store:
         accepted_proposal_ids: list[str],
         rejected_proposal_ids: list[str],
     ) -> None:
+        """Update an alignment proposal set with accepted and rejected proposal decisions.
+
+        Parameters:
+            db (sqlite3.Connection): Database connection used to update the proposal set.
+            proposal_set_id (str): Identifier of the proposal set to update.
+            status (str): Terminal status to apply when the set is rejected, stale, or superseded.
+            accepted_proposal_ids (list[str]): Proposal identifiers accepted by the caller.
+            rejected_proposal_ids (list[str]): Proposal identifiers rejected by the caller.
+
+        Raises:
+            DomainError: If the alignment proposal set does not exist.
+        """
         row = db.execute(
             "SELECT set_json FROM alignment_proposal_sets WHERE id=?", (proposal_set_id,)
         ).fetchone()
@@ -5017,10 +5170,28 @@ def _raw_timestamp_from_evidence(record: MediaRecord) -> object | None:
 
 
 def _stable_migration_id(prefix: str, *parts: object) -> str:
+    """Generate a deterministic migration identifier from a prefix and ordered parts.
+
+    Parameters:
+        prefix (str): Prefix for the identifier.
+        *parts (object): Values used to derive the identifier suffix.
+
+    Returns:
+        str: An identifier consisting of the prefix and a deterministic digest suffix.
+    """
     return f"{prefix}_{digest_json([str(part) for part in parts])[:24]}"
 
 
 def _merge_time_ranges(ranges: Iterable[tuple[int, int]]) -> list[tuple[int, int]]:
+    """
+    Merge overlapping or adjacent time ranges into sorted, disjoint ranges.
+
+    Parameters:
+        ranges (Iterable[tuple[int, int]]): Time ranges represented by start and end positions.
+
+    Returns:
+        list[tuple[int, int]]: Sorted merged ranges, excluding ranges whose end is not greater than their start.
+    """
     merged: list[list[int]] = []
     for start, end in sorted((int(start), int(end)) for start, end in ranges if end > start):
         if merged and start <= merged[-1][1]:
@@ -5031,6 +5202,7 @@ def _merge_time_ranges(ranges: Iterable[tuple[int, int]]) -> list[tuple[int, int
 
 
 def _storage_relative_path(root_id: str, relative_path: str) -> str:
+    """Build a root-qualified storage path from a root identifier and relative path."""
     return f"{root_id}::{relative_path}"
 
 

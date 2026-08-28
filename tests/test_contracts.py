@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parent.parent
 
 class ContractTests(unittest.TestCase):
     def test_openapi_contract_has_versioned_route_families_and_command_union(self):
+        """Validate the OpenAPI route, security, response, command, and project-clip contract requirements."""
         contract = json.loads((ROOT / "contracts" / "openapi.json").read_text(encoding="utf-8"))
         self.assertEqual(contract["openapi"], "3.1.0")
         paths = contract["paths"]
