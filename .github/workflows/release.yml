@@ -52,30 +52,26 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.11"
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: "22"
-      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
-        with:
-          version: "0.12.6"
-          enable-cache: false
+      - name: Verify pre-provisioned build tools
+        run: |
+          command -v python3.11
+          command -v node
+          command -v uv
+          uv --version | grep -F 'uv 0.12.6'
       - name: Record release identity
         id: release-identity
         run: echo "commit_sha=$GITHUB_SHA" >> "$GITHUB_OUTPUT"
       - name: Validate release tag and version
-        run: python scripts/check_release_version.py
+        run: python3.11 scripts/check_release_version.py
       - name: Verify pre-provisioned media tools
         run: |
           command -v ffmpeg
           command -v ffprobe
       - name: Run source checks
         run: |
-          python -m unittest discover -s tests -p 'test_*.py' -v
-          python scripts/generate_api_client.py --check
-          python -m compileall -q room_alignment scripts tests
+          python3.11 -m unittest discover -s tests -p 'test_*.py' -v
+          python3.11 scripts/generate_api_client.py --check
+          python3.11 -m compileall -q room_alignment scripts tests
           node --check web/api-client.js
           node --check web/app.js
       - name: Build wheel and source archive
@@ -85,7 +81,7 @@ jobs:
         run: |
           wheels=(dist/*.whl)
           test "${#wheels[@]}" -eq 1
-          python scripts/verify_package.py "${wheels[0]}"
+          python3.11 scripts/verify_package.py "${wheels[0]}"
       - name: Create checksums
         working-directory: dist
         run: shasum -a 256 ./* > SHA256SUMS
