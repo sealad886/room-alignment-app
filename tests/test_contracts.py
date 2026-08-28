@@ -36,6 +36,7 @@ class ContractTests(unittest.TestCase):
             "/projects/{projectId}/commands/delta",
             "/projects/{projectId}/alignment-summary",
             "/projects/{projectId}/timeline-window",
+            "/projects/{projectId}/aligned-source-point",
             "/projects/{projectId}/program-at",
             "/projects/{projectId}/alignment-jobs",
             "/projects/{projectId}/render-plans",

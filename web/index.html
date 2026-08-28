@@ -99,6 +99,7 @@
               <button class="btn" id="continue-cut" data-view="cut" disabled>Continue to Cut</button>
             </div>
           </section>
+          <div class="monitor-context"><div><span>Videos at timeline playhead</span><strong id="monitor-context-status">Loading exact clip coverage…</strong></div><button class="btn" id="center-playhead" type="button">Center playhead</button></div>
           <div id="source-monitors" class="source-monitors"></div>
           <div class="transport"><button class="round" data-action="rewind" aria-label="Back ten seconds">−10</button><button class="play" data-action="play" aria-label="Play">▶</button><button class="round" data-action="forward" aria-label="Forward ten seconds">+10</button><input class="scrubber" type="range" min="0" max="100" value="30" aria-label="Shared playhead"><span class="mono" id="align-time">00:00:09.300</span></div>
           <div class="timeline-controls" aria-label="Evidence timeline scale controls"><button class="btn" id="timeline-zoom-out" type="button" aria-label="Zoom evidence timeline out">−</button><label><span>Timeline scale</span><input id="timeline-zoom" type="range" min="0" max="100" step="5" value="0" aria-label="Evidence timeline zoom"></label><button class="btn" id="timeline-zoom-in" type="button" aria-label="Zoom evidence timeline in">+</button><button class="btn" id="timeline-fit" type="button">Fit evidence</button><output id="timeline-window-label" for="timeline-zoom">Full evidence span</output></div>
@@ -185,6 +186,6 @@
     </dialog>
   </div>
   <script src="/api-client.js"></script>
-  <script type="module" src="/app.js?v=session-recovery-1"></script>
+  <script type="module" src="/app.js?v=grounded-video-wall-1"></script>
 </body>
 </html>

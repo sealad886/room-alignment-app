@@ -886,6 +886,12 @@ class Handler(BaseHTTPRequestHandler):
                     lanes or None,
                 )
             )
+        if len(parts) == 5 and parts[2] == "projects" and parts[4] == "aligned-source-point":
+            return self.respond(
+                APP.store.project_aligned_source_point(
+                    parts[3], _int_input(_required_query(query, "alignedUs"), "alignedUs")
+                )
+            )
         if (
             len(parts) == 5
             and parts[2] == "projects"

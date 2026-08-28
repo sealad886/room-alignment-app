@@ -57,6 +57,8 @@ const state = {
   timelineStartUs: 0,
   timelineEndUs: 1,
   timelineZoom: 0,
+  monitorPoint: null,
+  monitorPointRequestVersion: 0,
   programDurationUs: 1,
   renderPlan: null,
   artifact: null,
@@ -245,18 +247,6 @@ function selectedAlignmentClip(source = state.sources[state.selectedSource]) {
   return clip;
 }
 
-function sourceClipAt(source, alignedUs = currentAlignedUs()) {
-  const covering = source?.clips.filter(clip => {
-    const media = state.mediaById.get(clip.assetId);
-    const alignment = clipAlignment(clip);
-    const rate = (1_000_000 + Number(alignment.ratePpm || 0)) / 1_000_000;
-    const startUs = Number(alignment.anchorAlignedUs || 0) - Number(alignment.anchorSourceUs || 0) * rate;
-    const endUs = startUs + Number(media?.durationUs || 0) * rate;
-    return startUs <= alignedUs && alignedUs < endUs;
-  }) || [];
-  return covering[0] || source?.clips.find(item => item.id === state.selectedClipId) || source?.clips[0] || null;
-}
-
 function sourceTimeSeconds(clip, alignedUs = currentAlignedUs()) {
   const alignment = clipAlignment(clip);
   const numerator = 1_000_000 + Number(alignment.ratePpm || 0);
@@ -265,24 +255,94 @@ function sourceTimeSeconds(clip, alignedUs = currentAlignedUs()) {
 }
 
 function syncSourceMonitors(shouldPlay = state.playing) {
-  $$("#source-monitors video").forEach(video => {
-    const source = sourceById(video.dataset.sourceId);
-    const clip = sourceClipAt(source);
-    if (!clip) return;
-    if (video.dataset.assetId !== clip.assetId) {
-      video.dataset.assetId = clip.assetId;
-      video.src = `/api/v1/media/${encodeURIComponent(clip.assetId)}/preview`;
+  if (!state.project) return;
+  const alignedUs = currentAlignedUs();
+  const point = state.monitorPoint;
+  if (!point || point.revision !== state.project?.revision || alignedUs < point.validFromAlignedUs || alignedUs >= point.validUntilAlignedUs) {
+    $("#monitor-context-status").textContent = `Finding exact clips at ${formatUs(alignedUs)}…`;
+    $$("#source-monitors .source-monitor").forEach(monitor => monitor.classList.add("syncing"));
+    scheduleSourceMonitorPoint(alignedUs);
+    return;
+  }
+  applySourceMonitorPoint(point, shouldPlay);
+}
+
+function seekMonitorVideo(video, shouldPlay) {
+  const target = Number(video.dataset.targetSeconds || 0);
+  if (video.readyState >= 1 && Number.isFinite(video.duration)) {
+    const bounded = Math.min(target, Math.max(0, video.duration - 0.02));
+    if (Math.abs(video.currentTime - bounded) > 0.12) {
+      if (typeof video.fastSeek === "function") video.fastSeek(bounded);
+      else video.currentTime = bounded;
     }
-    const target = sourceTimeSeconds(clip);
-    const seek = () => {
-      if (Number.isFinite(video.duration) && Math.abs(video.currentTime - target) > 0.18) {
-        video.currentTime = Math.min(target, Math.max(0, video.duration - 0.02));
-      }
-    };
-    if (video.readyState >= 1) seek(); else video.addEventListener("loadedmetadata", seek, {once: true});
+  }
+  if (shouldPlay) video.play().catch(() => {}); else video.pause();
+}
+
+function applySourceMonitorPoint(point, shouldPlay = state.playing) {
+  const alignedUs = currentAlignedUs();
+  const pointsBySource = new Map(point.sources.map(item => [item.logicalSourceId, item]));
+  const activeClipIds = new Set();
+  $$("#source-monitors .source-monitor").forEach(monitor => {
+    const source = sourceById(monitor.dataset.sourceId);
+    const sourcePoint = pointsBySource.get(monitor.dataset.sourceId);
+    const candidate = sourcePoint?.candidates?.[0] || null;
+    const video = monitor.querySelector("video");
+    const grounding = monitor.querySelector(".monitor-grounding");
+    const timing = monitor.querySelector(".monitor-time");
+    monitor.classList.remove("syncing");
+    monitor.classList.toggle("no-coverage", !candidate);
+    if (!candidate) {
+      video?.pause();
+      monitor.dataset.clipId = "";
+      grounding.textContent = "No recorded clip at playhead";
+      timing.textContent = `Timeline ${formatUs(alignedUs)} · intentionally blank`;
+      monitor.setAttribute("aria-label", `${source?.label || "Source"}: no recorded clip at ${formatUs(alignedUs)}`);
+      return;
+    }
+    activeClipIds.add(candidate.clipId);
+    const clip = clipById(candidate.clipId);
+    if (video.dataset.assetId !== candidate.assetId) {
+      video.dataset.assetId = candidate.assetId;
+      video.src = `/api/v1/media/${encodeURIComponent(candidate.assetId)}/preview`;
+      video.load();
+    }
+    const sourceSeconds = sourceTimeSeconds(clip, alignedUs);
+    video.dataset.targetSeconds = String(sourceSeconds);
     video.muted = source?.id !== state.sources[state.selectedSource]?.id;
-    if (shouldPlay) video.play().catch(() => {}); else video.pause();
+    video.onloadedmetadata = () => seekMonitorVideo(video, state.playing);
+    video.oncanplay = () => { if (state.playing) video.play().catch(() => {}); };
+    seekMonitorVideo(video, shouldPlay);
+    const filename = candidate.relativePath.split("/").at(-1) || candidate.assetId;
+    grounding.textContent = sourcePoint.status === "AMBIGUOUS"
+      ? `${sourcePoint.candidates.length} overlapping clips · ${filename}`
+      : filename;
+    timing.textContent = `Timeline ${formatUs(alignedUs)} · clip ${formatUs(Math.round(sourceSeconds * 1_000_000))}`;
+    monitor.dataset.clipId = candidate.clipId;
+    monitor.setAttribute("aria-label", `${source?.label || "Source"}: ${filename} at timeline ${formatUs(alignedUs)}`);
   });
+  $$("#alignment-tracks [data-timeline-clip]").forEach(node => {
+    node.classList.toggle("monitor-active", activeClipIds.has(node.dataset.timelineClip));
+  });
+  const playheadVisible = alignedUs >= state.timelineStartUs && alignedUs < state.timelineEndUs;
+  $("#monitor-context-status").textContent = playheadVisible
+    ? `${formatUs(alignedUs)} · matching timeline clips highlighted below`
+    : `${formatUs(alignedUs)} · playhead is outside the visible timeline window`;
+}
+
+function scheduleSourceMonitorPoint(alignedUs = currentAlignedUs()) {
+  const version = ++state.monitorPointRequestVersion;
+  clearTimeout(scheduleSourceMonitorPoint.timer);
+  scheduleSourceMonitorPoint.timer = setTimeout(async () => {
+    try {
+      const point = await client.getAlignedSourcePoint({projectId: state.project.id, query: {alignedUs: Math.round(alignedUs)}});
+      if (version !== state.monitorPointRequestVersion || point.revision !== state.project.revision) return;
+      state.monitorPoint = point;
+      applySourceMonitorPoint(point, state.playing);
+    } catch (error) {
+      if (version === state.monitorPointRequestVersion) handleError(error);
+    }
+  }, 24);
 }
 
 function invalidateReviewPreparation() {
@@ -343,6 +403,8 @@ async function refreshPreparationState() {
   state.preparation = preparation;
   state.alignmentSummary = preparation.alignment;
   state.proposalSets = proposalSets;
+  state.monitorPoint = null;
+  state.monitorPointRequestVersion += 1;
   state.programDurationUs = Math.max(1, Number(compiled.durationUs || 0));
   const extent = preparation.alignment.evidenceSpan;
   state.evidenceStartUs = Number(extent.startAlignedUs || 0);
@@ -403,7 +465,7 @@ function renderTimelineControls() {
 async function changeTimelineZoom(zoom, centerUs = currentAlignedUs()) {
   setTimelineViewport(zoom, centerUs);
   await loadTimelineWindow();
-  renderSources();
+  renderTimelineTracks();
   updatePlayheadPositions();
 }
 
@@ -415,7 +477,7 @@ async function panTimeline(fraction) {
   const centerUs = state.evidenceStartUs + visibleSpanUs / 2 + Math.max(0, Math.min(1, fraction)) * availableTravelUs;
   setTimelineViewport(state.timelineZoom, centerUs);
   await loadTimelineWindow();
-  renderSources();
+  renderTimelineTracks();
   updatePlayheadPositions();
 }
 
@@ -978,14 +1040,13 @@ function renderSources() {
     .slice(0, 6);
   $("#source-monitors").innerHTML = monitorSources.map(source => {
     const index = state.sources.findIndex(item => item.id === source.id);
-    const clip = sourceClipAt(source);
-    return `<article class="source-monitor${index === state.selectedSource ? " active" : ""}" data-source="${index}" tabindex="0" role="button" aria-label="Select ${safe(source.label)} source" style="--source-color:${source.color};--source-dark:${source.color}22">
-      ${clip ? `<video muted playsinline preload="metadata" data-source-id="${safe(source.id)}" data-asset-id="${safe(clip.assetId)}" src="/api/v1/media/${encodeURIComponent(clip.assetId)}/preview"></video>` : ""}
-      <div><span>${safe(source.label)}</span><small>${source.clips.length} clips · ${source.offsetUs >= 0 ? "+" : ""}${Math.round(source.offsetUs / 1000)} ms</small></div>
+    return `<article class="source-monitor no-coverage${index === state.selectedSource ? " active" : ""}" data-source="${index}" data-source-id="${safe(source.id)}" tabindex="0" role="button" aria-label="Select ${safe(source.label)} source" style="--source-color:${source.color};--source-dark:${source.color}22">
+      <video muted playsinline preload="auto" data-source-id="${safe(source.id)}" data-asset-id=""></video>
+      <div class="monitor-placeholder" aria-hidden="true"></div>
+      <div class="monitor-overlay"><span class="monitor-source">${safe(source.label)}</span><strong class="monitor-grounding">Finding exact clip…</strong><small class="monitor-time">Timeline ${formatUs(currentAlignedUs())}</small></div>
     </article>`;
   }).join("");
-  $("#alignment-tracks").innerHTML = state.sources.map(source => trackMarkup(source)).join("");
-  $("#source-evidence-tracks").innerHTML = `<div class="timeline-shell">${state.sources.map(source => trackMarkup(source)).join("")}</div>`;
+  renderTimelineTracks();
   const videoOptions = state.sources.map(source => `<option value="${safe(source.id)}">${safe(source.label)}</option>`).join("");
   $("#video-source").innerHTML = videoOptions;
   const fixedClipOptions = state.sources.flatMap(source => source.clips.map((clip, index) => `<option value="clip:${safe(clip.id)}">Clip ${index + 1} · ${safe(source.label)}</option>`)).join("");
@@ -1009,46 +1070,7 @@ function renderSources() {
       }
     };
   });
-  $$('#alignment-tracks [data-drag-source]').forEach(track => {
-    track.onkeydown = event => {
-      if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
-      event.preventDefault();
-      const index = state.sources.findIndex(source => source.id === track.dataset.dragSource);
-      if (index < 0) return;
-      if (index !== state.selectedSource) state.selectedClipId = null;
-      state.selectedSource = index;
-      renderClipSelector(state.sources[index]);
-      renderSourceInspector();
-      const direction = event.key === "ArrowLeft" ? -1 : 1;
-      $("#sync-offset").value = Number($("#sync-offset").value) + direction * (event.shiftKey ? 100 : 10);
-      $("#sync-offset").dispatchEvent(new Event("change"));
-    };
-    track.onpointerdown = event => {
-      const index = state.sources.findIndex(source => source.id === track.dataset.dragSource);
-      if (index < 0) return;
-      if (index !== state.selectedSource) state.selectedClipId = null;
-      state.selectedSource = index;
-      renderClipSelector(state.sources[index]);
-      renderSourceInspector();
-      const startX = event.clientX;
-      const startMs = Number($("#sync-offset").value);
-      const width = Math.max(1, track.querySelector(".track-clips").clientWidth);
-      track.setPointerCapture(event.pointerId);
-      track.onpointermove = moveEvent => {
-        const deltaUs = ((moveEvent.clientX - startX) / width) * Math.max(1, state.timelineEndUs - state.timelineStartUs);
-        $("#sync-offset").value = Math.round(startMs + deltaUs / 1000);
-      };
-      const finishPointer = upEvent => {
-        if (track.hasPointerCapture(upEvent.pointerId)) track.releasePointerCapture(upEvent.pointerId);
-        track.onpointermove = null;
-        track.onpointerup = null;
-        track.onpointercancel = null;
-        $("#sync-offset").dispatchEvent(new Event("change"));
-      };
-      track.onpointerup = finishPointer;
-      track.onpointercancel = finishPointer;
-    };
-  });
+  bindAlignmentTrackInteractions();
   const selected = state.sources[state.selectedSource];
   if (selected) {
     $("#source-label").value = selected.label;
@@ -1059,7 +1081,6 @@ function renderSources() {
   }
   renderSourceInspector();
   renderSuggestions();
-  syncSourceMonitors();
 }
 
 function renderClipSelector(source) {
@@ -2174,6 +2195,7 @@ function setupEvents() {
   $("#timeline-zoom-out").onclick = () => changeTimelineZoom(state.timelineZoom - 10).catch(handleError);
   $("#timeline-zoom-in").onclick = () => changeTimelineZoom(state.timelineZoom + 10).catch(handleError);
   $("#timeline-fit").onclick = () => changeTimelineZoom(0, (state.evidenceStartUs + state.evidenceEndUs) / 2).catch(handleError);
+  $("#center-playhead").onclick = () => changeTimelineZoom(state.timelineZoom, currentAlignedUs()).catch(handleError);
   $("#timeline-pan").oninput = event => queueTimelinePan(Number(event.target.value) / 1000);
   const alignmentTimeline = $("#alignment-timeline");
   alignmentTimeline.onwheel = event => {
@@ -2244,6 +2266,57 @@ function setupEvents() {
       button.classList.add("active");
       $("#edit-panel").classList.toggle("hidden", button.dataset.cutPanel !== "edit");
       $("#segment-provenance").classList.toggle("hidden", button.dataset.cutPanel !== "prov");
+    };
+  });
+  syncSourceMonitors();
+}
+
+function renderTimelineTracks() {
+  $("#alignment-tracks").innerHTML = state.sources.map(source => trackMarkup(source)).join("");
+  $("#source-evidence-tracks").innerHTML = `<div class="timeline-shell">${state.sources.map(source => trackMarkup(source)).join("")}</div>`;
+  bindAlignmentTrackInteractions();
+  if (state.monitorPoint) applySourceMonitorPoint(state.monitorPoint, state.playing);
+}
+
+function bindAlignmentTrackInteractions() {
+  $$('#alignment-tracks [data-drag-source]').forEach(track => {
+    track.onkeydown = event => {
+      if (!["ArrowLeft", "ArrowRight"].includes(event.key)) return;
+      event.preventDefault();
+      const index = state.sources.findIndex(source => source.id === track.dataset.dragSource);
+      if (index < 0) return;
+      if (index !== state.selectedSource) state.selectedClipId = null;
+      state.selectedSource = index;
+      renderClipSelector(state.sources[index]);
+      renderSourceInspector();
+      const direction = event.key === "ArrowLeft" ? -1 : 1;
+      $("#sync-offset").value = Number($("#sync-offset").value) + direction * (event.shiftKey ? 100 : 10);
+      $("#sync-offset").dispatchEvent(new Event("change"));
+    };
+    track.onpointerdown = event => {
+      const index = state.sources.findIndex(source => source.id === track.dataset.dragSource);
+      if (index < 0) return;
+      if (index !== state.selectedSource) state.selectedClipId = null;
+      state.selectedSource = index;
+      renderClipSelector(state.sources[index]);
+      renderSourceInspector();
+      const startX = event.clientX;
+      const startMs = Number($("#sync-offset").value);
+      const width = Math.max(1, track.querySelector(".track-clips").clientWidth);
+      track.setPointerCapture(event.pointerId);
+      track.onpointermove = moveEvent => {
+        const deltaUs = ((moveEvent.clientX - startX) / width) * Math.max(1, state.timelineEndUs - state.timelineStartUs);
+        $("#sync-offset").value = Math.round(startMs + deltaUs / 1000);
+      };
+      const finishPointer = upEvent => {
+        if (track.hasPointerCapture(upEvent.pointerId)) track.releasePointerCapture(upEvent.pointerId);
+        track.onpointermove = null;
+        track.onpointerup = null;
+        track.onpointercancel = null;
+        $("#sync-offset").dispatchEvent(new Event("change"));
+      };
+      track.onpointerup = finishPointer;
+      track.onpointercancel = finishPointer;
     };
   });
 }

@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from .domain import (
     ClipAlignmentTransform,
     DomainError,
+    aligned_source_point,
     alignment_digest,
     alignment_summary,
     apply_command,
@@ -2873,6 +2874,11 @@ class Store:
             resolution_us,
             lane_ids,
         )
+
+    def project_aligned_source_point(self, project_id: str, aligned_us: int) -> dict[str, Any]:
+        project = self.project(project_id)
+        assets = self.media_records(item["assetId"] for item in project.get("clips", []))
+        return aligned_source_point(project, assets, aligned_us)
 
     def project_timeline_section_proposal(
         self, project_id: str, gap_mode: str = "EXCLUDE"

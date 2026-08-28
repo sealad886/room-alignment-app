@@ -466,6 +466,46 @@
         "readyForProgramDraft": {"type": "boolean"}
       }
     },
+    "AlignedSourcePoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["projectId", "revision", "alignedUs", "validFromAlignedUs", "validUntilAlignedUs", "alignmentDigest", "sources"],
+      "properties": {
+        "projectId": {"$ref": "#/$defs/Id"},
+        "revision": {"type": "integer", "minimum": 1},
+        "alignedUs": {"type": "integer"},
+        "validFromAlignedUs": {"type": "integer"},
+        "validUntilAlignedUs": {"type": "integer"},
+        "alignmentDigest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "sources": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["logicalSourceId", "status", "candidates"],
+            "properties": {
+              "logicalSourceId": {"$ref": "#/$defs/Id"},
+              "status": {"enum": ["NO_COVERAGE", "AVAILABLE", "AMBIGUOUS"]},
+              "candidates": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["clipId", "assetId", "relativePath", "startAlignedUs", "endAlignedUs", "sourceUs", "alignmentState", "alignmentConfidence", "alignmentEvidence"],
+                  "properties": {
+                    "clipId": {"$ref": "#/$defs/Id"}, "assetId": {"$ref": "#/$defs/Id"}, "relativePath": {"type": "string"},
+                    "startAlignedUs": {"type": "integer"}, "endAlignedUs": {"type": "integer"}, "sourceUs": {"$ref": "#/$defs/Us"},
+                    "alignmentState": {"enum": ["PROVISIONAL", "ACCEPTED", "REVIEW_REQUIRED", "UNRESOLVED"]},
+                    "alignmentConfidence": {"type": "number", "minimum": 0, "maximum": 1},
+                    "alignmentEvidence": {"type": "array", "items": {"type": "string"}}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "ProjectPreparation": {
       "type": "object",
       "additionalProperties": false,

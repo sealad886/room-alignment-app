@@ -16,6 +16,7 @@ from room_alignment.alignment import (
 )
 from room_alignment.domain import (
     DomainError,
+    aligned_source_point,
     apply_command,
     alignment_digest,
     alignment_summary,
@@ -262,6 +263,21 @@ class AudioAlignmentAlgorithmTests(unittest.TestCase):
 
 
 class EvidenceTimelineTests(unittest.TestCase):
+    def test_aligned_source_point_returns_exact_coverage_and_stable_boundary(self) -> None:
+        assets = [
+            {**media("front", "2025-10-15T12:00:00+00:00", 10_000_000), "sourceCandidateId": "front"},
+            {**media("rear", "2025-10-15T12:00:20+00:00", 10_000_000), "sourceCandidateId": "rear"},
+        ]
+        project = new_project("Monitor", "library", assets, initialize_legacy_program=False)
+        point = aligned_source_point(project, {item["id"]: item for item in assets}, 5_000_000)
+        available = next(item for item in point["sources"] if item["status"] == "AVAILABLE")
+        uncovered = next(item for item in point["sources"] if item["status"] == "NO_COVERAGE")
+        self.assertEqual(available["candidates"][0]["assetId"], "front")
+        self.assertEqual(available["candidates"][0]["sourceUs"], 5_000_000)
+        self.assertEqual(uncovered["candidates"], [])
+        self.assertEqual(point["validFromAlignedUs"], 0)
+        self.assertEqual(point["validUntilAlignedUs"], 10_000_000)
+
     def test_alignment_digest_changes_with_program_eligibility(self) -> None:
         assets = [media("asset", "2025-10-15T12:00:00+00:00")]
         project = new_project("Digest", "library", assets, initialize_legacy_program=False)

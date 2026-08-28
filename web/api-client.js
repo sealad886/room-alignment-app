@@ -105,6 +105,17 @@
     ],
     "queryParameters": {}
   },
+  "getAlignedSourcePoint": {
+    "binary": false,
+    "method": "GET",
+    "path": "/projects/{projectId}/aligned-source-point",
+    "pathParameters": [
+      "projectId"
+    ],
+    "queryParameters": {
+      "alignedUs": true
+    }
+  },
   "getAlignmentSummary": {
     "binary": false,
     "method": "GET",

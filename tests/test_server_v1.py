@@ -337,6 +337,38 @@ class ServerBoundaryTests(unittest.TestCase):
         self.assertEqual(headers["content-range"], "bytes 0-3/10")
         self.assertEqual(payload, "")
 
+    def test_aligned_source_point_is_session_bound_and_exact(self) -> None:
+        source_file = self.source / "point.mp4"
+        source_file.write_bytes(b"media")
+        grant = self.app.store.create_grant(self.source, "READ_ONLY_SOURCE")
+        library = self.app.store.create_library(grant["id"])
+        scan = self.app.store.begin_scan(library["id"], "FULL")
+        self.app.store.save_media_batch(
+            scan["id"],
+            [MediaRecord("point-media", library["id"], "point.mp4", 5, source_file.stat().st_mtime_ns, duration_us=10_000_000)],
+        )
+        self.app.store.finish_scan(scan["id"], "SUCCEEDED", {"videos": 1})
+        project = self.app.store.create_project("Point", library["id"], ["point-media"])
+        project["clips"][0]["alignmentState"] = "ACCEPTED"
+        project["clips"][0]["programEligibility"] = "ELIGIBLE"
+        self.app.store.save_project(project)
+
+        status, _headers, payload = self.request(
+            "GET", f"/api/v1/projects/{project['id']}/aligned-source-point?alignedUs=5000000"
+        )
+        self.assertEqual(status, 401)
+        self.assertEqual(payload["error"]["code"], "UNAUTHENTICATED")
+
+        cookie, _csrf = self.bootstrap()
+        status, _headers, payload = self.request(
+            "GET",
+            f"/api/v1/projects/{project['id']}/aligned-source-point?alignedUs=5000000",
+            cookie=cookie,
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["alignedUs"], 5_000_000)
+        self.assertEqual(payload["sources"][0]["candidates"][0]["assetId"], "point-media")
+
     def test_malformed_client_values_return_stable_validation_errors(self) -> None:
         cookie, csrf = self.bootstrap()
         requests = [
