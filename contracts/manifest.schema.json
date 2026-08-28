@@ -5,7 +5,7 @@
   "type": "object",
   "additionalProperties": false,
   "required": [
-    "schema", "manifestCanonicalization", "artifact", "project", "renderPlan", "programDigest", "renderExecutionDigest", "sourceSetDigest", "provenanceResolutions",
+    "schema", "manifestCanonicalization", "artifact", "project", "renderPlan", "sourceSetDigest", "provenanceResolutions",
     "selectionSnapshot", "alignment", "composition", "sources", "outputTimebase", "videoSlices", "audioSlices", "transforms", "warnings",
     "toolVersions", "fidelity", "manifestCanonicalContentSha256"
   ],
@@ -74,7 +74,7 @@
     "audioSlices": {"type": "array", "items": {"$ref": "./domain.schema.json#/$defs/CompiledAudioSlice"}},
     "transforms": {
       "type": "object",
-      "required": ["profile", "container", "videoCodec", "videoEncoder", "hardwareAccelerated", "audioCodec", "normalization", "sourceMediaUnchanged", "streamCopy", "decodedAndReencoded"],
+      "required": ["profile", "container", "videoCodec", "audioCodec", "normalization", "sourceMediaUnchanged", "streamCopy", "decodedAndReencoded"],
       "properties": {
         "profile": {"enum": ["COMPATIBLE", "ARCHIVAL_LOSSLESS"]}, "container": {"type": "string"},
         "videoCodec": {"type": "string"}, "videoEncoder": {"type": ["string", "null"]}, "hardwareAccelerated": {"type": "boolean"}, "audioCodec": {"type": "string"}, "normalization": {"type": "object"},
