@@ -17,7 +17,7 @@ env:
 jobs:
   build:
     name: Build and verify release artifacts
-    runs-on: macos-14
+    runs-on: [self-hosted, macOS, ARM64, room-alignment]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -36,7 +36,7 @@ jobs:
       - name: Validate release tag and version
         run: python scripts/check_release_version.py
       - name: Install required media tools
-        run: brew install ffmpeg
+        run: command -v ffmpeg >/dev/null || brew install ffmpeg
       - name: Run source checks
         run: |
           python -m unittest discover -s tests -p 'test_*.py' -v

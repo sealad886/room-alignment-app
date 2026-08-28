@@ -50,7 +50,7 @@ jobs:
   package:
     name: Build and verify package
     needs: quality
-    runs-on: macos-14
+    runs-on: [self-hosted, macOS, ARM64, room-alignment]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -65,7 +65,7 @@ jobs:
       - name: Build wheel and source archive
         run: uv build --out-dir dist
       - name: Install required media tools
-        run: brew install ffmpeg
+        run: command -v ffmpeg >/dev/null || brew install ffmpeg
       - name: Verify clean wheel install and runtime
         shell: bash
         run: |
