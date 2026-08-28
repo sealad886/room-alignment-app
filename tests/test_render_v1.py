@@ -221,6 +221,26 @@ class CanonicalRenderTests(unittest.TestCase):
         self.assertIn("hevc_videotoolbox", build_v1_ffmpeg_command(self.store, hevc, self.output / "hevc.mp4"))
         self.assertIn("prores_videotoolbox", build_v1_ffmpeg_command(self.store, prores, self.output / "prores.mov"))
 
+    def test_render_execution_requires_all_mutable_output_fields(self):
+        plan = build_render_plan(
+            self.store,
+            self.project["id"],
+            {"outputGrantId": self.output_grant_id, "filename": "required.mp4"},
+        )
+
+        for missing in ("outputGrantId", "filename", "videoCodec", "resolution"):
+            settings = {
+                "outputGrantId": self.output_grant_id,
+                "filename": "required-copy.mp4",
+                "videoCodec": "H264_VIDEOTOOLBOX",
+                "resolution": "FULL_HD_1080P",
+            }
+            del settings[missing]
+            with self.subTest(missing=missing), self.assertRaisesRegex(
+                DomainError, f"Missing required field: {missing}"
+            ):
+                configure_render_execution(self.store, plan, settings)
+
     def test_archival_execution_preserves_lossless_container_and_codecs(self):
         plan = build_render_plan(
             self.store,
@@ -238,6 +258,7 @@ class CanonicalRenderTests(unittest.TestCase):
             {
                 "outputGrantId": self.output_grant_id,
                 "filename": "archive-copy.mkv",
+                "videoCodec": "H264_VIDEOTOOLBOX",
                 "resolution": "HD_720P",
             },
         )

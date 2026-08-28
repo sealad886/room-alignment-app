@@ -770,6 +770,10 @@ def configure_render_execution(
     store: Store, program_plan: dict[str, Any], settings: dict[str, Any]
 ) -> dict[str, Any]:
     """Bind mutable delivery settings without rebuilding the reviewed program snapshot."""
+    for field in ("outputGrantId", "filename", "videoCodec", "resolution"):
+        value = settings.get(field)
+        if not isinstance(value, str) or not value.strip():
+            raise DomainError("VALIDATION_FAILED", f"Missing required field: {field}")
     plan = json.loads(json.dumps(program_plan))
     archival = plan.get("profile") == "ARCHIVAL_LOSSLESS"
     codec_key = str(settings.get("videoCodec", plan.get("renderVideoCodec", "H264_VIDEOTOOLBOX")))

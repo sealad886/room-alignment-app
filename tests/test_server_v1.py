@@ -104,6 +104,21 @@ class ServerBoundaryTests(unittest.TestCase):
         self.assertEqual("UNAUTHENTICATED", payload["error"]["code"])
         self.assertNotIn(str(self.source), json.dumps(payload))
 
+    def test_render_execution_rejects_missing_mutable_output_fields(self) -> None:
+        cookie, csrf = self.bootstrap()
+        with patch.object(self.app.render, "start") as start:
+            status, _headers, payload = self.request(
+                "POST",
+                "/api/v1/render-plans/plan/render",
+                body={},
+                cookie=cookie,
+                csrf=csrf,
+            )
+
+        self.assertEqual(status, 400)
+        self.assertEqual(payload["error"]["code"], "VALIDATION_FAILED")
+        start.assert_not_called()
+
     def test_application_settings_are_authenticated_persisted_and_csrf_protected(self) -> None:
         cookie, csrf = self.bootstrap()
         status, _headers, settings = self.request("GET", "/api/v1/settings", cookie=cookie)
