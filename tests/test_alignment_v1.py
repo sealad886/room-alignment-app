@@ -473,6 +473,53 @@ class ProgramCompositionTests(unittest.TestCase):
         self.assertEqual(selected["decisionReason"], "deterministic-clip-selection")
         self.assertTrue(compile_program(draft, assets)["valid"])
 
+    def test_optimizer_prefers_audio_capable_overlap_for_follow_video(self) -> None:
+        media_items = [
+            {
+                **media("audible", "2025-10-15T12:00:00+00:00", 10_000_000),
+                "sourceCandidateId": "camera",
+            },
+            {
+                **media("silent", "2025-10-15T12:00:00+00:00", 10_000_000),
+                "sourceCandidateId": "camera",
+                "audio_codec": None,
+                "streams": [],
+            },
+        ]
+        project = new_project(
+            "Overlapping audio coverage",
+            "library",
+            media_items,
+            initialize_legacy_program=False,
+            source_groups=[{"label": "Camera", "assetIds": ["audible", "silent"]}],
+        )
+        for clip in project["clips"]:
+            clip["alignmentState"] = "ACCEPTED"
+            clip["programEligibility"] = "ELIGIBLE"
+            clip["alignmentConfidence"] = (
+                0.7 if clip["assetId"] == "audible" else 0.9
+            )
+        assets = {item["id"]: item for item in media_items}
+        proposal = timeline_section_proposal(project, assets, "EXCLUDE")
+
+        draft = generate_program_draft(
+            project,
+            assets,
+            {
+                "alignmentDigest": proposal["alignmentDigest"],
+                "selectionDigest": project["selectionSnapshot"]["digest"],
+                "gapMode": "EXCLUDE",
+                "sectionProposalDigest": proposal["digest"],
+                "replaceExisting": False,
+            },
+        )
+
+        audible_clip = next(
+            item for item in project["clips"] if item["assetId"] == "audible"
+        )
+        self.assertEqual(draft["videoBlocks"][0]["pinnedClipId"], audible_clip["id"])
+        self.assertTrue(compile_program(draft, assets)["valid"])
+
     def test_slate_gap_generates_provenance_video_and_deliberate_silence(self) -> None:
         project, assets = self.project_with_recorded_gap()
         proposal = timeline_section_proposal(project, assets, "SLATE")

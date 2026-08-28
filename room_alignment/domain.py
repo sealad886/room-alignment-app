@@ -1724,6 +1724,7 @@ def _optimize_keep_section(
                 clip = clip_by_id[str(clip_range["clipId"])]
                 ranked.append(
                     (
+                        not _asset_has_audio(assets.get(str(clip["assetId"]), {})),
                         -float(
                             clip.get(
                                 "alignmentConfidence", 1.0 if "sync" in clip else 0.0
@@ -1734,7 +1735,7 @@ def _optimize_keep_section(
                         clip,
                     )
                 )
-            _confidence_rank, _transform_rank, _clip_id, clip = min(ranked)
+            _audio_rank, _confidence_rank, _transform_rank, _clip_id, clip = min(ranked)
             candidates[source_id] = {
                 "clipId": clip["id"],
                 "confidence": float(clip.get("alignmentConfidence", 1.0 if "sync" in clip else 0.0)),
