@@ -253,6 +253,8 @@ class AudioAlignmentAlgorithmTests(unittest.TestCase):
         self.assertTrue(proposals["reference-right"]["automaticallyAcceptable"])
         self.assertFalse(proposals["later-left"]["automaticallyAcceptable"])
         self.assertFalse(proposals["later-right"]["automaticallyAcceptable"])
+        self.assertTrue(proposals["later-left"]["timestampPriorAcceptable"])
+        self.assertTrue(proposals["later-right"]["timestampPriorAcceptable"])
         self.assertIn(
             "unconfirmed timestamp anchor",
             " ".join(proposals["later-left"]["limitations"]),
@@ -404,6 +406,167 @@ class ProgramCompositionTests(unittest.TestCase):
         project["timelineSections"] = proposal["sections"]
         summary = alignment_summary(project, assets)
         self.assertTrue(summary["readyForProgramDraft"], summary["blockers"])
+
+    def test_explicit_exclude_policy_breaks_the_preparation_deadlock(self) -> None:
+        project, assets = self.project_with_recorded_gap()
+        for clip in project["clips"]:
+            if clip["assetId"].endswith("late"):
+                clip["alignmentState"] = "PROVISIONAL"
+                clip["programEligibility"] = "HELD_FOR_REVIEW"
+
+        preparation = project_preparation(project, assets)
+        self.assertFalse(preparation["alignment"]["readyForProgramDraft"])
+        self.assertTrue(preparation["compositionResolvesAlignment"])
+        self.assertTrue(preparation["canGenerateProgramDraft"])
+
+        proposal = timeline_section_proposal(project, assets, "EXCLUDE")
+        draft = generate_program_draft(
+            project,
+            assets,
+            {
+                "alignmentDigest": proposal["alignmentDigest"],
+                "selectionDigest": project["selectionSnapshot"]["digest"],
+                "gapMode": "EXCLUDE",
+                "sectionProposalDigest": proposal["digest"],
+                "replaceExisting": False,
+            },
+        )
+        self.assertEqual(
+            [(item["startAlignedUs"], item["endAlignedUs"], item["mode"]) for item in draft["timelineSections"]],
+            [(0, 10_000_000, "KEEP"), (10_000_000, 30_000_000, "EXCLUDE")],
+        )
+        self.assertTrue(compile_program(draft, assets)["valid"])
+
+    def test_optimizer_pins_the_best_overlapping_clip_from_one_source(self) -> None:
+        media_items = [
+            {**media("lower", "2025-10-15T12:00:00+00:00", 10_000_000), "sourceCandidateId": "camera"},
+            {**media("higher", "2025-10-15T12:00:00+00:00", 10_000_000), "sourceCandidateId": "camera"},
+        ]
+        project = new_project(
+            "Overlapping source clips",
+            "library",
+            media_items,
+            initialize_legacy_program=False,
+            source_groups=[{"label": "Camera", "assetIds": ["lower", "higher"]}],
+        )
+        for clip in project["clips"]:
+            clip["alignmentState"] = "ACCEPTED"
+            clip["programEligibility"] = "ELIGIBLE"
+            clip["alignmentConfidence"] = 0.7 if clip["assetId"] == "lower" else 0.9
+            clip["alignmentEvidence"] = ["timestamp-prior"]
+        assets = {item["id"]: item for item in media_items}
+        proposal = timeline_section_proposal(project, assets, "EXCLUDE")
+        draft = generate_program_draft(
+            project,
+            assets,
+            {
+                "alignmentDigest": proposal["alignmentDigest"],
+                "selectionDigest": project["selectionSnapshot"]["digest"],
+                "gapMode": "EXCLUDE",
+                "sectionProposalDigest": proposal["digest"],
+                "replaceExisting": False,
+            },
+        )
+        selected = draft["videoBlocks"][0]
+        higher_clip = next(item for item in project["clips"] if item["assetId"] == "higher")
+        self.assertEqual(selected["pinnedClipId"], higher_clip["id"])
+        self.assertEqual(selected["decisionReason"], "deterministic-clip-selection")
+        self.assertTrue(compile_program(draft, assets)["valid"])
+
+    def test_optimizer_prefers_audio_capable_overlap_for_follow_video(self) -> None:
+        media_items = [
+            {
+                **media("audible", "2025-10-15T12:00:00+00:00", 10_000_000),
+                "sourceCandidateId": "camera",
+            },
+            {
+                **media("silent", "2025-10-15T12:00:00+00:00", 10_000_000),
+                "sourceCandidateId": "camera",
+                "audio_codec": None,
+                "streams": [],
+            },
+        ]
+        project = new_project(
+            "Overlapping audio coverage",
+            "library",
+            media_items,
+            initialize_legacy_program=False,
+            source_groups=[{"label": "Camera", "assetIds": ["audible", "silent"]}],
+        )
+        for clip in project["clips"]:
+            clip["alignmentState"] = "ACCEPTED"
+            clip["programEligibility"] = "ELIGIBLE"
+            clip["alignmentConfidence"] = (
+                0.7 if clip["assetId"] == "audible" else 0.9
+            )
+        assets = {item["id"]: item for item in media_items}
+        proposal = timeline_section_proposal(project, assets, "EXCLUDE")
+
+        draft = generate_program_draft(
+            project,
+            assets,
+            {
+                "alignmentDigest": proposal["alignmentDigest"],
+                "selectionDigest": project["selectionSnapshot"]["digest"],
+                "gapMode": "EXCLUDE",
+                "sectionProposalDigest": proposal["digest"],
+                "replaceExisting": False,
+            },
+        )
+
+        audible_clip = next(
+            item for item in project["clips"] if item["assetId"] == "audible"
+        )
+        self.assertEqual(draft["videoBlocks"][0]["pinnedClipId"], audible_clip["id"])
+        self.assertTrue(compile_program(draft, assets)["valid"])
+
+    def test_optimizer_prefers_audio_capable_source_for_follow_video(self) -> None:
+        media_items = [
+            media("audible", "2025-10-15T12:00:00+00:00", 10_000_000),
+            {
+                **media("silent", "2025-10-15T12:00:00+00:00", 10_000_000),
+                "audio_codec": None,
+                "streams": [],
+            },
+        ]
+        project = new_project(
+            "Overlapping source audio",
+            "library",
+            media_items,
+            initialize_legacy_program=False,
+            source_groups=[
+                {"label": "Audible camera", "assetIds": ["audible"]},
+                {"label": "Silent camera", "assetIds": ["silent"]},
+            ],
+        )
+        for clip in project["clips"]:
+            clip["alignmentState"] = "ACCEPTED"
+            clip["programEligibility"] = "ELIGIBLE"
+            clip["alignmentConfidence"] = (
+                0.7 if clip["assetId"] == "audible" else 0.9
+            )
+        assets = {item["id"]: item for item in media_items}
+        proposal = timeline_section_proposal(project, assets, "EXCLUDE")
+
+        draft = generate_program_draft(
+            project,
+            assets,
+            {
+                "alignmentDigest": proposal["alignmentDigest"],
+                "selectionDigest": project["selectionSnapshot"]["digest"],
+                "gapMode": "EXCLUDE",
+                "sectionProposalDigest": proposal["digest"],
+                "replaceExisting": False,
+            },
+        )
+
+        audible_source_id = next(
+            item["logicalSourceId"]
+            for item in project["clips"]
+            if item["assetId"] == "audible"
+        )
+        self.assertEqual(draft["videoBlocks"][0]["logicalSourceId"], audible_source_id)
+        self.assertTrue(compile_program(draft, assets)["valid"])
 
     def test_slate_gap_generates_provenance_video_and_deliberate_silence(self) -> None:
         project, assets = self.project_with_recorded_gap()
@@ -750,6 +913,8 @@ class ProposalSetStoreTests(unittest.TestCase):
             "scope": {"kind": "ALIGNED_RANGE", "startAlignedUs": 14_000, "endAlignedUs": 16_000},
         })
         self.assertEqual(preview["mode"], "TIMESTAMP_PRIOR")
+        self.assertEqual(preview["remainingBlockerCount"], 0)
+        self.assertGreaterEqual(preview["remainingBlockedUs"], 0)
         result = self.store.apply_project_command(project["id"], {
             "commandId": "accept-timestamp", "expectedRevision": project["revision"],
             "commandType": "AcceptAlignmentProposalSet", "payload": {
@@ -781,6 +946,32 @@ class ProposalSetStoreTests(unittest.TestCase):
                 {"kind": "ALIGNED_RANGE", "startAlignedUs": "soon", "endAlignedUs": 5},
                 set(),
             )
+
+    def test_timestamp_acceptance_includes_disconnected_audio_component(self) -> None:
+        proposal_set = {
+            "proposals": [
+                {
+                    "id": "audio-relative",
+                    "clipId": "clip-audio",
+                    "classification": "AUDIO_CONFIRMED",
+                    "automaticallyAcceptable": False,
+                    "timestampPriorAcceptable": True,
+                    "requiresDriftConfirmation": False,
+                },
+                {
+                    "id": "conflict",
+                    "clipId": "clip-conflict",
+                    "classification": "CONFLICTING",
+                    "automaticallyAcceptable": False,
+                    "timestampPriorAcceptable": False,
+                    "requiresDriftConfirmation": False,
+                },
+            ]
+        }
+        selected = self.store._select_alignment_proposals(
+            proposal_set, "TIMESTAMP_PRIOR", {"kind": "PROJECT"}, set()
+        )
+        self.assertEqual([item["id"] for item in selected], ["audio-relative"])
 
 
 if __name__ == "__main__":

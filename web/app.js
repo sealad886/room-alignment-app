@@ -1124,7 +1124,12 @@ function renderSuggestions() {
   const highConfidence = proposalSet.proposals.filter(item => item.automaticallyAcceptable && !accepted.has(item.id) && !rejected.has(item.id));
   const pending = proposalSet.proposals.filter(item => !accepted.has(item.id) && !rejected.has(item.id));
   const review = pending.filter(item => !item.automaticallyAcceptable);
-  const timestampOnly = review.filter(item => item.classification === "TIMESTAMP_ONLY");
+  const timestampOnly = review.filter(item => {
+    const clip = clipById(item.clipId);
+    const clipAlreadyAccepted = clip && (clip.alignmentState || (clip.sync ? "ACCEPTED" : "UNRESOLVED")) === "ACCEPTED";
+    const backendAllowsTimestampAcceptance = item.timestampPriorAcceptable ?? item.classification === "TIMESTAMP_ONLY";
+    return backendAllowsTimestampAcceptance && !clipAlreadyAccepted;
+  });
   const conflicting = review.filter(item => item.classification === "CONFLICTING");
   const unresolved = review.filter(item => item.classification === "UNRESOLVED");
   const blockers = state.alignmentSummary?.blockers || [];
@@ -1167,7 +1172,8 @@ async function acceptTimestampPriors(proposalSet) {
       proposalSetId: proposalSet.id, proposalSetDigest: proposalSet.digest,
       mode: "TIMESTAMP_PRIOR", scope,
     });
-    const message = `${preview.affectedClipCount} non-conflicting clips will use timestamp-prior placement.\n\nAccepted coverage: ${formatUs(preview.acceptedCoverageBeforeUs)} → ${formatUs(preview.acceptedCoverageAfterUs)}\nRemaining blockers: ${preview.resultingReadiness ? "none" : preview.remainingCounts.reviewRequired + preview.remainingCounts.unresolved}\n\nWireless-camera timestamps may reflect hub receipt time rather than exact capture time. Conflicting clips are excluded from this action.`;
+    const remainingBlockers = Number(preview.remainingBlockerCount ?? 0);
+    const message = `${preview.affectedClipCount} non-conflicting clips will use timestamp-prior placement.\n\nAccepted coverage: ${formatUs(preview.acceptedCoverageBeforeUs)} → ${formatUs(preview.acceptedCoverageAfterUs)}\nRemaining blockers: ${preview.resultingReadiness ? "none" : remainingBlockers}\n\nWireless-camera timestamps may reflect hub receipt time rather than exact capture time. Conflicting clips are excluded from this action.`;
     if (!await confirmAction(message, {title: "Accept timestamp placements", confirmLabel: "Accept placements"})) return;
     if (await command("AcceptAlignmentProposalSet", {
       proposalSetId: proposalSet.id, digest: proposalSet.digest, mode: "TIMESTAMP_PRIOR", scope,

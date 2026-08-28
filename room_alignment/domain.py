@@ -776,6 +776,17 @@ def project_preparation(
     )
     source_ready = not provisional_source_ids
     alignment_ready = bool(alignment["readyForProgramDraft"])
+    composition_resolves_alignment = False
+    if source_ready and not alignment_ready:
+        try:
+            section_proposal = timeline_section_proposal(project, assets, "EXCLUDE")
+            composed = copy.deepcopy(project)
+            _set_timeline_sections(composed, {"sections": section_proposal["sections"]})
+            composition_resolves_alignment = bool(
+                alignment_summary(composed, assets)["readyForProgramDraft"]
+            )
+        except DomainError:
+            composition_resolves_alignment = False
     if project.get("review") is not None and not legacy_truncation:
         phase = "REVIEWED"
     elif has_program:
@@ -820,7 +831,9 @@ def project_preparation(
         "programDurationUs": program_duration_us,
         "legacyProgramTruncation": legacy_truncation,
         "canAnalyzeAlignment": bool(project.get("clips")),
-        "canGenerateProgramDraft": source_ready and alignment_ready,
+        "canGenerateProgramDraft": source_ready
+        and (alignment_ready or composition_resolves_alignment),
+        "compositionResolvesAlignment": composition_resolves_alignment,
         "canEnterCut": has_program and not legacy_truncation,
         "canEnterReview": bool(compiled and compiled.get("valid") and not legacy_truncation),
         "blockers": blockers,
@@ -1704,17 +1717,33 @@ def _optimize_keep_section(
                 str(item["clipId"])
             ] = item
         candidates: dict[str, dict[str, Any]] = {}
-        ambiguous_sources: list[str] = []
         for source_id, active in active_by_source.items():
             covering = list(active.values())
-            if len(covering) != 1:
-                ambiguous_sources.append(source_id)
-                continue
-            clip = clip_by_id[str(covering[0]["clipId"])]
+            ranked = []
+            for clip_range in covering:
+                clip = clip_by_id[str(clip_range["clipId"])]
+                ranked.append(
+                    (
+                        not _asset_has_audio(assets.get(str(clip["assetId"]), {})),
+                        -float(
+                            clip.get(
+                                "alignmentConfidence", 1.0 if "sync" in clip else 0.0
+                            )
+                        ),
+                        bool(_clip_alignment(clip).rate_ppm),
+                        str(clip["id"]),
+                        clip,
+                    )
+                )
+            _audio_rank, _confidence_rank, _transform_rank, _clip_id, clip = min(ranked)
             candidates[source_id] = {
                 "clipId": clip["id"],
+                "hasAudio": _asset_has_audio(
+                    assets.get(str(clip["assetId"]), {})
+                ),
                 "confidence": float(clip.get("alignmentConfidence", 1.0 if "sync" in clip else 0.0)),
                 "transformed": bool(_clip_alignment(clip).rate_ppm),
+                "resolvedOverlap": len(covering) > 1,
             }
         if not candidates:
             raise DomainError(
@@ -1723,7 +1752,6 @@ def _optimize_keep_section(
                 {
                     "startAlignedUs": interval_start,
                     "endAlignedUs": interval_end,
-                    "ambiguousSourceIds": sorted(ambiguous_sources),
                 },
             )
         intervals.append(
@@ -1736,22 +1764,27 @@ def _optimize_keep_section(
     if not intervals:
         raise DomainError("COVERAGE_INVALID", "A kept section has no accepted video coverage")
 
-    layers: list[dict[str, tuple[tuple[int, int, int], str | None]]] = []
+    layers: list[dict[str, tuple[tuple[int, int, int, int], str | None]]] = []
     for interval_index, interval in enumerate(intervals):
         duration_us = int(interval["endAlignedUs"]) - int(interval["startAlignedUs"])
-        layer: dict[str, tuple[tuple[int, int, int], str | None]] = {}
+        layer: dict[str, tuple[tuple[int, int, int, int], str | None]] = {}
         for source_id, candidate in sorted(interval["candidates"].items()):
+            audio_cost = 0 if candidate["hasAudio"] else duration_us
             confidence_cost = -round(float(candidate["confidence"]) * duration_us)
             transform_cost = duration_us if candidate["transformed"] else 0
             if interval_index == 0:
-                layer[source_id] = ((confidence_cost, 0, transform_cost), None)
+                layer[source_id] = (
+                    (audio_cost, confidence_cost, 0, transform_cost),
+                    None,
+                )
                 continue
             options = []
             for previous_source, (previous_cost, _predecessor) in layers[-1].items():
                 cost = (
-                    previous_cost[0] + confidence_cost,
-                    previous_cost[1] + int(previous_source != source_id),
-                    previous_cost[2] + transform_cost,
+                    previous_cost[0] + audio_cost,
+                    previous_cost[1] + confidence_cost,
+                    previous_cost[2] + int(previous_source != source_id),
+                    previous_cost[3] + transform_cost,
                 )
                 options.append((cost, previous_source))
             layer[source_id] = min(options, key=lambda item: (item[0], item[1]))
@@ -1770,13 +1803,20 @@ def _optimize_keep_section(
         end_us = start_program_us + int(interval["endAlignedUs"]) - start_aligned_us
         candidate = interval["candidates"][source_id]
         reason = (
-            "coverage-continuity"
+            "deterministic-clip-selection"
+            if candidate["resolvedOverlap"]
+            else "coverage-continuity"
             if blocks and blocks[-1]["logicalSourceId"] == source_id
             else "higher-alignment-confidence"
             if candidate["confidence"] >= 0.9
             else "usable-unambiguous-coverage"
         )
-        if blocks and blocks[-1]["endUs"] == start_us and blocks[-1]["logicalSourceId"] == source_id:
+        if (
+            blocks
+            and blocks[-1]["endUs"] == start_us
+            and blocks[-1]["logicalSourceId"] == source_id
+            and blocks[-1]["pinnedClipId"] == candidate["clipId"]
+        ):
             blocks[-1]["endUs"] = end_us
             blocks[-1]["endAlignedUs"] = int(interval["endAlignedUs"])
             continue
@@ -1786,7 +1826,7 @@ def _optimize_keep_section(
                 "startUs": start_us,
                 "endUs": end_us,
                 "logicalSourceId": source_id,
-                "pinnedClipId": None,
+                "pinnedClipId": candidate["clipId"],
                 "syntheticSlateId": None,
                 "sectionId": section["id"],
                 "startAlignedUs": int(interval["startAlignedUs"]),
@@ -1820,16 +1860,6 @@ def generate_program_draft(
             "Source identities must be confirmed before a first cut is generated",
             {"provisionalSourceIds": provisional_sources},
         )
-    readiness = alignment_summary(project, assets)
-    if not readiness["readyForProgramDraft"]:
-        raise DomainError(
-            "COVERAGE_INVALID",
-            "Accepted alignment does not yet cover every required interval",
-            {
-                "unresolvedSoleCoverageUs": readiness["coverage"]["unresolvedSoleCoverageUs"],
-                "conflicts": readiness["conflicts"],
-            },
-        )
     result = copy.deepcopy(project)
     gap_mode = payload.get("gapMode")
     if gap_mode is not None:
@@ -1840,6 +1870,16 @@ def generate_program_draft(
                 "Composition proposal changed before the program draft was generated",
             )
         _set_timeline_sections(result, {"sections": proposal["sections"]})
+    readiness = alignment_summary(result, assets)
+    if not readiness["readyForProgramDraft"]:
+        raise DomainError(
+            "COVERAGE_INVALID",
+            "Accepted alignment does not yet cover every required interval",
+            {
+                "unresolvedSoleCoverageUs": readiness["coverage"]["unresolvedSoleCoverageUs"],
+                "conflicts": readiness["conflicts"],
+            },
+        )
     sections = result.get("timelineSections", [])
     if not sections:
         raise DomainError(

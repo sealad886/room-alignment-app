@@ -237,7 +237,7 @@
     "AlignmentProposal": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "clipId", "assetId", "classification", "proposedAlignment", "confidence", "automaticallyAcceptable", "requiresDriftConfirmation", "evidence", "limitations", "inputFingerprintDigest"],
+      "required": ["id", "clipId", "assetId", "classification", "proposedAlignment", "confidence", "automaticallyAcceptable", "timestampPriorAcceptable", "requiresDriftConfirmation", "evidence", "limitations", "inputFingerprintDigest"],
       "properties": {
         "id": {"$ref": "#/$defs/Id"},
         "clipId": {"$ref": "#/$defs/Id"},
@@ -255,6 +255,7 @@
         "rejectedOutlierCount": {"type": "integer", "minimum": 0},
         "timestampUncertaintyUs": {"type": ["integer", "null"], "minimum": 0},
         "automaticallyAcceptable": {"type": "boolean"},
+        "timestampPriorAcceptable": {"type": "boolean"},
         "requiresDriftConfirmation": {"type": "boolean"},
         "evidence": {"type": "array", "items": {"$ref": "#/$defs/AlignmentEvidence"}},
         "limitations": {"type": "array", "items": {"type": "string"}},
@@ -468,7 +469,7 @@
     "ProjectPreparation": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["projectId", "revision", "phase", "sourceIdentity", "alignment", "hasProgram", "programDurationUs", "legacyProgramTruncation", "canAnalyzeAlignment", "canGenerateProgramDraft", "canEnterCut", "canEnterReview", "blockers"],
+      "required": ["projectId", "revision", "phase", "sourceIdentity", "alignment", "hasProgram", "programDurationUs", "legacyProgramTruncation", "canAnalyzeAlignment", "canGenerateProgramDraft", "compositionResolvesAlignment", "canEnterCut", "canEnterReview", "blockers"],
       "properties": {
         "projectId": {"$ref": "#/$defs/Id"},
         "revision": {"type": "integer", "minimum": 1},
@@ -490,6 +491,7 @@
         "legacyProgramTruncation": {"type": "boolean"},
         "canAnalyzeAlignment": {"type": "boolean"},
         "canGenerateProgramDraft": {"type": "boolean"},
+        "compositionResolvesAlignment": {"type": "boolean"},
         "canEnterCut": {"type": "boolean"},
         "canEnterReview": {"type": "boolean"},
         "blockers": {"type": "array", "items": {"type": "object", "required": ["code"], "properties": {"code": {"enum": ["SOURCE_IDENTITY_UNCONFIRMED", "ALIGNMENT_REVIEW_REQUIRED", "PROGRAM_TRUNCATES_ALIGNED_MEDIA"]}}, "additionalProperties": true}}
