@@ -1738,6 +1738,9 @@ def _optimize_keep_section(
             _audio_rank, _confidence_rank, _transform_rank, _clip_id, clip = min(ranked)
             candidates[source_id] = {
                 "clipId": clip["id"],
+                "hasAudio": _asset_has_audio(
+                    assets.get(str(clip["assetId"]), {})
+                ),
                 "confidence": float(clip.get("alignmentConfidence", 1.0 if "sync" in clip else 0.0)),
                 "transformed": bool(_clip_alignment(clip).rate_ppm),
                 "resolvedOverlap": len(covering) > 1,
@@ -1761,22 +1764,27 @@ def _optimize_keep_section(
     if not intervals:
         raise DomainError("COVERAGE_INVALID", "A kept section has no accepted video coverage")
 
-    layers: list[dict[str, tuple[tuple[int, int, int], str | None]]] = []
+    layers: list[dict[str, tuple[tuple[int, int, int, int], str | None]]] = []
     for interval_index, interval in enumerate(intervals):
         duration_us = int(interval["endAlignedUs"]) - int(interval["startAlignedUs"])
-        layer: dict[str, tuple[tuple[int, int, int], str | None]] = {}
+        layer: dict[str, tuple[tuple[int, int, int, int], str | None]] = {}
         for source_id, candidate in sorted(interval["candidates"].items()):
+            audio_cost = 0 if candidate["hasAudio"] else duration_us
             confidence_cost = -round(float(candidate["confidence"]) * duration_us)
             transform_cost = duration_us if candidate["transformed"] else 0
             if interval_index == 0:
-                layer[source_id] = ((confidence_cost, 0, transform_cost), None)
+                layer[source_id] = (
+                    (audio_cost, confidence_cost, 0, transform_cost),
+                    None,
+                )
                 continue
             options = []
             for previous_source, (previous_cost, _predecessor) in layers[-1].items():
                 cost = (
-                    previous_cost[0] + confidence_cost,
-                    previous_cost[1] + int(previous_source != source_id),
-                    previous_cost[2] + transform_cost,
+                    previous_cost[0] + audio_cost,
+                    previous_cost[1] + confidence_cost,
+                    previous_cost[2] + int(previous_source != source_id),
+                    previous_cost[3] + transform_cost,
                 )
                 options.append((cost, previous_source))
             layer[source_id] = min(options, key=lambda item: (item[0], item[1]))
