@@ -35,8 +35,10 @@ jobs:
           enable-cache: false
       - name: Validate release tag and version
         run: python scripts/check_release_version.py
-      - name: Install required media tools
-        run: command -v ffmpeg >/dev/null || brew install ffmpeg
+      - name: Verify pre-provisioned media tools
+        run: |
+          command -v ffmpeg
+          command -v ffprobe
       - name: Run source checks
         run: |
           python -m unittest discover -s tests -p 'test_*.py' -v
